@@ -1,5 +1,6 @@
 //! authcore — shared core for the authenticator app (PRD stage S1).
 
+pub mod account;
 pub mod base32;
 pub mod crypto;
 pub mod device_slot;

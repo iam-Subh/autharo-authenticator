@@ -22,6 +22,7 @@
 use std::sync::Mutex;
 
 use anyhow::{anyhow, Context, Result};
+use authcore::account;
 use authcore::crypto::{VaultKey, XChaChaCipher};
 use authcore::device_slot::{self, OpenRequest, SetupRequest, SlotState};
 use authcore::entry::{OtpEntry, Payload};
@@ -336,6 +337,97 @@ pub fn finish_device_open_with_pin(
     let meta = take_meta()?;
     meta.clear_failed_unlocks()?;
     open_vault_with_key(&vault_path, meta, key)
+}
+
+// ---------------------------------------------------------------------------
+// Sync account slots (sections 9.2.1, 9.2.3). No server exists until S4.
+// ---------------------------------------------------------------------------
+
+/// The recovery phrase, returned once at sign-up and never stored (FR-55).
+pub struct RecoveryPhraseView {
+    /// The 24 BIP-39 words, space separated.
+    pub phrase: String,
+    /// Zero-based positions the user must confirm before sign-up completes
+    /// (section 9.2.3 step 4).
+    pub confirm_indices: Vec<u32>,
+}
+
+/// Creates the password and recovery slots around the vault key this device
+/// already holds.
+///
+/// The vault must be unlocked, because the slots wrap the key it holds.
+/// Section 9.2.4 forbids generating a new one: every entry is already
+/// encrypted under the existing key, and replacing it would orphan all of
+/// them.
+///
+/// Nothing is sent anywhere. The server arrives in S4; until then the slots
+/// sit in the metadata file waiting to be uploaded.
+pub fn create_account(email: String, password: String) -> Result<RecoveryPhraseView> {
+    let key = CURRENT_KEY
+        .lock()
+        .map_err(|_| lock_poisoned())?
+        .clone()
+        .ok_or_else(|| anyhow!("Unlock the vault before creating an account."))?;
+
+    with_meta(|meta| {
+        let (_, phrase) = account::create_account(meta, &email, &password, &key)
+            .map_err(|error| anyhow!("{error}"))?;
+
+        let confirm_indices = phrase
+            .indices_to_confirm()
+            .map_err(|error| anyhow!("{error}"))?
+            .into_iter()
+            .map(|index| index as u32)
+            .collect();
+
+        Ok(RecoveryPhraseView {
+            phrase: phrase.as_str().to_string(),
+            confirm_indices,
+        })
+    })
+}
+
+/// The email address of the sync account, or `None` on a local-only device.
+#[flutter_rust_bridge::frb(sync)]
+pub fn account_email() -> Result<Option<String>> {
+    with_meta(|meta| {
+        Ok(account::load(meta)
+            .map_err(|error| anyhow!("{error}"))?
+            .map(|account| account.email))
+    })
+}
+
+/// Opens the vault with the account password (section 9.2.1).
+pub fn unlock_with_password(vault_path: String, password: String) -> Result<()> {
+    let key = with_meta(|meta| {
+        account::unlock_with_password(meta, &password).map_err(|error| anyhow!("{error}"))
+    })?;
+    open_vault_with_key(&vault_path, take_meta()?, key)
+}
+
+/// Opens the vault with the 24-word recovery phrase (section 16.4).
+pub fn unlock_with_recovery(vault_path: String, phrase: String) -> Result<()> {
+    let key = with_meta(|meta| {
+        account::unlock_with_recovery(meta, &phrase).map_err(|error| anyhow!("{error}"))
+    })?;
+    open_vault_with_key(&vault_path, take_meta()?, key)
+}
+
+/// The authentication key that stage S4 will send to the server.
+///
+/// Derived on demand and never stored. Returned as lowercase hex because it
+/// exists only to be put in a request body, and there is no request to make
+/// yet — this is here so S4 has the derivation already tested.
+pub fn derive_auth_key(password: String) -> Result<String> {
+    with_meta(|meta| {
+        let slot = account::load(meta)
+            .map_err(|error| anyhow!("{error}"))?
+            .and_then(|account| account.password_slot)
+            .ok_or_else(|| anyhow!("This device has no password slot."))?;
+
+        let key = account::derive_auth_key(&password, &slot).map_err(|error| anyhow!("{error}"))?;
+        Ok(key.iter().map(|byte| format!("{byte:02x}")).collect())
+    })
 }
 
 /// What this native library was built from (NFR-13).

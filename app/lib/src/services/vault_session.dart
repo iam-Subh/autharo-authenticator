@@ -145,6 +145,9 @@ class VaultSession implements LockTarget, LockPolicyStore {
     }
   }
 
+  /// The resolved vault file path. [load] must run first.
+  String get vaultPath => _requirePath();
+
   /// FR-35: consecutive failed unlock attempts.
   int get failedAttempts => rust.failedUnlockAttempts();
 

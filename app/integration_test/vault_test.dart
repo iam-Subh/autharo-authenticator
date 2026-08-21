@@ -414,4 +414,95 @@ void main() {
       );
     });
   });
+
+  /// The sync account slots on a real device (sections 9.2.1, 9.2.3).
+  ///
+  /// No server exists yet, so what is proved here is the derivation and the
+  /// slot handling: that the account wraps the key the device already holds,
+  /// and that both ways back return exactly that key.
+  group('sync account slots', () {
+    const email = 'rupsa@example.com';
+    const password = 'correct horse battery staple';
+
+    test('an account wraps the existing vault key and recovery returns it',
+        () async {
+      final now = DateTime.now().millisecondsSinceEpoch;
+
+      // An entry that exists before the account does. If sign-up replaced the
+      // vault key, this is what would be lost.
+      final added = await rust.addFromUri(
+        uri: 'otpauth://totp/BeforeAccount:someone?secret=$rfcSecret',
+        nowMs: now,
+      );
+
+      final recovery = await rust.createAccount(email: email, password: password);
+
+      expect(recovery.phrase.split(' ').length, 24, reason: 'BIP-39, 24 words');
+      expect(recovery.confirmIndices.length, 3, reason: 'section 9.2.3 step 4');
+      expect(recovery.confirmIndices.every((i) => i < 24), isTrue);
+      expect(rust.accountEmail(), email);
+
+      // The entry added before sign-up is still readable, which is only true
+      // if the vault key did not change.
+      final entries = await rust.listEntries(nowUnixSeconds: 59);
+      expect(
+        entries.map((e) => e.id),
+        contains(added.addedId),
+        reason: 'creating an account must not re-key the vault',
+      );
+
+      // Lock, then come back in through the recovery phrase rather than the
+      // keystore. This is the path a new device would take.
+      session.lock();
+      expect(rust.isVaultOpen(), isFalse);
+
+      await rust.unlockWithRecovery(
+        vaultPath: session.vaultPath,
+        phrase: recovery.phrase,
+      );
+      expect(rust.isVaultOpen(), isTrue);
+
+      final afterRecovery = await rust.listEntries(nowUnixSeconds: 59);
+      expect(
+        afterRecovery.map((e) => e.id),
+        contains(added.addedId),
+        reason: 'recovery returned a different key',
+      );
+
+      await rust.deleteEntry(id: added.addedId!, nowMs: now);
+    });
+
+    test('the password slot opens the vault and the wrong one does not',
+        () async {
+      session.lock();
+
+      await expectLater(
+        rust.unlockWithPassword(
+          vaultPath: session.vaultPath,
+          password: 'not the password',
+        ),
+        throwsA(anything),
+      );
+      expect(rust.isVaultOpen(), isFalse);
+
+      await rust.unlockWithPassword(
+        vaultPath: session.vaultPath,
+        password: password,
+      );
+      expect(rust.isVaultOpen(), isTrue);
+    });
+
+    test('the authentication key is derived, deterministic, and unstored',
+        () async {
+      final first = await rust.deriveAuthKey(password: password);
+      final second = await rust.deriveAuthKey(password: password);
+
+      expect(first, hasLength(64), reason: '32 bytes as hex');
+      expect(first, second, reason: 'S4 must be able to reproduce it');
+      expect(
+        await rust.deriveAuthKey(password: 'a different password'),
+        isNot(first),
+      );
+    });
+  });
 }

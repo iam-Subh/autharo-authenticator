@@ -103,6 +103,53 @@ Future<void> finishDeviceOpenWithPin({
   pin: pin,
 );
 
+/// Creates the password and recovery slots around the vault key this device
+/// already holds.
+///
+/// The vault must be unlocked, because the slots wrap the key it holds.
+/// Section 9.2.4 forbids generating a new one: every entry is already
+/// encrypted under the existing key, and replacing it would orphan all of
+/// them.
+///
+/// Nothing is sent anywhere. The server arrives in S4; until then the slots
+/// sit in the metadata file waiting to be uploaded.
+Future<RecoveryPhraseView> createAccount({
+  required String email,
+  required String password,
+}) => RustLib.instance.api.crateApiVaultCreateAccount(
+  email: email,
+  password: password,
+);
+
+/// The email address of the sync account, or `None` on a local-only device.
+String? accountEmail() => RustLib.instance.api.crateApiVaultAccountEmail();
+
+/// Opens the vault with the account password (section 9.2.1).
+Future<void> unlockWithPassword({
+  required String vaultPath,
+  required String password,
+}) => RustLib.instance.api.crateApiVaultUnlockWithPassword(
+  vaultPath: vaultPath,
+  password: password,
+);
+
+/// Opens the vault with the 24-word recovery phrase (section 16.4).
+Future<void> unlockWithRecovery({
+  required String vaultPath,
+  required String phrase,
+}) => RustLib.instance.api.crateApiVaultUnlockWithRecovery(
+  vaultPath: vaultPath,
+  phrase: phrase,
+);
+
+/// The authentication key that stage S4 will send to the server.
+///
+/// Derived on demand and never stored. Returned as lowercase hex because it
+/// exists only to be put in a request body, and there is no request to make
+/// yet — this is here so S4 has the derivation already tested.
+Future<String> deriveAuthKey({required String password}) =>
+    RustLib.instance.api.crateApiVaultDeriveAuthKey(password: password);
+
 /// Reports what produced this `.so`.
 ///
 /// Exists because a stale library was once packaged and reported as a
@@ -429,6 +476,32 @@ class LockPolicyView {
           runtimeType == other.runtimeType &&
           timeoutSeconds == other.timeoutSeconds &&
           lockOnBackground == other.lockOnBackground;
+}
+
+/// The recovery phrase, returned once at sign-up and never stored (FR-55).
+class RecoveryPhraseView {
+  /// The 24 BIP-39 words, space separated.
+  final String phrase;
+
+  /// Zero-based positions the user must confirm before sign-up completes
+  /// (section 9.2.3 step 4).
+  final Uint32List confirmIndices;
+
+  const RecoveryPhraseView({
+    required this.phrase,
+    required this.confirmIndices,
+  });
+
+  @override
+  int get hashCode => phrase.hashCode ^ confirmIndices.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is RecoveryPhraseView &&
+          runtimeType == other.runtimeType &&
+          phrase == other.phrase &&
+          confirmIndices == other.confirmIndices;
 }
 
 /// The stored slot, on its way to the platform to be unwrapped.
