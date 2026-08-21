@@ -5,6 +5,7 @@
 //! in this layer changes when it does.
 
 use authcore::hlc::{Hlc, HlcClock};
+use authcore::crypto::VaultKey;
 use authcore::store::{MetaStore, Record, Store, new_entry_id};
 
 const DEVICE: u64 = 0xa91b_7f0e_44d2_c318;
@@ -367,4 +368,93 @@ fn a_current_database_is_left_alone() {
 fn a_missing_database_is_not_an_error() {
     let paths = Paths::new();
     assert!(!authcore::store::discard_legacy_plaintext_vault(&paths.vault, &paths.meta).unwrap());
+}
+
+/// SQLCipher, proved from outside the library.
+///
+/// The decisive check is the file header. A plain SQLite database begins with
+/// the ASCII bytes "SQLite format 3"; an encrypted one does not, because the
+/// header is encrypted along with everything else. Asserting on the bytes
+/// rather than on an API result means the test cannot pass because some
+/// wrapper reported success.
+#[test]
+fn the_vault_file_is_encrypted_by_sqlcipher() {
+    let paths = Paths::new();
+    let key = VaultKey::from_slice(&[5u8; 32]).unwrap();
+
+    {
+        let meta = MetaStore::open(&paths.meta).unwrap();
+        let mut store =
+            Store::open(&paths.vault, meta, Some(&key.sqlcipher_key())).unwrap();
+        store
+            .write_local(
+                &record("secret-entry", Hlc::new(1000, 0, DEVICE), b"findthisbody"),
+                None,
+            )
+            .unwrap();
+    }
+
+    let bytes = std::fs::read(&paths.vault).unwrap();
+    assert!(!bytes.is_empty(), "the file should have been written");
+
+    assert!(
+        !bytes.starts_with(b"SQLite format 3"),
+        "the file still has a plain SQLite header, so it is not encrypted"
+    );
+    let text = String::from_utf8_lossy(&bytes);
+    assert!(!text.contains("findthisbody"), "a record body is readable");
+    assert!(
+        !text.contains("secret-entry"),
+        "an entry identifier is readable"
+    );
+    assert!(
+        !text.contains("CREATE TABLE"),
+        "the schema is readable, so SQLCipher is not covering the file"
+    );
+}
+
+/// The key has to be required, not merely accepted.
+#[test]
+fn an_encrypted_vault_will_not_open_without_its_key() {
+    let paths = Paths::new();
+    let key = VaultKey::from_slice(&[6u8; 32]).unwrap();
+
+    {
+        let meta = MetaStore::open(&paths.meta).unwrap();
+        let mut store =
+            Store::open(&paths.vault, meta, Some(&key.sqlcipher_key())).unwrap();
+        store
+            .write_local(&record("e1", Hlc::new(1000, 0, DEVICE), b"body"), None)
+            .unwrap();
+    }
+
+    // No key at all.
+    let meta = MetaStore::open(&paths.meta).unwrap();
+    assert!(
+        Store::open(&paths.vault, meta, None).is_err(),
+        "an encrypted file must not open unkeyed"
+    );
+
+    // The wrong key.
+    let wrong = VaultKey::from_slice(&[7u8; 32]).unwrap();
+    let meta = MetaStore::open(&paths.meta).unwrap();
+    assert!(
+        Store::open(&paths.vault, meta, Some(&wrong.sqlcipher_key())).is_err(),
+        "a wrong key must not open the file"
+    );
+
+    // And the right key still does.
+    let meta = MetaStore::open(&paths.meta).unwrap();
+    let store = Store::open(&paths.vault, meta, Some(&key.sqlcipher_key())).unwrap();
+    assert_eq!(store.get("e1").unwrap().unwrap().ciphertext, b"body");
+}
+
+/// The database key and the record key must be different, or the two layers
+/// would fall together.
+#[test]
+fn the_database_key_is_not_the_record_key() {
+    let key = VaultKey::from_slice(&[8u8; 32]).unwrap();
+    let record_key_hex: String = key.record_key().iter().map(|b| format!("{b:02x}")).collect();
+
+    assert_ne!(key.sqlcipher_key().as_str(), record_key_hex);
 }

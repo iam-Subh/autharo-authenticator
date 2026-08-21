@@ -322,8 +322,16 @@ impl Store {
     ) -> Result<Self> {
         if let Some(key) = sqlcipher_key {
             // Must be the first statement on the connection: SQLCipher reads
-            // the key before touching the file header.
-            vault.pragma_update(None, "key", format!("x'{key}'"))?;
+            // the key before it touches the file header.
+            //
+            // The `x'...'` form supplies a raw key and skips SQLCipher's own
+            // PBKDF2. That is correct here and not a shortcut: the input is
+            // already a uniformly random HKDF subkey, so stretching it would
+            // add cost without adding entropy. A passphrase would need the KDF.
+            //
+            // Built by hand rather than through `pragma_update`, which quotes
+            // its argument and would turn the blob literal into a string.
+            vault.execute_batch(&format!("PRAGMA key = \"x'{key}'\";"))?;
         }
         // Foreign keys are off by default in SQLite, and the outbox references
         // the entry table.

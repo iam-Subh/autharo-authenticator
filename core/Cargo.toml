@@ -10,7 +10,13 @@ getrandom = "0.4.3"
 hkdf = "0.13.0"
 hmac = "0.13.0"
 percent-encoding = "2.3.2"
-rusqlite = { version = "0.40.2", features = ["bundled"] }
+# SQLCipher rather than plain SQLite (section 12.1). The key comes from the
+# device slot: VaultKey::sqlcipher_key, a separate HKDF subkey from the one
+# that encrypts records, so a weakness in either construction stays there.
+#
+# `bundled-sqlcipher-vendored-openssl` builds both from source, which needs a
+# Windows Perl to configure OpenSSL. See README.md if this fails to build.
+rusqlite = { version = "0.40", features = ["bundled-sqlcipher-vendored-openssl"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 sha1 = "0.11.0"

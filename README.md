@@ -9,7 +9,7 @@ sequence in section 18: each stage is finished before the next starts.
 |---|---|---|
 | S1 — Core | TOTP, HOTP, Base32, the `otpauth://` parser, SQLite storage | **Done.** RFC 6238 and RFC 4226 vectors pass for SHA-1, SHA-256, and SHA-512 |
 | S2 — First platform | Android. Flutter UI, QR scan, manual entry, list, copy, application lock | **All but the lock interface.** The lock mechanism exists; the PIN, the timeout, and the biometric prompt do not |
-| S3 — Crypto | Vault key, key slots, Argon2id, XChaCha20-Poly1305, recovery key | **Device slot and record encryption done.** SQLCipher blocked, password and recovery slots not started |
+| S3 — Crypto | Vault key, key slots, Argon2id, XChaCha20-Poly1305, recovery key | **Device slot, record encryption, and SQLCipher done.** Password and recovery slots not started |
 | S4 — Backend | API, PostgreSQL schema, key slots, quotas, enumeration resistance | Not started |
 | S5 — Sync | Sync engine, outbox, HLC, conflict resolution, prune watermark | Not started |
 | S6 — Other platforms | Remaining platforms, screen capture, tray and menu bar | Not started |
@@ -23,9 +23,14 @@ though no sync account exists. The chain is:
 ```
 Android Keystore key (non-exportable, StrongBox where present)
   wraps -> vault key (256-bit, generated on first run)
-             |- HKDF "record"    -> XChaCha20-Poly1305 over each entry
-             \- HKDF "sqlcipher" -> the database key (not yet linked, see below)
+             |- HKDF "record"    -> XChaCha20-Poly1305 over each entry payload
+             \- HKDF "sqlcipher" -> SQLCipher over the whole vault.db file
 ```
+
+Two layers, two keys. SQLCipher covers the file — the schema, the row count,
+the change times, the device identifier in each HLC. The record cipher covers
+each payload inside it. Neither key is the vault key and neither is the other,
+so a weakness in either construction stays where it is.
 
 The wrapped vault key lives in `meta.db`, which is deliberately unencrypted:
 it holds the key that opens `vault.db`, so it cannot live inside it. That split
@@ -70,7 +75,15 @@ scripts/
 
 ## Build and test
 
-Requires Rust 1.98+, Flutter 3.44+, and the Android SDK with NDK 28.2.
+Requires Rust 1.98+, Flutter 3.44+, the Android SDK with NDK 28.2, and a
+**Windows Perl** — SQLCipher is built against vendored OpenSSL, and OpenSSL's
+`Configure` is a Perl program that Git Bash's cut-down Perl cannot run.
+Strawberry Perl works; put `C:/Strawberry/perl/bin` ahead of Git Bash's
+`/usr/bin` on PATH, or `Configure` picks the wrong one and fails with
+`IPC/Cmd.pm` errors that do not mention Perl at all.
+
+The first build of OpenSSL takes about ten minutes per target and is cached
+afterwards.
 
 ```sh
 cd core
@@ -100,19 +113,6 @@ and that the artifact exists and was written by *this* run rather than left
 over from an earlier one. Use it for anything whose success matters.
 
 ## Known gaps, deliberately
-
-- **SQLCipher is not linked.** It is the one item in the plan that is blocked
-  rather than unfinished. `libsqlite3-sys` builds SQLCipher against OpenSSL,
-  and vendored OpenSSL needs a Windows Perl to configure; only Git Bash's Perl
-  is present, and it cannot configure a `VC-WIN64A` build. The key it would use
-  is already derived and unused (`VaultKey::sqlcipher_key`), and `Store::open`
-  already takes it, so linking it is a one-line change once the build
-  dependency is available.
-
-  What this costs today: entry *payloads* are encrypted per record, so no
-  secret, issuer, or account name is readable. What stays visible in `vault.db`
-  is the shape around them — how many entries exist, when each changed, and the
-  device identifier inside each HLC.
 
 - **The application lock has a mechanism but no interface.** `lock_vault`
   genuinely drops the vault key rather than hiding the screen, and the
@@ -156,6 +156,10 @@ resolve. Flutter's own default is 36.
 `sdkmanager --list | grep "platforms;android-37"` for an entry with no minor
 version — or when `flutter_secure_storage` stops pinning 37. Until one of those
 happens the pin must stay, and raising it will fail the same way.
+
+**Perl must come from Strawberry, not Git Bash.** Covered under "Build and
+test" above; repeated here because the failure names `IPC/Cmd.pm` and gives no
+hint that the wrong Perl is on PATH.
 
 **Kotlin incremental compilation disabled.** Its cache files could not be
 closed under this build directory on Windows, failing every plugin compile.

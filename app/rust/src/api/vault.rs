@@ -275,10 +275,11 @@ pub fn finish_device_open(vault_path: String, unwrapped: Vec<u8>) -> Result<()> 
 }
 
 fn open_vault_with_key(vault_path: &str, meta: MetaStore, key: VaultKey) -> Result<()> {
-    // The SQLCipher key and the record key are separate derivations of the
-    // vault key. `None` here means the file is not encrypted at the database
-    // level; see README.md, "SQLCipher".
-    let store = Store::open(vault_path, meta, None).context("The vault could not be opened")?;
+    // Two layers, two keys, both HKDF subkeys of the vault key. SQLCipher
+    // covers the file — the schema, the row count, the timestamps — and the
+    // record cipher covers each payload inside it.
+    let store = Store::open(vault_path, meta, Some(&key.sqlcipher_key()))
+        .context("The vault could not be opened")?;
     let vault = Vault::open(store, XChaChaCipher::new(&key))?;
 
     *VAULT.lock().map_err(|_| lock_poisoned())? = Some(vault);
