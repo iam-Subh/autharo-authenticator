@@ -4,15 +4,29 @@ import '../rust/api/vault.dart' as rust;
 import '../services/clipboard_service.dart';
 import '../ui/code_display.dart';
 import '../ui/countdown_ring.dart';
+import '../services/lock_controller.dart';
+import '../services/vault_session.dart';
 import '../vault_controller.dart';
 import 'manual_entry_page.dart';
 import 'scan_page.dart';
+import 'settings_page.dart';
 
 /// The code list (FR-07, FR-21, FR-22, FR-24).
 class EntryListPage extends StatefulWidget {
-  const EntryListPage({super.key, required this.controller});
+  const EntryListPage({
+    super.key,
+    required this.controller,
+    this.session,
+    this.lock,
+  });
 
   final VaultController controller;
+
+  /// Both null in tests that drive the list on its own. The settings action is
+  /// hidden rather than broken when they are, since a settings screen with no
+  /// vault behind it could not do anything anyway.
+  final VaultSession? session;
+  final LockController? lock;
 
   @override
   State<EntryListPage> createState() => _EntryListPageState();
@@ -100,6 +114,22 @@ class _EntryListPageState extends State<EntryListPage> {
         return Scaffold(
           appBar: AppBar(
             title: const Text('Authenticator'),
+            actions: [
+              if (widget.session != null && widget.lock != null)
+                IconButton(
+                  icon: const Icon(Icons.settings_outlined),
+                  tooltip: 'Settings',
+                  onPressed: () => Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (_) => SettingsPage(
+                        session: widget.session!,
+                        lock: widget.lock!,
+                      ),
+                    ),
+                  ),
+                ),
+            ],
             bottom: PreferredSize(
               preferredSize: const Size.fromHeight(56),
               child: Padding(

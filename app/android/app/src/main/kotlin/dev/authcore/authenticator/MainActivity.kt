@@ -1,6 +1,7 @@
 package dev.authcore.authenticator
 
 import android.os.Bundle
+import android.os.SystemClock
 import android.view.WindowManager
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
@@ -23,6 +24,7 @@ import io.flutter.plugin.common.MethodChannel
 class MainActivity : FlutterActivity() {
     private companion object {
         const val CHANNEL = "dev.authcore.authenticator/keystore"
+        const val CLOCK_CHANNEL = "dev.authcore.authenticator/clock"
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -35,6 +37,26 @@ class MainActivity : FlutterActivity() {
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+
+        // FR-33: "Read a monotonic clock that counts across device sleep, such
+        // as SystemClock.elapsedRealtime() on Android."
+        //
+        // Three clocks are available and only this one is correct here.
+        // `System.currentTimeMillis` is the wall clock, which the user can set
+        // backwards. `System.nanoTime` maps to CLOCK_MONOTONIC, which stops
+        // while the device is in deep sleep — a phone locked in a pocket
+        // overnight would come back as though no time had passed.
+        // `elapsedRealtime` maps to CLOCK_BOOTTIME and keeps counting.
+        //
+        // It resets to zero on reboot, which is why the Dart side treats a
+        // value lower than the stored one as expired.
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CLOCK_CHANNEL)
+            .setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "elapsedRealtime" -> result.success(SystemClock.elapsedRealtime())
+                    else -> result.notImplemented()
+                }
+            }
 
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL)
             .setMethodCallHandler { call, result ->

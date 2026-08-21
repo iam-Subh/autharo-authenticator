@@ -13,7 +13,7 @@ import 'vault_keystore.dart';
 /// and will not release it, and Dart is the only place that can talk to both.
 /// This class is that conversation, kept in one file so the handful of moments
 /// where raw key material exists are all visible together.
-class VaultSession implements LockTarget {
+class VaultSession implements LockTarget, LockPolicyStore {
   VaultSession({VaultKeystore? keystore})
       : _keystore = keystore ?? VaultKeystore();
 
@@ -147,6 +147,23 @@ class VaultSession implements LockTarget {
 
   /// FR-35: consecutive failed unlock attempts.
   int get failedAttempts => rust.failedUnlockAttempts();
+
+  /// FR-33a: the lock policy lives in the unencrypted metadata file, so it can
+  /// be read before the vault opens. [load] must run first.
+  @override
+  Future<LockPolicy> loadPolicy() async {
+    final stored = rust.lockPolicy();
+    return LockPolicy(
+      timeout: LockTimeout.fromSeconds(stored.timeoutSeconds),
+      lockOnBackground: stored.lockOnBackground,
+    );
+  }
+
+  @override
+  Future<void> savePolicy(LockPolicy policy) => rust.setLockPolicy(
+        timeoutSeconds: policy.timeout.seconds,
+        lockOnBackground: policy.lockOnBackground,
+      );
 
   /// FR-31: locking zeroes the vault key. The records become unreadable until
   /// the keystore unwraps the slot again.

@@ -14,9 +14,16 @@
 # fails silently; the artifact alone misses a stale file left by an earlier
 # run, which is why the timestamp is compared against the start of this run.
 #
+# A second lesson, learned the same way. An APK is a container: gradle will
+# happily package a stale native library and report success, so a fresh
+# artifact does not mean fresh contents. `--contains` checks that a named entry
+# inside the archive was also rebuilt by this run. Without it, an Android build
+# whose Rust step failed still produced a valid, newer APK carrying the
+# previous `.so`, and the tests that ran against it were testing old code.
+#
 # Usage
 # -----
-#   scripts/verify_build.sh <artifact-path> -- <command> [args...]
+#   scripts/verify_build.sh [--contains <entry>] <artifact-path> -- <command> [args...]
 #
 # Example
 #   scripts/verify_build.sh app/build/app/outputs/flutter-apk/app-debug.apk -- \
@@ -31,6 +38,12 @@ set -eu
 if [ "$#" -lt 3 ]; then
     echo "usage: $0 <artifact-path> -- <command> [args...]" >&2
     exit 2
+fi
+
+contains=""
+if [ "$1" = "--contains" ]; then
+    contains="$2"
+    shift 2
 fi
 
 artifact="$1"
@@ -74,6 +87,19 @@ size=$(wc -c < "$artifact" | tr -d ' ')
 if [ "$size" -eq 0 ]; then
     printf '\nFAILED: %s was written but is empty\n' "$artifact" >&2
     exit 1
+fi
+
+if [ -n "$contains" ]; then
+    if ! command -v unzip >/dev/null 2>&1; then
+        printf '\nWARNING: unzip is unavailable, so %s was not checked for %s\n' \
+            "$artifact" "$contains" >&2
+    elif ! unzip -l "$artifact" 2>/dev/null | grep -q -- "$contains"; then
+        printf '\nFAILED: %s does not contain %s.\n' "$artifact" "$contains" >&2
+        printf 'The build reported success but did not package it.\n' >&2
+        exit 1
+    else
+        printf 'contains: %s\n' "$contains" >&2
+    fi
 fi
 
 printf '\nOK: %s (%s bytes), written by this run\n' "$artifact" "$size" >&2

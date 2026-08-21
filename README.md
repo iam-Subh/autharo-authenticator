@@ -1,6 +1,6 @@
 # Cross-Platform Authenticator App
 
-Implementation of the PRD, version 0.7. The build order is the dependency
+Implementation of the PRD, version 0.9. The build order is the dependency
 sequence in section 18: each stage is finished before the next starts.
 
 ## Stage status
@@ -8,8 +8,8 @@ sequence in section 18: each stage is finished before the next starts.
 | Stage | Content | State |
 |---|---|---|
 | S1 — Core | TOTP, HOTP, Base32, the `otpauth://` parser, SQLite storage | **Done.** RFC 6238 and RFC 4226 vectors pass for SHA-1, SHA-256, and SHA-512 |
-| S2 — First platform | Android. Flutter UI, QR scan, manual entry, list, copy, application lock | **Done**, pending on-device verification of the lock |
-| S3 — Crypto | Vault key, key slots, Argon2id, XChaCha20-Poly1305, recovery key | **Device slot, record encryption, and SQLCipher done.** Password and recovery slots not started |
+| S2 — First platform | Android. Flutter UI, QR scan, manual entry, list, copy, application lock | **Done**, verified on a physical device |
+| S3 — Crypto | Vault key, key slots, Argon2id, XChaCha20-Poly1305, recovery key | **Device slot and record encryption done.** Database encryption not linked (below); password and recovery slots not started |
 | S4 — Backend | API, PostgreSQL schema, key slots, quotas, enumeration resistance | Not started |
 | S5 — Sync | Sync engine, outbox, HLC, conflict resolution, prune watermark | Not started |
 | S6 — Other platforms | Remaining platforms, screen capture, tray and menu bar | Not started |
@@ -46,6 +46,31 @@ weaker thing to attack.
 Turning the PIN on or off rewraps the same vault key. No record is
 re-encrypted, so a half-finished change cannot orphan the vault.
 
+### The timeout measures sleep, not taps
+
+FR-33 requires a monotonic clock that counts across device sleep. Three clocks
+were available and only one is correct:
+
+| Clock | Why not |
+|---|---|
+| Wall clock (`DateTime.now`) | The user can set it backwards, which would hold the vault open |
+| `CLOCK_MONOTONIC` (Dart's `Stopwatch`) | Stops during deep sleep. A phone in a pocket overnight returns as though no time passed |
+| **`SystemClock.elapsedRealtime()`** (`CLOCK_BOOTTIME`) | Counts through both. Chosen |
+
+It resets to zero on reboot, so a reading *lower* than the stored one is
+treated as expired — a reboot cannot mean less time passed.
+
+FR-33a puts the policy in `meta.db`, which is the unencrypted file, because the
+application has to know whether it may open without asking *before* it opens
+anything. A setting that reset at every start would do nothing.
+
+One judgement call worth flagging: FR-33a says the policy "holds a timeout
+value only", and the FR-34 background flag is stored alongside it anyway. The
+same requirement ends "a lock setting that resets at every start does nothing",
+and FR-34's option is a lock setting — leaving it unpersisted would keep the
+sentence's letter and break its point. The "only" is read as a limit on what
+kind of thing goes in the file: a timeout, not a key.
+
 ## The vault is now encrypted at rest
 
 Section 9.2.4's device slot is built, so a local-only vault is encrypted even
@@ -55,23 +80,63 @@ though no sync account exists. The chain is:
 Android Keystore key (non-exportable, StrongBox where present)
   wraps -> vault key (256-bit, generated on first run)
              |- HKDF "record"    -> XChaCha20-Poly1305 over each entry payload
-             \- HKDF "sqlcipher" -> SQLCipher over the whole vault.db file
+             \- HKDF "database"  -> derived, ready, and currently unused
 ```
 
-Two layers, two keys. SQLCipher covers the file — the schema, the row count,
-the change times, the device identifier in each HLC. The record cipher covers
-each payload inside it. Neither key is the vault key and neither is the other,
-so a weakness in either construction stays where it is.
+Section 12.1 defines two layers doing different jobs, and is explicit that one
+is not a substitute for the other:
 
-The wrapped vault key lives in `meta.db`, which is deliberately unencrypted:
-it holds the key that opens `vault.db`, so it cannot live inside it. That split
-is enforced by the types — `MetaStore` opens alone, and `Store` cannot be built
-without one.
+| Layer | Protects | Status |
+|---|---|---|
+| Record encryption (XChaCha20-Poly1305, §9.3) | The secret, the issuer, the account name | **Linked and verified on-device.** Mandatory |
+| Database encryption (§12.1) | The row structure: entry count, change times, the device identifier in each HLC | **Not linked.** Defence in depth; see below |
 
-The evidence is on-device, in `integration_test/vault_test.dart`, against a
-real Android Keystore rather than a stub: it adds an entry, then reads
-`vault.db` back off the device's flash and fails if the secret, the issuer, the
-account name, or even a payload field name appears in it.
+Neither subkey is the vault key and neither is the other, so a weakness in one
+construction stays there. The second key is derived and unused rather than
+absent, so linking a library is a dependency change, not a redesign.
+
+### Database encryption is not linked
+
+Section 12.1 asks that the chosen library and the reason be recorded here. The
+honest record is that there is no page-encrypting build linked today, and the
+reason is worth writing down because it was not obvious.
+
+SQLCipher (`bundled-sqlcipher-vendored-openssl`) was linked and **working on
+the host**: `core/tests/store.rs` asserted on the file's bytes and confirmed no
+`SQLite format 3` header and a file that refused to open unkeyed or under a
+wrong key. Getting there needed Strawberry Perl, since OpenSSL's `Configure` is
+a Perl program that Git Bash's cut-down Perl cannot run.
+
+It was then removed, because **it cannot cross-compile to Android from
+Windows**. OpenSSL's `android-arm64` configuration wants a compiler named
+`aarch64-linux-android-clang`; the Windows NDK ships
+`aarch64-linux-android26-clang.cmd`, and `Configure` exits 255. Android is the
+platform that ships, so a database layer that only works on the development
+host is not the layer section 12.1 is asking for.
+
+Worse, the failure was quiet. Cargokit's error did not fail the gradle build,
+so the APK was packaged with the **previous** `librust_lib_authenticator.so` and
+reported success. See "Verify the build" below for what now catches that.
+
+**The way back is SQLite3 Multiple Ciphers**, which section 12.1 names: it
+carries its own crypto, needs no OpenSSL and therefore no Perl, and supports
+ChaCha20, which the core already uses. No `rusqlite`-compatible crate wraps it
+today, so it means vendoring the amalgamation and compiling it with `cc` — but
+`cc` already cross-compiles cleanly with the NDK clang cargokit configures,
+which is exactly the step OpenSSL fails at.
+
+What this costs meanwhile, from section 12.1's table: the entry count, the
+change times, and the device identifier inside each HLC are visible in
+`vault.db`. **No secret, issuer, or account name is** — the record layer is
+mandatory, is linked, and is verified on-device by reading the file back off
+the phone's flash. Section 12.1: "The database layer is defence in depth. Ship
+it, but do not block the record layer on it."
+
+`VaultKey::sqlcipher_key` and `Store::open`'s key parameter are kept, so
+relinking is a dependency change rather than a redesign.
+`core/tests/store.rs` asserts the gap rather than hiding it: one test fails the
+moment the file stops having a plain SQLite header, which is the signal to
+invert it.
 
 ## Layout
 
@@ -86,6 +151,7 @@ core/            Rust core library (authcore). Every security-critical rule live
     crypto.rs       Vault key, HKDF subkeys, XChaCha20-Poly1305 records (9.2, 9.3)
     device_slot.rs  The device slot state machine (9.2.4)
     pin.rs          Argon2id over the PIN, and FR-31's rules
+    lock_policy.rs  FR-33a: the lock policy, readable before the vault opens
     hlc.rs          Hybrid logical clock timestamps (section 10.2)
     store.rs        meta.db and vault.db (section 12.1)
     vault.rs        The payload/record seam and the RecordCipher trait (9.3)
@@ -95,6 +161,7 @@ app/             Flutter application
     vault_keystore.dart   Channel to the Android Keystore
     vault_session.dart    Open, lock, and wipe: the three-way handshake
     lock_controller.dart  FR-33 and FR-34: when the vault locks itself
+    monotonic_clock.dart  FR-33's clock, and why the other two are wrong
   lib/src/rust/           Generated bridge bindings — do not edit by hand
   android/.../VaultKeystore.kt   The non-exportable wrapping key
   rust_builder/           Vendored cargokit. See "Local workarounds".
@@ -108,15 +175,10 @@ scripts/
 
 ## Build and test
 
-Requires Rust 1.98+, Flutter 3.44+, the Android SDK with NDK 28.2, and a
-**Windows Perl** — SQLCipher is built against vendored OpenSSL, and OpenSSL's
-`Configure` is a Perl program that Git Bash's cut-down Perl cannot run.
-Strawberry Perl works; put `C:/Strawberry/perl/bin` ahead of Git Bash's
-`/usr/bin` on PATH, or `Configure` picks the wrong one and fails with
-`IPC/Cmd.pm` errors that do not mention Perl at all.
+Requires Rust 1.98+, Flutter 3.44+, and the Android SDK with NDK 28.2.
 
-The first build of OpenSSL takes about ten minutes per target and is cached
-afterwards.
+No Perl is needed. It was, briefly, while SQLCipher was linked; see "Database
+encryption is not linked" for why that came back out.
 
 ```sh
 cd core
@@ -143,22 +205,22 @@ as working until the artifact was checked by hand.
 
 `scripts/verify_build.sh` checks both halves — the build tool's exit status,
 and that the artifact exists and was written by *this* run rather than left
-over from an earlier one. Use it for anything whose success matters.
+over from an earlier one.
+
+It also checks *inside* the artifact, which the first version did not, and that
+gap cost real time. An APK is a container: when the Rust step failed, gradle
+still produced a valid, newer APK carrying the previous `.so`, and the script
+passed it. Use `--contains` for anything whose contents matter:
+
+```sh
+sh ../scripts/verify_build.sh --contains librust_lib_authenticator.so   build/app/outputs/flutter-apk/app-debug.apk -- flutter build apk --debug
+```
 
 ## Known gaps, deliberately
-
-- **The lock has not been run on a device yet.** It is built and covered by
-  128 core tests and 18 host tests, but the phone was disconnected before the
-  on-device PIN tests in `integration_test/vault_test.dart` could run. Those
-  are written and waiting.
 
 - **FR-35 counts failures but does not act on them.** The wipe after ten
   failed attempts is P1 and off by default; the counter and the warning exist,
   the automatic wipe does not.
-
-- **The lock settings are not persisted.** `LockController` takes a timeout and
-  a background-lock flag, and the defaults apply on every start. The settings
-  screen that would store a choice in `meta` is not built.
 
 - **The vault key crosses into Dart.** A non-exportable keystore key can only
   be driven from platform code, so the raw key passes through Dart once at

@@ -103,6 +103,16 @@ Future<void> finishDeviceOpenWithPin({
   pin: pin,
 );
 
+LockPolicyView lockPolicy() => RustLib.instance.api.crateApiVaultLockPolicy();
+
+Future<void> setLockPolicy({
+  int? timeoutSeconds,
+  required bool lockOnBackground,
+}) => RustLib.instance.api.crateApiVaultSetLockPolicy(
+  timeoutSeconds: timeoutSeconds,
+  lockOnBackground: lockOnBackground,
+);
+
 /// FR-35: how many unlock attempts have failed in a row.
 int failedUnlockAttempts() =>
     RustLib.instance.api.crateApiVaultFailedUnlockAttempts();
@@ -352,6 +362,30 @@ class EntryView {
           counter == other.counter &&
           favourite == other.favourite &&
           icon == other.icon;
+}
+
+/// The lock policy (FR-33, FR-33a, FR-34).
+///
+/// Read from the unencrypted metadata file, so it is available before the
+/// vault opens — which is the point of FR-33a. The application has to know
+/// whether it may open without asking before it can open anything.
+class LockPolicyView {
+  /// Seconds in the background before locking. `None` is "never".
+  final int? timeoutSeconds;
+  final bool lockOnBackground;
+
+  const LockPolicyView({this.timeoutSeconds, required this.lockOnBackground});
+
+  @override
+  int get hashCode => timeoutSeconds.hashCode ^ lockOnBackground.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is LockPolicyView &&
+          runtimeType == other.runtimeType &&
+          timeoutSeconds == other.timeoutSeconds &&
+          lockOnBackground == other.lockOnBackground;
 }
 
 /// The stored slot, on its way to the platform to be unwrapped.

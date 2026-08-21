@@ -5,6 +5,7 @@ pub mod crypto;
 pub mod device_slot;
 pub mod entry;
 pub mod hlc;
+pub mod lock_policy;
 pub mod otp;
 pub mod otpauth;
 pub mod pin;

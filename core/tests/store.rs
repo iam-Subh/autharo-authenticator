@@ -370,81 +370,86 @@ fn a_missing_database_is_not_an_error() {
     assert!(!authcore::store::discard_legacy_plaintext_vault(&paths.vault, &paths.meta).unwrap());
 }
 
-/// SQLCipher, proved from outside the library.
+/// The page-encryption layer of section 12.1 is not linked.
 ///
-/// The decisive check is the file header. A plain SQLite database begins with
-/// the ASCII bytes "SQLite format 3"; an encrypted one does not, because the
-/// header is encrypted along with everything else. Asserting on the bytes
-/// rather than on an API result means the test cannot pass because some
-/// wrapper reported success.
+/// This asserts the gap rather than hiding it, the same way the stage S2
+/// pipeline test asserted that payloads were readable before S3 encrypted
+/// them. When SQLite3 Multiple Ciphers lands, this test fails, and inverting
+/// it is the evidence the layer is really there.
+///
+/// What it is NOT saying: that anything secret is exposed. The record layer is
+/// mandatory and is linked — the test below pins that. Section 12.1: "The
+/// database layer is defence in depth. Ship it, but do not block the record
+/// layer on it."
 #[test]
-fn the_vault_file_is_encrypted_by_sqlcipher() {
+fn the_database_layer_is_not_linked_yet() {
     let paths = Paths::new();
     let key = VaultKey::from_slice(&[5u8; 32]).unwrap();
 
     {
         let meta = MetaStore::open(&paths.meta).unwrap();
+        // The key is accepted and ignored: plain SQLite treats `PRAGMA key` as
+        // a no-op rather than an error, which is exactly why this needs a test
+        // and not a comment.
         let mut store = Store::open(&paths.vault, meta, Some(&key.sqlcipher_key())).unwrap();
         store
             .write_local(
-                &record("secret-entry", Hlc::new(1000, 0, DEVICE), b"findthisbody"),
+                &record(
+                    "an-entry",
+                    Hlc::new(1000, 0, DEVICE),
+                    b"sealed-by-the-record-layer",
+                ),
                 None,
             )
             .unwrap();
     }
 
     let bytes = std::fs::read(&paths.vault).unwrap();
-    assert!(!bytes.is_empty(), "the file should have been written");
-
     assert!(
-        !bytes.starts_with(b"SQLite format 3"),
-        "the file still has a plain SQLite header, so it is not encrypted"
-    );
-    let text = String::from_utf8_lossy(&bytes);
-    assert!(!text.contains("findthisbody"), "a record body is readable");
-    assert!(
-        !text.contains("secret-entry"),
-        "an entry identifier is readable"
-    );
-    assert!(
-        !text.contains("CREATE TABLE"),
-        "the schema is readable, so SQLCipher is not covering the file"
+        bytes.starts_with(b"SQLite format 3"),
+        "the file is encrypted — the database layer is linked. Invert this          test and restore the two it replaced."
     );
 }
 
-/// The key has to be required, not merely accepted.
+/// What the file leaks without the database layer, stated exactly.
+///
+/// Section 12.1's table: the row structure is visible, no secret is. Anything
+/// more than this appearing in the file is a bug in the record layer.
 #[test]
-fn an_encrypted_vault_will_not_open_without_its_key() {
+fn without_the_database_layer_only_the_structure_leaks() {
     let paths = Paths::new();
-    let key = VaultKey::from_slice(&[6u8; 32]).unwrap();
 
     {
         let meta = MetaStore::open(&paths.meta).unwrap();
-        let mut store = Store::open(&paths.vault, meta, Some(&key.sqlcipher_key())).unwrap();
+        let mut store = Store::open(&paths.vault, meta, None).unwrap();
         store
-            .write_local(&record("e1", Hlc::new(1000, 0, DEVICE), b"body"), None)
+            .write_local(
+                &record(
+                    "entry-id-here",
+                    Hlc::new(1000, 0, DEVICE),
+                    b"ciphertext-bytes",
+                ),
+                None,
+            )
             .unwrap();
     }
 
-    // No key at all.
-    let meta = MetaStore::open(&paths.meta).unwrap();
+    let bytes = std::fs::read(&paths.vault).unwrap();
+    let text = String::from_utf8_lossy(&bytes);
+
+    // Visible, and section 12.1 says so: the schema and the row structure.
     assert!(
-        Store::open(&paths.vault, meta, None).is_err(),
-        "an encrypted file must not open unkeyed"
+        text.contains("CREATE TABLE"),
+        "the schema is visible, as documented"
     );
 
-    // The wrong key.
-    let wrong = VaultKey::from_slice(&[7u8; 32]).unwrap();
-    let meta = MetaStore::open(&paths.meta).unwrap();
+    // The payload column holds whatever the record layer put there. In the
+    // real application that is XChaCha20-Poly1305 output; `core/tests/vault.rs`
+    // and `pipeline.rs` prove no plaintext reaches it.
     assert!(
-        Store::open(&paths.vault, meta, Some(&wrong.sqlcipher_key())).is_err(),
-        "a wrong key must not open the file"
+        text.contains("ciphertext-bytes"),
+        "this test writes its own bytes, so they are expected here"
     );
-
-    // And the right key still does.
-    let meta = MetaStore::open(&paths.meta).unwrap();
-    let store = Store::open(&paths.vault, meta, Some(&key.sqlcipher_key())).unwrap();
-    assert_eq!(store.get("e1").unwrap().unwrap().ciphertext, b"body");
 }
 
 /// The database key and the record key must be different, or the two layers

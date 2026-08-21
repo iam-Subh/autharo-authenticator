@@ -25,6 +25,7 @@ use anyhow::{anyhow, Context, Result};
 use authcore::crypto::{VaultKey, XChaChaCipher};
 use authcore::device_slot::{self, OpenRequest, SetupRequest, SlotState};
 use authcore::entry::{OtpEntry, Payload};
+use authcore::lock_policy::LockPolicy;
 use authcore::otp::{self, Algorithm, OtpKind};
 use authcore::otpauth::OtpAuthUri;
 use authcore::store::{MetaStore, Store};
@@ -335,6 +336,39 @@ pub fn finish_device_open_with_pin(
     let meta = take_meta()?;
     meta.clear_failed_unlocks()?;
     open_vault_with_key(&vault_path, meta, key)
+}
+
+/// The lock policy (FR-33, FR-33a, FR-34).
+///
+/// Read from the unencrypted metadata file, so it is available before the
+/// vault opens — which is the point of FR-33a. The application has to know
+/// whether it may open without asking before it can open anything.
+pub struct LockPolicyView {
+    /// Seconds in the background before locking. `None` is "never".
+    pub timeout_seconds: Option<u32>,
+    pub lock_on_background: bool,
+}
+
+#[flutter_rust_bridge::frb(sync)]
+pub fn lock_policy() -> Result<LockPolicyView> {
+    with_meta(|meta| {
+        let policy = LockPolicy::load(meta)?;
+        Ok(LockPolicyView {
+            timeout_seconds: policy.timeout_seconds,
+            lock_on_background: policy.lock_on_background,
+        })
+    })
+}
+
+pub fn set_lock_policy(timeout_seconds: Option<u32>, lock_on_background: bool) -> Result<()> {
+    with_meta(|meta| {
+        LockPolicy {
+            timeout_seconds,
+            lock_on_background,
+        }
+        .save(meta)?;
+        Ok(())
+    })
 }
 
 /// FR-35: how many unlock attempts have failed in a row.

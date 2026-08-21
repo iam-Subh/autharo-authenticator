@@ -10,13 +10,19 @@ getrandom = "0.4.3"
 hkdf = "0.13.0"
 hmac = "0.13.0"
 percent-encoding = "2.3.2"
-# SQLCipher rather than plain SQLite (section 12.1). The key comes from the
-# device slot: VaultKey::sqlcipher_key, a separate HKDF subkey from the one
-# that encrypts records, so a weakness in either construction stays there.
+# Plain SQLite. The page-encryption layer of section 12.1 is NOT linked; see
+# README.md, "Database encryption is not linked".
 #
-# `bundled-sqlcipher-vendored-openssl` builds both from source, which needs a
-# Windows Perl to configure OpenSSL. See README.md if this fails to build.
-rusqlite = { version = "0.40", features = ["bundled-sqlcipher-vendored-openssl"] }
+# SQLCipher was linked and working on the host, then removed: its vendored
+# OpenSSL cannot cross-compile to Android from Windows. OpenSSL's Configure
+# wants a `aarch64-linux-android-clang` that the Windows NDK does not provide
+# under that name, and Android is the platform that ships. Section 12.1 allows
+# any page-encrypting build and names SQLite3 Multiple Ciphers, which needs no
+# OpenSSL and no Perl; that is the way back.
+#
+# `VaultKey::sqlcipher_key` and `Store::open`'s key parameter are kept, so
+# relinking is a dependency change rather than a redesign.
+rusqlite = { version = "0.40.2", features = ["bundled"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 sha1 = "0.11.0"

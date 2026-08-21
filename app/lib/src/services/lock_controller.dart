@@ -1,21 +1,55 @@
 import 'package:flutter/widgets.dart';
 
+import 'monotonic_clock.dart';
+
 /// What the lock controller needs from the vault.
 ///
-/// Narrower than [VaultSession] on purpose. The timeout rules below are
-/// ordinary logic with awkward edges — a clock that moved backwards, a
-/// lifecycle event that does not mean what it looks like — and they should be
-/// testable without a device, a keystore, or a real vault key.
+/// Narrower than `VaultSession` on purpose. The rules below are ordinary logic
+/// with awkward edges — a clock that reset under us, a lifecycle event that
+/// does not mean what it looks like — and they should be testable without a
+/// device, a keystore, or a real vault key.
 abstract interface class LockTarget {
   bool get isOpen;
   void lock();
 }
 
-/// When the vault locks itself (FR-33, FR-34).
+/// Where the lock policy is kept between runs (FR-33a).
+abstract interface class LockPolicyStore {
+  Future<LockPolicy> loadPolicy();
+  Future<void> savePolicy(LockPolicy policy);
+}
+
+/// When to lock (FR-33, FR-34).
+@immutable
+class LockPolicy {
+  const LockPolicy({
+    this.timeout = LockTimeout.after1Minute,
+    this.lockOnBackground = false,
+  });
+
+  final LockTimeout timeout;
+  final bool lockOnBackground;
+
+  LockPolicy copyWith({LockTimeout? timeout, bool? lockOnBackground}) =>
+      LockPolicy(
+        timeout: timeout ?? this.timeout,
+        lockOnBackground: lockOnBackground ?? this.lockOnBackground,
+      );
+
+  @override
+  bool operator ==(Object other) =>
+      other is LockPolicy &&
+      other.timeout == timeout &&
+      other.lockOnBackground == lockOnBackground;
+
+  @override
+  int get hashCode => Object.hash(timeout, lockOnBackground);
+}
+
+/// FR-33's list, exactly: immediate, 15 s, 1 min, 5 min, 15 min, and never.
 ///
-/// FR-33 lists the choices exactly: immediate, 15 s, 1 min, 5 min, 15 min, and
-/// never. They are the enum rather than a free-form duration so that the
-/// interface and the stored setting cannot drift apart.
+/// An enum rather than a free-form duration so the interface and the stored
+/// setting cannot drift apart.
 enum LockTimeout {
   immediately(Duration.zero, 'Immediately'),
   after15Seconds(Duration(seconds: 15), 'After 15 seconds'),
@@ -29,6 +63,23 @@ enum LockTimeout {
   /// Null means no automatic lock at all.
   final Duration? duration;
   final String label;
+
+  /// Seconds for the core, which stores a number rather than a name. Null is
+  /// "never".
+  int? get seconds => duration?.inSeconds;
+
+  /// The choice matching a stored value, falling back to one minute.
+  ///
+  /// A stored value that matches nothing means the setting was written by a
+  /// version offering different choices. Falling back to the default keeps a
+  /// working lock; falling back to "never" would silently switch it off.
+  static LockTimeout fromSeconds(int? seconds) {
+    if (seconds == null) return LockTimeout.never;
+    for (final choice in LockTimeout.values) {
+      if (choice.seconds == seconds) return choice;
+    }
+    return LockTimeout.after1Minute;
+  }
 }
 
 /// Locks the vault when it should be locked.
@@ -42,44 +93,65 @@ enum LockTimeout {
 /// - **Backgrounding** (FR-34) is a user action. It fires as soon as the
 ///   application leaves the foreground, if the option is on.
 /// - **The timeout** (FR-33) measures time spent *away*, not time since the
-///   last tap. A timer that ran in the foreground would lock the vault while
+///   last tap. A timer running in the foreground would lock the vault while
 ///   someone was reading a code off the screen.
 ///
-/// Both are deliberately conservative about the clock. The elapsed time is
-/// measured against the wall clock at the moment of backgrounding, because a
-/// `Timer` does not reliably run while an Android application is suspended —
-/// relying on one would mean a device that slept for an hour came back
-/// unlocked.
+/// # The clock
+///
+/// FR-33 requires a monotonic clock that counts across sleep. Three things
+/// could go here and only one is right:
+///
+/// - The wall clock can be set backwards, which would hold the vault open.
+/// - `CLOCK_MONOTONIC` stops during deep sleep, so a phone in a pocket
+///   overnight returns as though no time passed.
+/// - `elapsedRealtime` (`CLOCK_BOOTTIME`) counts through both, and resets on
+///   reboot — which is why a reading *lower* than the stored one is treated as
+///   expired. A reboot cannot mean less time passed; it means the vault should
+///   not still be open.
 class LockController with WidgetsBindingObserver {
   LockController({
     required LockTarget session,
-    LockTimeout timeout = LockTimeout.after1Minute,
-    bool lockOnBackground = false,
+    required MonotonicClock clock,
+    LockPolicyStore? store,
+    LockPolicy policy = const LockPolicy(),
     VoidCallback? onLocked,
   })  : _session = session,
-        _timeout = timeout,
-        _lockOnBackground = lockOnBackground,
+        _clock = clock,
+        _store = store,
+        _policy = policy,
         _onLocked = onLocked;
 
   final LockTarget _session;
+  final MonotonicClock _clock;
+  final LockPolicyStore? _store;
   final VoidCallback? _onLocked;
 
-  LockTimeout _timeout;
-  bool _lockOnBackground;
+  LockPolicy _policy;
 
-  /// When the application last left the foreground. Null while in it.
-  DateTime? _leftForegroundAt;
+  /// The monotonic reading when the application last left the foreground.
+  /// Null while in the foreground.
+  int? _leftForegroundAt;
 
-  LockTimeout get timeout => _timeout;
-  bool get lockOnBackground => _lockOnBackground;
+  LockPolicy get policy => _policy;
+  LockTimeout get timeout => _policy.timeout;
+  bool get lockOnBackground => _policy.lockOnBackground;
 
   void start() => WidgetsBinding.instance.addObserver(this);
 
   void dispose() => WidgetsBinding.instance.removeObserver(this);
 
-  set timeout(LockTimeout value) => _timeout = value;
+  /// Loads the stored policy (FR-33a). Call before [start].
+  Future<void> loadPolicy() async {
+    final store = _store;
+    if (store == null) return;
+    _policy = await store.loadPolicy();
+  }
 
-  set lockOnBackground(bool value) => _lockOnBackground = value;
+  /// Changes the policy and writes it through, so it survives a restart.
+  Future<void> setPolicy(LockPolicy policy) async {
+    _policy = policy;
+    await _store?.savePolicy(policy);
+  }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
@@ -97,32 +169,60 @@ class LockController with WidgetsBindingObserver {
     }
   }
 
-  void _onBackgrounded() {
+  /// Visible for tests, which need to await what the lifecycle callback starts.
+  @visibleForTesting
+  Future<void> handleBackgrounded() => _onBackgrounded();
+
+  @visibleForTesting
+  Future<void> handleResumed() => _onResumed();
+
+  Future<void> _onBackgrounded() async {
     if (!_session.isOpen) return;
 
-    _leftForegroundAt = DateTime.now();
+    // FR-34, and FR-33's "immediately", which is the same instant. Done before
+    // the clock read so that the strictest settings do not depend on a channel
+    // call completing while the application is being suspended.
+    if (_policy.lockOnBackground || _policy.timeout == LockTimeout.immediately) {
+      _lock();
+      return;
+    }
+    if (_policy.timeout == LockTimeout.never) return;
 
-    // FR-34, and FR-33's "immediately", which is the same instant.
-    if (_lockOnBackground || _timeout == LockTimeout.immediately) {
+    try {
+      _leftForegroundAt = await _clock.elapsedRealtime();
+    } catch (_) {
+      // No reading means no way to measure the absence. Locking is the safe
+      // failure: the user re-enters a PIN, rather than the vault staying open
+      // for an unmeasured length of time.
       _lock();
     }
   }
 
-  void _onResumed() {
+  Future<void> _onResumed() async {
     final left = _leftForegroundAt;
     _leftForegroundAt = null;
 
     if (left == null || !_session.isOpen) return;
 
-    final limit = _timeout.duration;
+    final limit = _policy.timeout.duration;
     if (limit == null) return; // Never.
 
-    // A clock that moved backwards while away — a manual change, or a time
-    // zone shift — gives a negative difference. Treated as expired rather
-    // than as no time having passed, because the alternative is a way to hold
-    // the vault open indefinitely by winding the clock back.
-    final away = DateTime.now().difference(left);
-    if (away.isNegative || away >= limit) {
+    final int now;
+    try {
+      now = await _clock.elapsedRealtime();
+    } catch (_) {
+      _lock();
+      return;
+    }
+
+    // FR-33: "Treat a value lower than the stored one as expired, because a
+    // reboot resets the counter."
+    if (now < left) {
+      _lock();
+      return;
+    }
+
+    if (Duration(milliseconds: now - left) >= limit) {
       _lock();
     }
   }
@@ -132,6 +232,7 @@ class LockController with WidgetsBindingObserver {
   void lockNow() => _lock();
 
   void _lock() {
+    _leftForegroundAt = null;
     if (!_session.isOpen) return;
     _session.lock();
     _onLocked?.call();

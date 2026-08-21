@@ -4,6 +4,7 @@ import 'src/pages/entry_list_page.dart';
 import 'src/rust/frb_generated.dart';
 import 'src/pages/unlock_page.dart';
 import 'src/services/lock_controller.dart';
+import 'src/services/monotonic_clock.dart';
 import 'src/services/reference_time.dart';
 import 'src/services/vault_session.dart';
 import 'src/vault_controller.dart';
@@ -61,6 +62,10 @@ class _BootstrapState extends State<_Bootstrap> {
   final _session = VaultSession();
   late final _lock = LockController(
     session: _session,
+    // FR-33 requires a clock that counts across device sleep; see
+    // MonotonicClock for why neither the wall clock nor a Stopwatch will do.
+    clock: PlatformMonotonicClock(),
+    store: _session,
     onLocked: () => setState(() => _needsUnlock = true),
   );
 
@@ -73,6 +78,18 @@ class _BootstrapState extends State<_Bootstrap> {
   void initState() {
     super.initState();
     _lock.start();
+  }
+
+  /// FR-33a: the stored policy, read before the vault opens. Without this the
+  /// setting would reset at every start, which the requirement calls out as
+  /// doing nothing at all.
+  Future<void> _loadLockPolicy() async {
+    try {
+      await _lock.loadPolicy();
+    } catch (_) {
+      // A policy that cannot be read leaves the default in place: a one minute
+      // timeout. Failing startup over a settings read would be worse.
+    }
   }
 
   @override
@@ -102,6 +119,7 @@ class _BootstrapState extends State<_Bootstrap> {
   }
 
   Future<VaultController> _startController() async {
+    await _loadLockPolicy();
     final time = await ReferenceTime.load();
     final controller = VaultController(time);
     _controller = controller;
@@ -134,7 +152,11 @@ class _BootstrapState extends State<_Bootstrap> {
             onUnlocked: () => _afterUnlock(controller),
           );
         }
-        return EntryListPage(controller: controller);
+        return EntryListPage(
+          controller: controller,
+          session: _session,
+          lock: _lock,
+        );
       },
     );
   }
