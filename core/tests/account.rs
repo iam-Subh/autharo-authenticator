@@ -3,9 +3,7 @@
 //! These use the real Argon2id cost, so the file is slow by design. The cost
 //! is the security property; testing a cheaper one would test something else.
 
-use authcore::account::{
-    self, Account, AccountError, RECOVERY_WORDS, WORDS_TO_CONFIRM,
-};
+use authcore::account::{self, Account, AccountError, RECOVERY_WORDS, WORDS_TO_CONFIRM};
 use authcore::crypto::VaultKey;
 use authcore::store::MetaStore;
 
@@ -89,7 +87,11 @@ fn the_salt_is_random_and_not_derived_from_the_email() {
     account::create_account(&first, EMAIL, PASSWORD, &key).unwrap();
     account::create_account(&second, EMAIL, PASSWORD, &key).unwrap();
 
-    let a = account::load(&first).unwrap().unwrap().password_slot.unwrap();
+    let a = account::load(&first)
+        .unwrap()
+        .unwrap()
+        .password_slot
+        .unwrap();
     let b = account::load(&second)
         .unwrap()
         .unwrap()
@@ -114,7 +116,11 @@ fn the_salt_changes_the_derived_key() {
     account::create_account(&first, EMAIL, PASSWORD, &key).unwrap();
     account::create_account(&second, EMAIL, PASSWORD, &key).unwrap();
 
-    let a = account::load(&first).unwrap().unwrap().password_slot.unwrap();
+    let a = account::load(&first)
+        .unwrap()
+        .unwrap()
+        .password_slot
+        .unwrap();
     let b = account::load(&second)
         .unwrap()
         .unwrap()
@@ -132,7 +138,11 @@ fn the_authentication_key_is_not_the_key_encryption_key() {
     let key = existing_vault_key();
     account::create_account(&meta, EMAIL, PASSWORD, &key).unwrap();
 
-    let slot = account::load(&meta).unwrap().unwrap().password_slot.unwrap();
+    let slot = account::load(&meta)
+        .unwrap()
+        .unwrap()
+        .password_slot
+        .unwrap();
     let auth = account::derive_auth_key(PASSWORD, &slot).unwrap();
 
     // The authentication key must not be the vault key either.
@@ -156,7 +166,11 @@ fn nothing_stored_depends_on_a_server() {
     let key = existing_vault_key();
     account::create_account(&meta, EMAIL, PASSWORD, &key).unwrap();
 
-    let slot = account::load(&meta).unwrap().unwrap().password_slot.unwrap();
+    let slot = account::load(&meta)
+        .unwrap()
+        .unwrap()
+        .password_slot
+        .unwrap();
     let auth = account::derive_auth_key(PASSWORD, &slot).unwrap();
 
     // Every stored value, scanned for the authentication key and the vault key.
@@ -218,7 +232,10 @@ fn the_recovery_phrase_is_twenty_four_words() {
 
     assert_eq!(phrase.words().len(), RECOVERY_WORDS);
     assert!(
-        phrase.words().iter().all(|w| w.chars().all(|c| c.is_ascii_lowercase())),
+        phrase
+            .words()
+            .iter()
+            .all(|w| w.chars().all(|c| c.is_ascii_lowercase())),
         "BIP-39 English words are lowercase ASCII"
     );
     assert!(!account.recovery_slot.wrapped_key.is_empty());
@@ -330,7 +347,10 @@ fn the_recovery_phrase_does_not_print() {
     let rendered = format!("{phrase:?}");
     assert!(rendered.contains("redacted"));
     for word in phrase.words() {
-        assert!(!rendered.contains(word), "Debug leaked a word of the phrase");
+        assert!(
+            !rendered.contains(word),
+            "Debug leaked a word of the phrase"
+        );
     }
 }
 
@@ -379,7 +399,11 @@ fn the_kdf_parameters_are_stored_with_the_slot() {
     let meta = meta();
     account::create_account(&meta, EMAIL, PASSWORD, &existing_vault_key()).unwrap();
 
-    let slot = account::load(&meta).unwrap().unwrap().password_slot.unwrap();
+    let slot = account::load(&meta)
+        .unwrap()
+        .unwrap()
+        .password_slot
+        .unwrap();
     assert_eq!(slot.params.memory_kib, 64 * 1024, "64 MiB on mobile");
     assert_eq!(slot.params.iterations, 3);
     assert_eq!(slot.params.lanes, 4);

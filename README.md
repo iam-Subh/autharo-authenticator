@@ -1,6 +1,6 @@
 # Cross-Platform Authenticator App
 
-Implementation of the PRD, version 0.9. The build order is the dependency
+Implementation of the PRD, version 0.11. The build order is the dependency
 sequence in section 18: each stage is finished before the next starts.
 
 ## Stage status
@@ -9,7 +9,7 @@ sequence in section 18: each stage is finished before the next starts.
 |---|---|---|
 | S1 — Core | TOTP, HOTP, Base32, the `otpauth://` parser, SQLite storage | **Done.** RFC 6238 and RFC 4226 vectors pass for SHA-1, SHA-256, and SHA-512 |
 | S2 — First platform | Android. Flutter UI, QR scan, manual entry, list, copy, application lock | **Done**, verified on a physical device |
-| S3 — Crypto | Vault key, key slots, Argon2id, XChaCha20-Poly1305, recovery key | **Device slot and record encryption done.** Database encryption not linked (below); password and recovery slots not started |
+| S3 — Crypto | Vault key, key slots, Argon2id, XChaCha20-Poly1305, recovery key | **Done except database encryption** (below). Device slot, record encryption, password slot, recovery key all built |
 | S4 — Backend | API, PostgreSQL schema, key slots, quotas, enumeration resistance | Not started |
 | S5 — Sync | Sync engine, outbox, HLC, conflict resolution, prune watermark | Not started |
 | S6 — Other platforms | Remaining platforms, screen capture, tray and menu bar | Not started |
@@ -64,12 +64,9 @@ FR-33a puts the policy in `meta.db`, which is the unencrypted file, because the
 application has to know whether it may open without asking *before* it opens
 anything. A setting that reset at every start would do nothing.
 
-One judgement call worth flagging: FR-33a says the policy "holds a timeout
-value only", and the FR-34 background flag is stored alongside it anyway. The
-same requirement ends "a lock setting that resets at every start does nothing",
-and FR-34's option is a lock setting — leaving it unpersisted would keep the
-sentence's letter and break its point. The "only" is read as a limit on what
-kind of thing goes in the file: a timeout, not a key.
+FR-33a in 0.10 makes this explicit: the file holds the *whole* lock policy —
+the timeout, FR-34's background flag, and any later lock option — and no secret
+and no vault content.
 
 ## The vault is now encrypted at rest
 
@@ -138,6 +135,41 @@ relinking is a dependency change rather than a redesign.
 moment the file stops having a plain SQLite header, which is the signal to
 invert it.
 
+## The account slots
+
+Sections 9.2.1 and 9.2.3, built locally. No server exists until S4, so the
+slots are created and stored ready to upload, and nothing is sent.
+
+The rule with the worst failure mode is section 9.2.4's: **creating an account
+must not generate a new vault key**. Every entry is already encrypted under the
+device slot's key, so a fresh one would leave all of them unreadable with
+nothing to announce it. `create_account` therefore takes the existing key as an
+argument — there is no code path in `account.rs` that makes one — and both a
+host test and an on-device test add an entry *before* sign-up and check it is
+still readable after.
+
+| Piece | Where | Note |
+|---|---|---|
+| Argon2id salt | Generated locally, 128 bits, stored with the slot | Never derived from the email address (§9.2.1). Two accounts with the same address get different salts, and a test asserts it |
+| Master key | Argon2id, 64 MiB / 3 / 4 | Parameters stored with the slot, so raising them later stays compatible |
+| Authentication key | HKDF `auth`, derived on demand | **Never stored.** It exists only to be sent, and there is nowhere to send it yet |
+| KEK | HKDF `kek` | Never leaves the device. Wraps the vault key |
+| Recovery key | Random 256-bit, 24 BIP-39 words | Shown once, never stored. Three random positions to confirm (§9.2.3 step 4) |
+
+A test wraps with the recovery key, unwraps, and compares the vault key
+**byte for byte**. A recovery path that returns a valid but different key would
+pass every other test and fail only when someone finally needed it.
+
+A typo in the phrase is reported as a typo, not as a wrong vault: BIP-39's
+checksum catches it, and the difference matters — one message says check your
+spelling, the other says your vault is gone.
+
+**No sign-up screen yet, deliberately.** §16.2 is "enable sync later", and
+there is no sync to enable. The recovery slot exists for synced accounts only;
+a local-only vault explicitly cannot be recovered (§9.2.4). Building the screen
+now would mean building it against an account flow S4 has not settled. The
+derivation is done and tested so S4 inherits it.
+
 ## Layout
 
 ```
@@ -152,6 +184,7 @@ core/            Rust core library (authcore). Every security-critical rule live
     device_slot.rs  The device slot state machine (9.2.4)
     pin.rs          Argon2id over the PIN, and FR-31's rules
     lock_policy.rs  FR-33a: the lock policy, readable before the vault opens
+    account.rs      Password and recovery slots (9.2.1, 9.2.3)
     hlc.rs          Hybrid logical clock timestamps (section 10.2)
     store.rs        meta.db and vault.db (section 12.1)
     vault.rs        The payload/record seam and the RecordCipher trait (9.3)
@@ -196,6 +229,35 @@ sh ../scripts/verify_build.sh build/app/outputs/flutter-apk/app-debug.apk -- \
 
 `cargo` is at `%USERPROFILE%\.cargo\bin`, which was added to the user PATH.
 Terminals opened before that change will not have it.
+
+### Two guards on the native build (NFR-13)
+
+A stale `.so` was packaged and reported as a successful build, and three
+reports in a row were wrong because of it. `--contains` catches the symptom.
+These two catch the cause.
+
+**The exit code now propagates.** `run_build_tool.cmd` returned the status of
+its last command, which was an `If` that succeeds whether or not the build
+failed. So `build_tool.dart` called `exit(1)`, gradle's `exec` would have
+thrown on a non-zero status — and the wrapper between them turned the failure
+into a success. It now ends in `exit /b %TOOL_EXIT%`. `run_build_tool.sh`
+already did this, so the defect was Windows-only, which is why it survived
+upstream. Verified by breaking the Rust build on purpose and watching gradle
+fail.
+
+**The library is stamped.** `app/rust/build.rs` compiles in the git commit, a
+dirty flag, and a build timestamp; `build_info()` returns them. A device test
+compares the commit against the source it should have been built from:
+
+```sh
+flutter test integration_test -d <device>   --dart-define=EXPECTED_COMMIT=$(git rev-parse HEAD)
+```
+
+A mismatch fails the test naming both hashes. This is the guard that keeps
+working when the packaging path changes again, because it does not depend on
+knowing which step went wrong — it asks the library what it is. A build from a
+dirty tree cannot be matched to a commit, so the test falls back to checking
+the library's age and says that is what it did.
 
 ### Verify the build, do not trust the log
 

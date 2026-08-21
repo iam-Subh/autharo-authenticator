@@ -81,13 +81,17 @@ pub enum AccountError {
     WrongPassword,
     /// The recovery phrase was not 24 valid BIP-39 words, or its checksum
     /// failed. Caught before any key derivation.
-    BadRecoveryPhrase { detail: String },
+    BadRecoveryPhrase {
+        detail: String,
+    },
     /// The recovery phrase parsed but does not open this vault.
     WrongRecoveryKey,
     /// No account has been created on this device.
     NoAccount,
     /// A stored slot is present but incomplete.
-    CorruptSlot { detail: String },
+    CorruptSlot {
+        detail: String,
+    },
 }
 
 impl fmt::Display for AccountError {
@@ -276,11 +280,12 @@ fn build_recovery_slot(vault_key: &VaultKey) -> Result<(RecoverySlot, RecoveryPh
     // 256 bits of entropy is 24 words in BIP-39, which is what section 9.2.3
     // specifies. The word list is the standard English one, so the phrase can
     // be written down and read back with the usual tools.
-    let mnemonic = Mnemonic::from_entropy_in(Language::English, recovery_key.expose()).map_err(
-        |error| AccountError::CorruptSlot {
-            detail: format!("the recovery phrase could not be built: {error}"),
-        },
-    )?;
+    let mnemonic =
+        Mnemonic::from_entropy_in(Language::English, recovery_key.expose()).map_err(|error| {
+            AccountError::CorruptSlot {
+                detail: format!("the recovery phrase could not be built: {error}"),
+            }
+        })?;
 
     Ok((
         RecoverySlot {
@@ -298,10 +303,7 @@ fn build_recovery_slot(vault_key: &VaultKey) -> Result<(RecoverySlot, RecoveryPh
 /// Derived on demand and never stored. The KEK from the same master key never
 /// leaves the device; only this half is ever transmitted, and only once a
 /// server exists.
-pub fn derive_auth_key(
-    password: &str,
-    slot: &PasswordSlot,
-) -> Result<Zeroizing<[u8; KEY_LEN]>> {
+pub fn derive_auth_key(password: &str, slot: &PasswordSlot) -> Result<Zeroizing<[u8; KEY_LEN]>> {
     let master = pin::derive_kek(password, &slot.salt, slot.params)?;
     Ok(expand(&master, INFO_AUTH))
 }
@@ -342,7 +344,10 @@ pub fn unlock_with_recovery(meta: &MetaStore, phrase: &str) -> Result<VaultKey> 
     let (entropy, len) = mnemonic.to_entropy_array();
     if len != KEY_LEN {
         return Err(AccountError::BadRecoveryPhrase {
-            detail: format!("expected {RECOVERY_WORDS} words, not {}", mnemonic.word_count()),
+            detail: format!(
+                "expected {RECOVERY_WORDS} words, not {}",
+                mnemonic.word_count()
+            ),
         });
     }
     let recovery_key = VaultKey::from_slice(&entropy[..len])?;
