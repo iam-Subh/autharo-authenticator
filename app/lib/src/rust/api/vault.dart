@@ -103,6 +103,17 @@ Future<void> finishDeviceOpenWithPin({
   pin: pin,
 );
 
+/// Reports what produced this `.so`.
+///
+/// Exists because a stale library was once packaged and reported as a
+/// successful build. The cargokit wrapper that swallowed that failure is
+/// fixed, but this covers the general case: whatever path a library takes into
+/// an APK, a test on the device can ask it what it is and refuse to trust a
+/// wrong answer.
+///
+/// Cheap and constant — the values are compiled in by `build.rs`.
+BuildInfo buildInfo() => RustLib.instance.api.crateApiVaultBuildInfo();
+
 LockPolicyView lockPolicy() => RustLib.instance.api.crateApiVaultLockPolicy();
 
 Future<void> setLockPolicy({
@@ -248,6 +259,38 @@ class AddOutcome {
           runtimeType == other.runtimeType &&
           addedId == other.addedId &&
           duplicateOf == other.duplicateOf;
+}
+
+/// What this native library was built from (NFR-13).
+class BuildInfo {
+  /// Full git commit hash, or `"unknown"` outside a checkout.
+  final String commit;
+
+  /// True when the working tree had uncommitted changes at build time. A
+  /// dirty library cannot be matched against a commit, so a caller checking
+  /// provenance has to fall back to the timestamp and say so.
+  final bool dirty;
+
+  /// Unix seconds at which this library was compiled.
+  final PlatformInt64 builtAt;
+
+  const BuildInfo({
+    required this.commit,
+    required this.dirty,
+    required this.builtAt,
+  });
+
+  @override
+  int get hashCode => commit.hashCode ^ dirty.hashCode ^ builtAt.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is BuildInfo &&
+          runtimeType == other.runtimeType &&
+          commit == other.commit &&
+          dirty == other.dirty &&
+          builtAt == other.builtAt;
 }
 
 /// What an `otpauth://` URI holds, shown before the user commits to adding it.

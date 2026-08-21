@@ -338,6 +338,36 @@ pub fn finish_device_open_with_pin(
     open_vault_with_key(&vault_path, meta, key)
 }
 
+/// What this native library was built from (NFR-13).
+pub struct BuildInfo {
+    /// Full git commit hash, or `"unknown"` outside a checkout.
+    pub commit: String,
+    /// True when the working tree had uncommitted changes at build time. A
+    /// dirty library cannot be matched against a commit, so a caller checking
+    /// provenance has to fall back to the timestamp and say so.
+    pub dirty: bool,
+    /// Unix seconds at which this library was compiled.
+    pub built_at: i64,
+}
+
+/// Reports what produced this `.so`.
+///
+/// Exists because a stale library was once packaged and reported as a
+/// successful build. The cargokit wrapper that swallowed that failure is
+/// fixed, but this covers the general case: whatever path a library takes into
+/// an APK, a test on the device can ask it what it is and refuse to trust a
+/// wrong answer.
+///
+/// Cheap and constant — the values are compiled in by `build.rs`.
+#[flutter_rust_bridge::frb(sync)]
+pub fn build_info() -> BuildInfo {
+    BuildInfo {
+        commit: env!("AUTHCORE_BUILD_COMMIT").to_string(),
+        dirty: env!("AUTHCORE_BUILD_DIRTY") == "true",
+        built_at: env!("AUTHCORE_BUILD_TIME").parse().unwrap_or(0),
+    }
+}
+
 /// The lock policy (FR-33, FR-33a, FR-34).
 ///
 /// Read from the unencrypted metadata file, so it is available before the

@@ -342,4 +342,76 @@ void main() {
       await session.unlock();
     });
   });
+
+  /// NFR-13: the library on the device must be the one built from this source.
+  ///
+  /// The reason this exists: a gradle build once packaged the previous
+  /// `librust_lib_authenticator.so` and reported success, so the tests above
+  /// all passed against stale native code. The cargokit wrapper that swallowed
+  /// that failure is fixed, but this check does not depend on knowing which
+  /// path went wrong — it asks the library what it is.
+  ///
+  /// Run with the commit to compare against:
+  ///
+  /// ```sh
+  /// flutter test integration_test -d <device>   ///   --dart-define=EXPECTED_COMMIT=$(git rev-parse HEAD)
+  /// ```
+  group('build provenance', () {
+    const expectedCommit = String.fromEnvironment('EXPECTED_COMMIT');
+
+    test('the native library reports where it came from', () {
+      final info = rust.buildInfo();
+
+      expect(info.commit, isNotEmpty);
+      expect(
+        info.builtAt,
+        greaterThan(1750000000),
+        reason: 'the build timestamp was never stamped',
+      );
+    });
+
+    test('the library matches the source it should have been built from', () {
+      final info = rust.buildInfo();
+
+      if (expectedCommit.isEmpty) {
+        // No commit to compare against. Fall back to the weaker check and say
+        // so, rather than passing silently and implying more than was checked.
+        final age = DateTime.now().difference(
+          DateTime.fromMillisecondsSinceEpoch(info.builtAt * 1000),
+        );
+        expect(
+          age.inDays,
+          lessThan(7),
+          reason: 'EXPECTED_COMMIT was not passed, so only the age of the '
+              'library could be checked, and it is $age old. Re-run with '
+              '--dart-define=EXPECTED_COMMIT=\$(git rev-parse HEAD) for the '
+              'real check.',
+        );
+        return;
+      }
+
+      if (info.dirty) {
+        // A library built from an uncommitted tree cannot match any commit.
+        // Checking its age is the most that can honestly be claimed.
+        final age = DateTime.now().difference(
+          DateTime.fromMillisecondsSinceEpoch(info.builtAt * 1000),
+        );
+        expect(
+          age.inHours,
+          lessThan(24),
+          reason: 'the library was built from a dirty tree $age ago, so it '
+              'cannot be matched to a commit and is too old to trust',
+        );
+        return;
+      }
+
+      expect(
+        info.commit,
+        expectedCommit,
+        reason: 'the library on this device was built from ${info.commit}, '
+            'but the source is at $expectedCommit. It is stale — the APK '
+            'carries a library from an earlier build.',
+      );
+    });
+  });
 }

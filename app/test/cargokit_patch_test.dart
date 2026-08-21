@@ -85,4 +85,49 @@ void main() {
       );
     });
   });
+
+  /// The second local patch, and the one that cost the most.
+  ///
+  /// `run_build_tool.cmd` returns the status of its last command. Its last
+  /// command was an `If`, which succeeds whether or not the build failed — so
+  /// a failed native build exited 0, gradle packaged the previous `.so`, and
+  /// the build was reported as successful. `run_build_tool.sh` already ends in
+  /// `exit \$exit_code`, so this was Windows-only and survived upstream.
+  group('cargokit exit code propagation', () {
+    final wrapper = File('rust_builder/cargokit/run_build_tool.cmd');
+
+    test('the Windows wrapper is still where the patch expects it', () {
+      expect(wrapper.existsSync(), isTrue, reason: 'Expected \${wrapper.path}');
+    });
+
+    test('the wrapper still propagates the build tool exit code', () {
+      final source = wrapper.readAsStringSync();
+
+      expect(
+        source,
+        contains('exit /b %TOOL_EXIT%'),
+        reason: 'run_build_tool.cmd no longer ends by propagating the build '
+            'tool status. Without it a failed native build reports success '
+            'and gradle packages a stale library. Re-apply the patch.',
+      );
+      expect(
+        source,
+        contains('SET TOOL_EXIT=%ERRORLEVEL%'),
+        reason: 'the exit code is no longer captured after the build tool runs',
+      );
+      expect(
+        source,
+        contains('LOCAL PATCH'),
+        reason: 'the marker is gone, so the next reader cannot tell this file '
+            'diverges from upstream',
+      );
+    });
+
+    /// The shell wrapper is upstream's and already correct. Pinned so that a
+    /// regression there is caught too, rather than assumed impossible.
+    test('the shell wrapper propagates its exit code', () {
+      final shell = File('rust_builder/cargokit/run_build_tool.sh');
+      expect(shell.readAsStringSync(), contains('exit \$exit_code'));
+    });
+  });
 }

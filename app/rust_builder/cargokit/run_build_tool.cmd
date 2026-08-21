@@ -82,10 +82,28 @@ if not exist "%PRECOMPILED%" (
 )
 
 "%DART%" "%PRECOMPILED%" %*
+SET TOOL_EXIT=%ERRORLEVEL%
 
 REM 253 means invalid snapshot version.
-If %ERRORLEVEL% equ 253 (
+If %TOOL_EXIT% equ 253 (
     "%DART%" pub get --no-precompile
     "%DART%" compile kernel bin/build_tool_runner.dart
     "%DART%" "%PRECOMPILED%" %*
+    SET TOOL_EXIT=!ERRORLEVEL!
 )
+
+REM LOCAL PATCH - see README.md, "Vendored cargokit".
+REM
+REM Without this line the script exits 0 even when the build tool exited 1.
+REM A batch file returns the status of its last command, and the last command
+REM here was the `If` above, which succeeds whether or not the build failed.
+REM
+REM What that cost: build_tool.dart correctly calls exit(1) on a failed native
+REM build, gradle's exec correctly throws on a non-zero status - and this
+REM script sat between them turning the failure into a success. Gradle then
+REM packaged the APK with the PREVIOUS librust_lib_authenticator.so and
+REM reported a successful build. Tests ran against stale native code.
+REM
+REM run_build_tool.sh already ends in `exit $exit_code`, so this was a Windows
+REM-only defect, which is why it survived upstream.
+exit /b %TOOL_EXIT%

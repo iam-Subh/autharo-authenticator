@@ -38,7 +38,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.12.0";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -814720689;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 1591842893;
 
 // Section: executor
 
@@ -306,6 +306,35 @@ fn wire__crate__api__vault__begin_device_setup_with_pin_impl(
                     })(),
                 )
             }
+        },
+    )
+}
+fn wire__crate__api__vault__build_info_impl(
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) -> flutter_rust_bridge::for_generated::WireSyncRust2DartSse {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::SseCodec, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "build_info",
+            port: None,
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            deserializer.end();
+            transform_result_sse::<_, ()>((move || {
+                let output_ok = Result::<_, ()>::Ok(crate::api::vault::build_info())?;
+                Ok(output_ok)
+            })())
         },
     )
 }
@@ -1018,6 +1047,20 @@ impl SseDecode for bool {
     }
 }
 
+impl SseDecode for crate::api::vault::BuildInfo {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_commit = <String>::sse_decode(deserializer);
+        let mut var_dirty = <bool>::sse_decode(deserializer);
+        let mut var_builtAt = <i64>::sse_decode(deserializer);
+        return crate::api::vault::BuildInfo {
+            commit: var_commit,
+            dirty: var_dirty,
+            built_at: var_builtAt,
+        };
+    }
+}
+
 impl SseDecode for crate::api::vault::EntryPreview {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -1218,31 +1261,31 @@ fn pde_ffi_dispatcher_primary_impl(
             rust_vec_len,
             data_len,
         ),
-        8 => wire__crate__api__vault__delete_entry_impl(port, ptr, rust_vec_len, data_len),
-        11 => wire__crate__api__vault__finish_device_open_impl(port, ptr, rust_vec_len, data_len),
-        12 => wire__crate__api__vault__finish_device_open_with_pin_impl(
+        9 => wire__crate__api__vault__delete_entry_impl(port, ptr, rust_vec_len, data_len),
+        12 => wire__crate__api__vault__finish_device_open_impl(port, ptr, rust_vec_len, data_len),
+        13 => wire__crate__api__vault__finish_device_open_with_pin_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        13 => wire__crate__api__vault__finish_device_setup_impl(port, ptr, rust_vec_len, data_len),
-        15 => wire__crate__api__vault__list_entries_impl(port, ptr, rust_vec_len, data_len),
-        19 => wire__crate__api__vault__preview_uri_impl(port, ptr, rust_vec_len, data_len),
-        20 => wire__crate__api__vault__rename_entry_impl(port, ptr, rust_vec_len, data_len),
-        21 => wire__crate__api__vault__reveal_secret_for_export_impl(
+        14 => wire__crate__api__vault__finish_device_setup_impl(port, ptr, rust_vec_len, data_len),
+        16 => wire__crate__api__vault__list_entries_impl(port, ptr, rust_vec_len, data_len),
+        20 => wire__crate__api__vault__preview_uri_impl(port, ptr, rust_vec_len, data_len),
+        21 => wire__crate__api__vault__rename_entry_impl(port, ptr, rust_vec_len, data_len),
+        22 => wire__crate__api__vault__reveal_secret_for_export_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        22 => wire__crate__api__vault__set_favourite_impl(port, ptr, rust_vec_len, data_len),
-        23 => wire__crate__api__vault__set_lock_policy_impl(port, ptr, rust_vec_len, data_len),
-        24 => {
+        23 => wire__crate__api__vault__set_favourite_impl(port, ptr, rust_vec_len, data_len),
+        24 => wire__crate__api__vault__set_lock_policy_impl(port, ptr, rust_vec_len, data_len),
+        25 => {
             wire__crate__api__vault__set_time_offset_seconds_impl(port, ptr, rust_vec_len, data_len)
         }
-        25 => wire__crate__api__vault__time_offset_seconds_impl(port, ptr, rust_vec_len, data_len),
-        26 => wire__crate__api__vault__wipe_device_impl(port, ptr, rust_vec_len, data_len),
+        26 => wire__crate__api__vault__time_offset_seconds_impl(port, ptr, rust_vec_len, data_len),
+        27 => wire__crate__api__vault__wipe_device_impl(port, ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -1255,12 +1298,13 @@ fn pde_ffi_dispatcher_sync_impl(
 ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartSse {
     // Codec=Pde (Serialization + dispatch), see doc to use other codecs
     match func_id {
-        9 => wire__crate__api__vault__discard_legacy_vault_impl(ptr, rust_vec_len, data_len),
-        10 => wire__crate__api__vault__failed_unlock_attempts_impl(ptr, rust_vec_len, data_len),
-        14 => wire__crate__api__vault__is_vault_open_impl(ptr, rust_vec_len, data_len),
-        16 => wire__crate__api__vault__lock_policy_impl(ptr, rust_vec_len, data_len),
-        17 => wire__crate__api__vault__lock_vault_impl(ptr, rust_vec_len, data_len),
-        18 => wire__crate__api__vault__open_meta_impl(ptr, rust_vec_len, data_len),
+        8 => wire__crate__api__vault__build_info_impl(ptr, rust_vec_len, data_len),
+        10 => wire__crate__api__vault__discard_legacy_vault_impl(ptr, rust_vec_len, data_len),
+        11 => wire__crate__api__vault__failed_unlock_attempts_impl(ptr, rust_vec_len, data_len),
+        15 => wire__crate__api__vault__is_vault_open_impl(ptr, rust_vec_len, data_len),
+        17 => wire__crate__api__vault__lock_policy_impl(ptr, rust_vec_len, data_len),
+        18 => wire__crate__api__vault__lock_vault_impl(ptr, rust_vec_len, data_len),
+        19 => wire__crate__api__vault__open_meta_impl(ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -1282,6 +1326,25 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::vault::AddOutcome>
     for crate::api::vault::AddOutcome
 {
     fn into_into_dart(self) -> crate::api::vault::AddOutcome {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::vault::BuildInfo {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.commit.into_into_dart().into_dart(),
+            self.dirty.into_into_dart().into_dart(),
+            self.built_at.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive for crate::api::vault::BuildInfo {}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::vault::BuildInfo>
+    for crate::api::vault::BuildInfo
+{
+    fn into_into_dart(self) -> crate::api::vault::BuildInfo {
         self
     }
 }
@@ -1410,6 +1473,15 @@ impl SseEncode for bool {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
         serializer.cursor.write_u8(self as _).unwrap();
+    }
+}
+
+impl SseEncode for crate::api::vault::BuildInfo {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.commit, serializer);
+        <bool>::sse_encode(self.dirty, serializer);
+        <i64>::sse_encode(self.built_at, serializer);
     }
 }
 
