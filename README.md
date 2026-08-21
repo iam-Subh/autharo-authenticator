@@ -1,6 +1,6 @@
 # Cross-Platform Authenticator App
 
-Implementation of the PRD, version 0.6. The build order is the dependency
+Implementation of the PRD, version 0.7. The build order is the dependency
 sequence in section 18: each stage is finished before the next starts.
 
 ## Stage status
@@ -8,39 +8,64 @@ sequence in section 18: each stage is finished before the next starts.
 | Stage | Content | State |
 |---|---|---|
 | S1 — Core | TOTP, HOTP, Base32, the `otpauth://` parser, SQLite storage | **Done.** RFC 6238 and RFC 4226 vectors pass for SHA-1, SHA-256, and SHA-512 |
-| S2 — First platform | Android. Flutter UI, QR scan, manual entry, list, copy, application lock | **In progress.** Everything but the application lock (FR-31 to FR-36) |
-| S3 — Crypto | Vault key, key slots, Argon2id, XChaCha20-Poly1305, recovery key | Not started |
+| S2 — First platform | Android. Flutter UI, QR scan, manual entry, list, copy, application lock | **All but the lock interface.** The lock mechanism exists; the PIN, the timeout, and the biometric prompt do not |
+| S3 — Crypto | Vault key, key slots, Argon2id, XChaCha20-Poly1305, recovery key | **Device slot and record encryption done.** SQLCipher blocked, password and recovery slots not started |
 | S4 — Backend | API, PostgreSQL schema, key slots, quotas, enumeration resistance | Not started |
 | S5 — Sync | Sync engine, outbox, HLC, conflict resolution, prune watermark | Not started |
 | S6 — Other platforms | Remaining platforms, screen capture, tray and menu bar | Not started |
 | S7 — Passkeys | `passkeys` package, domain association, PRF slot, fallback | Not started |
+
+## The vault is now encrypted at rest
+
+Section 9.2.4's device slot is built, so a local-only vault is encrypted even
+though no sync account exists. The chain is:
+
+```
+Android Keystore key (non-exportable, StrongBox where present)
+  wraps -> vault key (256-bit, generated on first run)
+             |- HKDF "record"    -> XChaCha20-Poly1305 over each entry
+             \- HKDF "sqlcipher" -> the database key (not yet linked, see below)
+```
+
+The wrapped vault key lives in `meta.db`, which is deliberately unencrypted:
+it holds the key that opens `vault.db`, so it cannot live inside it. That split
+is enforced by the types — `MetaStore` opens alone, and `Store` cannot be built
+without one.
+
+The evidence is on-device, in `integration_test/vault_test.dart`, against a
+real Android Keystore rather than a stub: it adds an entry, then reads
+`vault.db` back off the device's flash and fails if the secret, the issuer, the
+account name, or even a payload field name appears in it.
 
 ## Layout
 
 ```
 core/            Rust core library (authcore). Every security-critical rule lives here.
   src/
-    base32.rs    RFC 4648 decoding for OTP secrets (FR-09)
-    otp.rs       TOTP and HOTP engines (FR-01 to FR-05)
-    otpauth.rs   otpauth:// URI parser (FR-10, FR-13)
-    entry.rs     EntryPayload and folder payloads (section 12.2)
-    secret.rs    SecretString: wiped on drop, redacted in Debug (section 9.4)
-    hlc.rs       Hybrid logical clock timestamps (section 10.2)
-    store.rs     Local SQLite database (section 12.1)
-    vault.rs     The payload/record seam and the RecordCipher trait (9.3)
-  tests/         RFC vectors, parser, store, vault, end-to-end pipeline
+    base32.rs       RFC 4648 decoding for OTP secrets (FR-09)
+    otp.rs          TOTP and HOTP engines (FR-01 to FR-05)
+    otpauth.rs      otpauth:// URI parser (FR-10, FR-13)
+    entry.rs        EntryPayload and folder payloads (section 12.2)
+    secret.rs       SecretString: wiped on drop, redacted in Debug (section 9.4)
+    crypto.rs       Vault key, HKDF subkeys, XChaCha20-Poly1305 records (9.2, 9.3)
+    device_slot.rs  The device slot state machine (9.2.4)
+    hlc.rs          Hybrid logical clock timestamps (section 10.2)
+    store.rs        meta.db and vault.db (section 12.1)
+    vault.rs        The payload/record seam and the RecordCipher trait (9.3)
 
 app/             Flutter application
-  lib/src/
-    pages/       Code list, QR scan, manual entry
-    services/    Clipboard auto-clear (FR-24), reference time (FR-38)
-    ui/          Countdown ring (FR-07), code display
-    rust/        Generated bridge bindings — do not edit by hand
-  rust/          The bridge crate. Translation only; no rules.
-  rust_builder/  Vendored cargokit. See "Vendored cargokit" below.
+  lib/src/services/
+    vault_keystore.dart   Channel to the Android Keystore
+    vault_session.dart    Open, lock, and wipe: the three-way handshake
+  lib/src/rust/           Generated bridge bindings — do not edit by hand
+  android/.../VaultKeystore.kt   The non-exportable wrapping key
+  rust_builder/           Vendored cargokit. See "Local workarounds".
   integration_test/
-    vault_test.dart  The core, cross compiled, running on a device
-    app_test.dart    The real screens against the real core
+    vault_test.dart       The core on a device, and the bytes it writes to flash
+    app_test.dart         The real screens against the real core
+
+scripts/
+  verify_build.sh         Checks a build's exit status AND its artifact
 ```
 
 ## Build and test
@@ -48,67 +73,89 @@ app/             Flutter application
 Requires Rust 1.98+, Flutter 3.44+, and the Android SDK with NDK 28.2.
 
 ```sh
-# Core. --all-features is required: the vault tests need the S2 cipher feature.
 cd core
-cargo test --all-features
-cargo clippy --all-targets --all-features -- -D warnings
+cargo test
+cargo clippy --all-targets -- -D warnings
 
-# Application
 cd ../app
 flutter test                                        # host widget tests
 flutter test integration_test -d <device>           # on device, needs the core
-flutter build apk --split-per-abi                   # NFR-04, see below
+
+# Always through the script, never `flutter build ... | tail`:
+sh ../scripts/verify_build.sh build/app/outputs/flutter-apk/app-debug.apk -- \
+  flutter build apk --debug
 ```
 
 `cargo` is at `%USERPROFILE%\.cargo\bin`, which was added to the user PATH.
 Terminals opened before that change will not have it.
 
-## What works today
+### Verify the build, do not trust the log
 
-The stage S2 exit criterion — "You can add a real account and sign in to that
-service with the code" — is met on Android. The evidence is
-`integration_test/vault_test.dart`, which runs the Rust core cross compiled for
-Android and checks it against the published RFC vectors on the device rather
-than on the host, and `app_test.dart`, which drives the real screens.
+`flutter build apk | tail -20` reports the exit status of `tail`. A failed
+build reads as a successful one, and it did: a broken build was reported here
+as working until the artifact was checked by hand.
 
-Working: the code list with per-second countdowns, QR scanning, manual entry,
-copy with a 30 second clipboard clear, search, delete with confirmation,
-favourites, HOTP counter advance, and duplicate detection.
+`scripts/verify_build.sh` checks both halves — the build tool's exit status,
+and that the artifact exists and was written by *this* run rather than left
+over from an earlier one. Use it for anything whose success matters.
 
 ## Known gaps, deliberately
 
-- **The application lock is not built** (FR-31 to FR-36). It is listed in S2
-  and it is the remaining piece of that stage.
-- **Nothing is encrypted.** There is no vault key until S3, so records are
-  written as plaintext JSON. This is not silent: `authcore::vault::NullCipher`
-  is the only cipher that exists and it sits behind the non-default feature
-  `insecure-null-cipher`, which the bridge crate has to name explicitly. When
-  S3 deletes that feature the bridge stops compiling and has to be pointed at
-  the real cipher. `core/tests/pipeline.rs` also asserts the payload is still
-  readable, so S3 must invert that test.
-- **SQLCipher is not linked.** Section 12.1 asks for it; it needs the S3 key.
-  Android auto-backup is disabled in the manifest so the plaintext database
-  cannot leave the device in the meantime.
-- No `otpauth-migration://`, Aegis, or `.2fas` import (S8). The scan screen
-  recognises a Google Authenticator export code and says so specifically
-  rather than reporting an invalid code.
+- **SQLCipher is not linked.** It is the one item in the plan that is blocked
+  rather than unfinished. `libsqlite3-sys` builds SQLCipher against OpenSSL,
+  and vendored OpenSSL needs a Windows Perl to configure; only Git Bash's Perl
+  is present, and it cannot configure a `VC-WIN64A` build. The key it would use
+  is already derived and unused (`VaultKey::sqlcipher_key`), and `Store::open`
+  already takes it, so linking it is a one-line change once the build
+  dependency is available.
+
+  What this costs today: entry *payloads* are encrypted per record, so no
+  secret, issuer, or account name is readable. What stays visible in `vault.db`
+  is the shape around them — how many entries exist, when each changed, and the
+  device identifier inside each HLC.
+
+- **The application lock has a mechanism but no interface.** `lock_vault`
+  genuinely drops the vault key rather than hiding the screen, and the
+  integration tests prove the entries become unreachable while locked. What is
+  missing is FR-31's PIN, FR-33's timeout, and FR-32's biometric prompt. The
+  `keystore-pin-v1` scheme is defined and refused at startup rather than
+  silently treated as an ordinary slot.
+
+- **The vault key crosses into Dart.** A non-exportable keystore key can only
+  be driven from platform code, so the raw key passes through Dart once at
+  setup and once at each unlock. Dart cannot wipe memory the way `Zeroizing`
+  can — `VaultKeystore.wipe` overwrites the buffer we own and returns false
+  when handed an unmodifiable channel buffer it cannot touch. Closing this
+  means calling the keystore from Rust over JNI, which needs a handle to the
+  JVM that `flutter_rust_bridge` does not currently hand out.
+
+- **No password slot, no recovery key.** Sections 9.2.1 and 9.2.3, needed
+  before S4. Argon2 is already a dependency.
+
+- No `otpauth-migration://`, Aegis, or `.2fas` import (S8).
 
 ## Local workarounds
 
-Three, all forced by version skew in the toolchain rather than by choice.
-
 **Vendored cargokit.** `app/rust_builder/cargokit/gradle/plugin.gradle` is
-third-party code that ships with `flutter_rust_bridge`. It calls
-`project.exec {}` from a task action, which Gradle 9 removed, and Flutter 3.44
-ships Gradle 9.1 — so every build failed. It is patched to use an injected
-`ExecOperations`, which is what `project.exec` delegated to anyway. The patch
-is marked `LOCAL PATCH` in the file and will be overwritten if cargokit is
-regenerated.
+third-party code shipped with `flutter_rust_bridge`. It called `project.exec {}`
+from a task action, which Gradle 9 removed, and Flutter 3.44 ships Gradle 9.1 —
+so every build failed. It is patched to use an injected `ExecOperations`.
+
+Regenerating the bridge overwrites that directory and silently reverts the
+patch, and the resulting build failure names nothing about cargokit. So
+`app/test/cargokit_patch_test.dart` fails loudly if `project.exec` reappears at
+a call site, or if the replacement or the `LOCAL PATCH` marker goes missing.
+Re-apply the patch rather than deleting the test.
 
 **compileSdk pinned to 36 for all subprojects.** `flutter_secure_storage`
 11.0.0 hardcodes `compileSdk = 37`, but no bare `android-37` platform is
 published — only `android-37.0` and `android-37.1` — so the request cannot
-resolve. Flutter's own default is 36. See `app/android/build.gradle.kts`.
+resolve. Flutter's own default is 36.
+
+*Revisit when a bare `android-37` platform publishes* — check with
+`sdkmanager --list | grep "platforms;android-37"` for an entry with no minor
+version — or when `flutter_secure_storage` stops pinning 37. Until one of those
+happens the pin must stay, and raising it will fail the same way.
 
 **Kotlin incremental compilation disabled.** Its cache files could not be
 closed under this build directory on Windows, failing every plugin compile.
@@ -117,22 +164,30 @@ Costs build time and nothing else. See `app/android/gradle.properties`.
 ## Notes carried forward
 
 - **`applicationId` is `dev.authcore.authenticator` and is provisional.** It is
-  the Play listing identity and it must appear in `assetlinks.json` for S7.
-  Cheap to change now, painful after either.
+  the Play listing identity and must appear in `assetlinks.json` for S7. Cheap
+  to change now, painful after either.
+- **The stage S2 plaintext database is discarded, not migrated.** Development
+  data only, and a migration would have to read every plaintext secret and
+  rewrite it, leaving plaintext in the old file's free pages if it failed part
+  way. `discard_legacy_plaintext_vault` detects the S2 layout structurally — an
+  S2 vault has a `meta` table inside it, an S3 vault never does — and deletes
+  the file along with its journal and write-ahead copies.
+- **Losing the keystore key loses the vault.** Clearing the application's data,
+  reinstalling, and on some devices removing the screen lock destroy the
+  wrapping key, and the wrapped vault key becomes permanently unopenable. That
+  is inherent to a local-only vault, and it is why section 9.2.4 warns that a
+  synced account can be restored and a local-only one cannot.
 - `flutter build apk` alone produces a universal APK that will exceed NFR-04's
-  40 MB once the core ships for four ABIs. Use `--split-per-abi`, or
-  `flutter build appbundle` for Play. A `splits { abi { … } }` block in gradle
-  conflicts with Flutter's own `abiFilters` and breaks the build.
+  40 MB. Use `--split-per-abi`, or `flutter build appbundle` for Play. A
+  `splits { abi { ... } }` block conflicts with Flutter's own `abiFilters`.
 - **`FLAG_SECURE` makes `adb screencap` return the app's frames blank.** That
-  is section 9.4 working, not a hang. SurfaceFlinger reports every layer of the
-  activity as `(Secure)`. Screenshots for a store listing will need the flag
-  temporarily removed on a throwaway build.
+  is section 9.4 working, not a hang — SurfaceFlinger reports every layer of
+  the activity as `(Secure)`. Store screenshots need the flag temporarily
+  removed on a throwaway build.
 - The clipboard clear in FR-24 reads the clipboard back and only clears it if
-  it still holds the code it wrote, so it cannot destroy something the user
-  copied since. Android clipboard history and some keyboards retain a copy
-  regardless — the 30 seconds narrows the window, it does not erase the code.
-- An HOTP URI with no counter is refused rather than defaulted to zero. A
-  guessed counter is out of step with the issuer from the first code. FR-15d
+  it still holds the code it wrote. Android clipboard history and some
+  keyboards retain a copy regardless.
+- An HOTP URI with no counter is refused rather than defaulted to zero. FR-15d
   covers reporting this during an import.
-- `Store::device_id` generates the 64-bit device identifier once and never
+- `MetaStore::device_id` generates the 64-bit device identifier once and never
   changes it. The section 10.4 tiebreak depends on that.

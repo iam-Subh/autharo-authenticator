@@ -64,7 +64,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.12.0';
 
   @override
-  int get rustContentHash => -538449558;
+  int get rustContentHash => 1553272400;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -98,11 +98,30 @@ abstract class RustLibApi extends BaseApi {
     required PlatformInt64 nowMs,
   });
 
-  void crateApiVaultCloseVault();
+  Future<WrappedKeyBlob> crateApiVaultBeginDeviceOpen();
+
+  Future<Uint8List> crateApiVaultBeginDeviceSetup();
 
   Future<void> crateApiVaultDeleteEntry({
     required String id,
     required PlatformInt64 nowMs,
+  });
+
+  bool crateApiVaultDiscardLegacyVault({
+    required String vaultPath,
+    required String metaPath,
+  });
+
+  Future<void> crateApiVaultFinishDeviceOpen({
+    required String vaultPath,
+    required List<int> unwrapped,
+  });
+
+  Future<void> crateApiVaultFinishDeviceSetup({
+    required String vaultPath,
+    required List<int> wrapped,
+    required List<int> nonce,
+    required bool withPin,
   });
 
   bool crateApiVaultIsVaultOpen();
@@ -111,7 +130,9 @@ abstract class RustLibApi extends BaseApi {
     required PlatformInt64 nowUnixSeconds,
   });
 
-  void crateApiVaultOpenVault({required String dbPath});
+  void crateApiVaultLockVault();
+
+  String crateApiVaultOpenMeta({required String metaPath});
 
   Future<EntryPreview> crateApiVaultPreviewUri({required String uri});
 
@@ -135,6 +156,8 @@ abstract class RustLibApi extends BaseApi {
   });
 
   Future<PlatformInt64> crateApiVaultTimeOffsetSeconds();
+
+  Future<void> crateApiVaultWipeDevice();
 }
 
 class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
@@ -280,26 +303,58 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       const TaskConstMeta(debugName: "advance_hotp", argNames: ["id", "nowMs"]);
 
   @override
-  void crateApiVaultCloseVault() {
-    return handler.executeSync(
-      SyncTask(
-        callFfi: () {
+  Future<WrappedKeyBlob> crateApiVaultBeginDeviceOpen() {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
           final serializer = SseSerializer(generalizedFrbRustBinding);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 4)!;
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 4,
+            port: port_,
+          );
         },
         codec: SseCodec(
-          decodeSuccessData: sse_decode_unit,
+          decodeSuccessData: sse_decode_wrapped_key_blob,
           decodeErrorData: sse_decode_AnyhowException,
         ),
-        constMeta: kCrateApiVaultCloseVaultConstMeta,
+        constMeta: kCrateApiVaultBeginDeviceOpenConstMeta,
         argValues: [],
         apiImpl: this,
       ),
     );
   }
 
-  TaskConstMeta get kCrateApiVaultCloseVaultConstMeta =>
-      const TaskConstMeta(debugName: "close_vault", argNames: []);
+  TaskConstMeta get kCrateApiVaultBeginDeviceOpenConstMeta =>
+      const TaskConstMeta(debugName: "begin_device_open", argNames: []);
+
+  @override
+  Future<Uint8List> crateApiVaultBeginDeviceSetup() {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 5,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_list_prim_u_8_strict,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiVaultBeginDeviceSetupConstMeta,
+        argValues: [],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiVaultBeginDeviceSetupConstMeta =>
+      const TaskConstMeta(debugName: "begin_device_setup", argNames: []);
 
   @override
   Future<void> crateApiVaultDeleteEntry({
@@ -315,7 +370,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 5,
+            funcId: 6,
             port: port_,
           );
         },
@@ -334,12 +389,116 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       const TaskConstMeta(debugName: "delete_entry", argNames: ["id", "nowMs"]);
 
   @override
+  bool crateApiVaultDiscardLegacyVault({
+    required String vaultPath,
+    required String metaPath,
+  }) {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(vaultPath, serializer);
+          sse_encode_String(metaPath, serializer);
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 7)!;
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_bool,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiVaultDiscardLegacyVaultConstMeta,
+        argValues: [vaultPath, metaPath],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiVaultDiscardLegacyVaultConstMeta =>
+      const TaskConstMeta(
+        debugName: "discard_legacy_vault",
+        argNames: ["vaultPath", "metaPath"],
+      );
+
+  @override
+  Future<void> crateApiVaultFinishDeviceOpen({
+    required String vaultPath,
+    required List<int> unwrapped,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(vaultPath, serializer);
+          sse_encode_list_prim_u_8_loose(unwrapped, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 8,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiVaultFinishDeviceOpenConstMeta,
+        argValues: [vaultPath, unwrapped],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiVaultFinishDeviceOpenConstMeta =>
+      const TaskConstMeta(
+        debugName: "finish_device_open",
+        argNames: ["vaultPath", "unwrapped"],
+      );
+
+  @override
+  Future<void> crateApiVaultFinishDeviceSetup({
+    required String vaultPath,
+    required List<int> wrapped,
+    required List<int> nonce,
+    required bool withPin,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(vaultPath, serializer);
+          sse_encode_list_prim_u_8_loose(wrapped, serializer);
+          sse_encode_list_prim_u_8_loose(nonce, serializer);
+          sse_encode_bool(withPin, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 9,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiVaultFinishDeviceSetupConstMeta,
+        argValues: [vaultPath, wrapped, nonce, withPin],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiVaultFinishDeviceSetupConstMeta =>
+      const TaskConstMeta(
+        debugName: "finish_device_setup",
+        argNames: ["vaultPath", "wrapped", "nonce", "withPin"],
+      );
+
+  @override
   bool crateApiVaultIsVaultOpen() {
     return handler.executeSync(
       SyncTask(
         callFfi: () {
           final serializer = SseSerializer(generalizedFrbRustBinding);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 6)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 10)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_bool,
@@ -367,7 +526,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 7,
+            funcId: 11,
             port: port_,
           );
         },
@@ -388,27 +547,49 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   );
 
   @override
-  void crateApiVaultOpenVault({required String dbPath}) {
+  void crateApiVaultLockVault() {
     return handler.executeSync(
       SyncTask(
         callFfi: () {
           final serializer = SseSerializer(generalizedFrbRustBinding);
-          sse_encode_String(dbPath, serializer);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 8)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 12)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_unit,
           decodeErrorData: sse_decode_AnyhowException,
         ),
-        constMeta: kCrateApiVaultOpenVaultConstMeta,
-        argValues: [dbPath],
+        constMeta: kCrateApiVaultLockVaultConstMeta,
+        argValues: [],
         apiImpl: this,
       ),
     );
   }
 
-  TaskConstMeta get kCrateApiVaultOpenVaultConstMeta =>
-      const TaskConstMeta(debugName: "open_vault", argNames: ["dbPath"]);
+  TaskConstMeta get kCrateApiVaultLockVaultConstMeta =>
+      const TaskConstMeta(debugName: "lock_vault", argNames: []);
+
+  @override
+  String crateApiVaultOpenMeta({required String metaPath}) {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(metaPath, serializer);
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 13)!;
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_String,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiVaultOpenMetaConstMeta,
+        argValues: [metaPath],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiVaultOpenMetaConstMeta =>
+      const TaskConstMeta(debugName: "open_meta", argNames: ["metaPath"]);
 
   @override
   Future<EntryPreview> crateApiVaultPreviewUri({required String uri}) {
@@ -420,7 +601,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 9,
+            funcId: 14,
             port: port_,
           );
         },
@@ -456,7 +637,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 10,
+            funcId: 15,
             port: port_,
           );
         },
@@ -486,7 +667,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 11,
+            funcId: 16,
             port: port_,
           );
         },
@@ -523,7 +704,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 12,
+            funcId: 17,
             port: port_,
           );
         },
@@ -555,7 +736,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 13,
+            funcId: 18,
             port: port_,
           );
         },
@@ -585,7 +766,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 14,
+            funcId: 19,
             port: port_,
           );
         },
@@ -602,6 +783,33 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
 
   TaskConstMeta get kCrateApiVaultTimeOffsetSecondsConstMeta =>
       const TaskConstMeta(debugName: "time_offset_seconds", argNames: []);
+
+  @override
+  Future<void> crateApiVaultWipeDevice() {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 20,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiVaultWipeDeviceConstMeta,
+        argValues: [],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiVaultWipeDeviceConstMeta =>
+      const TaskConstMeta(debugName: "wipe_device", argNames: []);
 
   @protected
   AnyhowException dco_decode_AnyhowException(dynamic raw) {
@@ -691,6 +899,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  List<int> dco_decode_list_prim_u_8_loose(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw as List<int>;
+  }
+
+  @protected
   Uint8List dco_decode_list_prim_u_8_strict(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw as Uint8List;
@@ -730,6 +944,20 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   void dco_decode_unit(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return;
+  }
+
+  @protected
+  WrappedKeyBlob dco_decode_wrapped_key_blob(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 4)
+      throw Exception('unexpected arr length: expect 4 but see ${arr.length}');
+    return WrappedKeyBlob(
+      wrapped: dco_decode_list_prim_u_8_strict(arr[0]),
+      nonce: dco_decode_list_prim_u_8_strict(arr[1]),
+      scheme: dco_decode_String(arr[2]),
+      needsPin: dco_decode_bool(arr[3]),
+    );
   }
 
   @protected
@@ -837,6 +1065,13 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  List<int> sse_decode_list_prim_u_8_loose(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var len_ = sse_decode_i_32(deserializer);
+    return deserializer.buffer.getUint8List(len_);
+  }
+
+  @protected
   Uint8List sse_decode_list_prim_u_8_strict(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var len_ = sse_decode_i_32(deserializer);
@@ -886,6 +1121,21 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   @protected
   void sse_decode_unit(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
+  }
+
+  @protected
+  WrappedKeyBlob sse_decode_wrapped_key_blob(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_wrapped = sse_decode_list_prim_u_8_strict(deserializer);
+    var var_nonce = sse_decode_list_prim_u_8_strict(deserializer);
+    var var_scheme = sse_decode_String(deserializer);
+    var var_needsPin = sse_decode_bool(deserializer);
+    return WrappedKeyBlob(
+      wrapped: var_wrapped,
+      nonce: var_nonce,
+      scheme: var_scheme,
+      needsPin: var_needsPin,
+    );
   }
 
   @protected
@@ -976,6 +1226,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_list_prim_u_8_loose(
+    List<int> self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.length, serializer);
+    serializer.buffer.putUint8List(
+      self is Uint8List ? self : Uint8List.fromList(self),
+    );
+  }
+
+  @protected
   void sse_encode_list_prim_u_8_strict(
     Uint8List self,
     SseSerializer serializer,
@@ -1026,6 +1288,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   @protected
   void sse_encode_unit(void self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
+  }
+
+  @protected
+  void sse_encode_wrapped_key_blob(
+    WrappedKeyBlob self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_list_prim_u_8_strict(self.wrapped, serializer);
+    sse_encode_list_prim_u_8_strict(self.nonce, serializer);
+    sse_encode_String(self.scheme, serializer);
+    sse_encode_bool(self.needsPin, serializer);
   }
 
   @protected

@@ -1,14 +1,29 @@
 //! The local database (PRD section 12.1).
 //!
-//! The store deals only in ciphertext. It never sees a secret, an issuer, or a
-//! vault key, which keeps the encryption boundary in one place: stage S3 adds
-//! the layer above this one that turns an [`crate::entry::Payload`] into the
-//! `ciphertext` and `nonce` stored here.
+//! # Two files, not one
 //!
-//! Note on at-rest encryption: this stage links plain SQLite. Section 12.1
-//! calls for SQLCipher, which arrives in S3 together with the vault key —
-//! there is no key to open the database with until then. Until that lands, a
-//! local database file is not encrypted at rest.
+//! Section 12.1: "The `meta` table holds the wrapped vault key and must stay
+//! readable before the vault opens, so keep it in a small separate unencrypted
+//! file, not inside the encrypted database."
+//!
+//! That is a bootstrapping constraint, not a preference. The key that opens
+//! the encrypted database is itself stored wrapped in `meta`, so `meta` cannot
+//! live inside the thing it unlocks. The split is expressed in the types:
+//! [`MetaStore`] opens on its own, and [`Store`] cannot be constructed without
+//! one, so no code path can reach the entries before the metadata.
+//!
+//! What each file holds:
+//!
+//! | File | Encrypted | Contents |
+//! |---|---|---|
+//! | `meta.db` | No | Wrapped vault key, device identifier, sync cursor, time offset |
+//! | `vault.db` | By SQLCipher | `entry` and `outbox` |
+//!
+//! Nothing secret goes in `meta.db`. The wrapped vault key is ciphertext that
+//! only the platform keystore can open, and the device identifier and cursor
+//! are not secrets. Entry payloads are additionally encrypted per record
+//! (section 9.3), so the SQLCipher layer protects the surrounding structure —
+//! how many entries exist and when each changed — rather than their contents.
 
 use core::fmt;
 
@@ -17,8 +32,10 @@ use uuid::Uuid;
 
 use crate::hlc::{Hlc, HlcParseError};
 
-/// Schema version written to `PRAGMA user_version`.
-const SCHEMA_VERSION: i64 = 1;
+/// Schema version written to `PRAGMA user_version` in the vault file.
+const VAULT_SCHEMA_VERSION: i64 = 1;
+/// Schema version for the metadata file.
+const META_SCHEMA_VERSION: i64 = 1;
 
 /// `meta` key holding the sync cursor, the highest server sequence seen.
 const META_CURSOR: &str = "cursor";
@@ -26,6 +43,10 @@ const META_CURSOR: &str = "cursor";
 const META_DEVICE_ID: &str = "device_id";
 /// `meta` key holding the offset between device time and reference time (FR-38).
 const META_TIME_OFFSET: &str = "time_offset_seconds";
+/// `meta` keys holding the device slot (section 9.2.4).
+const META_SLOT_WRAPPED: &str = "device_slot.wrapped_key";
+const META_SLOT_NONCE: &str = "device_slot.nonce";
+const META_SLOT_SCHEME: &str = "device_slot.scheme";
 
 /// One encrypted record as stored on this device.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,6 +76,18 @@ pub struct OutboxItem {
     pub last_attempt: Option<i64>,
 }
 
+/// The vault key as it sits on disk: wrapped by the device slot (section 9.2.4).
+///
+/// `scheme` names how it was wrapped, so a device that later gains a PIN, or a
+/// future release that changes the wrapping, can tell what it is looking at
+/// instead of guessing from the length.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WrappedVaultKey {
+    pub wrapped: Vec<u8>,
+    pub nonce: Vec<u8>,
+    pub scheme: String,
+}
+
 /// Anything that stops a database operation.
 #[derive(Debug)]
 pub enum StoreError {
@@ -62,6 +95,10 @@ pub enum StoreError {
     /// A stored HLC string that no longer parses, which means the file was
     /// edited outside the application.
     CorruptTimestamp(HlcParseError),
+    /// The device slot in `meta` is present but incomplete.
+    CorruptDeviceSlot {
+        detail: String,
+    },
 }
 
 impl fmt::Display for StoreError {
@@ -71,6 +108,10 @@ impl fmt::Display for StoreError {
             Self::CorruptTimestamp(error) => {
                 write!(f, "The local database holds a damaged timestamp: {error}")
             }
+            Self::CorruptDeviceSlot { detail } => write!(
+                f,
+                "This device's key record is damaged, so the vault cannot be opened: {detail}"
+            ),
         }
     }
 }
@@ -91,28 +132,204 @@ impl From<HlcParseError> for StoreError {
 
 type Result<T> = core::result::Result<T, StoreError>;
 
-/// The local database.
-pub struct Store {
+/// The unencrypted metadata file.
+///
+/// Opens without a key, because it holds the wrapped key that everything else
+/// needs. Keep it small and keep secrets out of it.
+pub struct MetaStore {
     connection: Connection,
 }
 
-impl Store {
-    /// Opens or creates the database at `path` and brings the schema up to
-    /// date.
+impl MetaStore {
     pub fn open(path: &str) -> Result<Self> {
         Self::from_connection(Connection::open(path)?)
     }
 
-    /// An in-memory database, for tests.
     pub fn open_in_memory() -> Result<Self> {
         Self::from_connection(Connection::open_in_memory()?)
     }
 
     fn from_connection(connection: Connection) -> Result<Self> {
+        let store = Self { connection };
+        store.migrate()?;
+        Ok(store)
+    }
+
+    fn migrate(&self) -> Result<()> {
+        let version: i64 = self
+            .connection
+            .query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        if version >= META_SCHEMA_VERSION {
+            return Ok(());
+        }
+        self.connection.execute_batch(
+            "BEGIN;
+             CREATE TABLE IF NOT EXISTS meta (
+               key           TEXT PRIMARY KEY,
+               value         BLOB NOT NULL
+             );
+             PRAGMA user_version = 1;
+             COMMIT;",
+        )?;
+        Ok(())
+    }
+
+    pub fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT value FROM meta WHERE key = ?1",
+                params![key],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
+    pub fn set(&self, key: &str, value: &[u8]) -> Result<()> {
+        self.connection.execute(
+            "INSERT INTO meta (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![key, value],
+        )?;
+        Ok(())
+    }
+
+    pub fn remove(&self, key: &str) -> Result<()> {
+        self.connection
+            .execute("DELETE FROM meta WHERE key = ?1", params![key])?;
+        Ok(())
+    }
+
+    /// The device slot, or `None` on a device that has never been set up.
+    pub fn device_slot(&self) -> Result<Option<WrappedVaultKey>> {
+        let Some(wrapped) = self.get(META_SLOT_WRAPPED)? else {
+            return Ok(None);
+        };
+        let nonce = self
+            .get(META_SLOT_NONCE)?
+            .ok_or_else(|| StoreError::CorruptDeviceSlot {
+                detail: "the wrapped key is present but its nonce is missing".to_string(),
+            })?;
+        let scheme = self
+            .get(META_SLOT_SCHEME)?
+            .and_then(|bytes| String::from_utf8(bytes).ok())
+            .ok_or_else(|| StoreError::CorruptDeviceSlot {
+                detail: "the wrapped key is present but its scheme is missing".to_string(),
+            })?;
+
+        Ok(Some(WrappedVaultKey {
+            wrapped,
+            nonce,
+            scheme,
+        }))
+    }
+
+    /// Writes the device slot. All three parts land together, so a crash
+    /// cannot leave a wrapped key without the nonce that opens it.
+    pub fn set_device_slot(&mut self, slot: &WrappedVaultKey) -> Result<()> {
+        let transaction = self.connection.transaction()?;
+        for (key, value) in [
+            (META_SLOT_WRAPPED, slot.wrapped.as_slice()),
+            (META_SLOT_NONCE, slot.nonce.as_slice()),
+            (META_SLOT_SCHEME, slot.scheme.as_bytes()),
+        ] {
+            transaction.execute(
+                "INSERT INTO meta (key, value) VALUES (?1, ?2)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                params![key, value],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Removes the device slot. The local vault becomes unopenable, which is
+    /// the point: this is half of **Wipe this device** in section 9.2.4.
+    pub fn clear_device_slot(&mut self) -> Result<()> {
+        let transaction = self.connection.transaction()?;
+        for key in [META_SLOT_WRAPPED, META_SLOT_NONCE, META_SLOT_SCHEME] {
+            transaction.execute("DELETE FROM meta WHERE key = ?1", params![key])?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// This device's identifier, generated on first use and never changed.
+    pub fn device_id(&self) -> Result<u64> {
+        if let Some(bytes) = self.get(META_DEVICE_ID)?
+            && let Ok(bytes) = <[u8; 8]>::try_from(bytes.as_slice())
+        {
+            return Ok(u64::from_be_bytes(bytes));
+        }
+        let (high, _) = Uuid::new_v4().as_u64_pair();
+        self.set(META_DEVICE_ID, &high.to_be_bytes())?;
+        Ok(high)
+    }
+
+    /// The highest server sequence this device has applied.
+    pub fn cursor(&self) -> Result<i64> {
+        Ok(self
+            .get(META_CURSOR)?
+            .and_then(|bytes| String::from_utf8(bytes).ok())
+            .and_then(|text| text.parse().ok())
+            .unwrap_or(0))
+    }
+
+    pub fn set_cursor(&self, cursor: i64) -> Result<()> {
+        self.set(META_CURSOR, cursor.to_string().as_bytes())
+    }
+
+    /// The stored offset between device time and reference time (FR-38).
+    pub fn time_offset_seconds(&self) -> Result<i64> {
+        Ok(self
+            .get(META_TIME_OFFSET)?
+            .and_then(|bytes| String::from_utf8(bytes).ok())
+            .and_then(|text| text.parse().ok())
+            .unwrap_or(0))
+    }
+
+    pub fn set_time_offset_seconds(&self, offset: i64) -> Result<()> {
+        self.set(META_TIME_OFFSET, offset.to_string().as_bytes())
+    }
+}
+
+/// The encrypted vault file, plus the metadata file it needs to open.
+pub struct Store {
+    vault: Connection,
+    meta: MetaStore,
+}
+
+impl Store {
+    /// Opens the vault at `path`.
+    ///
+    /// `sqlcipher_key` is the 64 hex character key from
+    /// [`crate::crypto::VaultKey::sqlcipher_key`]. `None` opens the file
+    /// unencrypted, which is only for the host tests — see the note in
+    /// README.md about SQLCipher not yet being linked.
+    pub fn open(path: &str, meta: MetaStore, sqlcipher_key: Option<&str>) -> Result<Self> {
+        let vault = Connection::open(path)?;
+        Self::from_connection(vault, meta, sqlcipher_key)
+    }
+
+    pub fn open_in_memory(meta: MetaStore) -> Result<Self> {
+        Self::from_connection(Connection::open_in_memory()?, meta, None)
+    }
+
+    fn from_connection(
+        vault: Connection,
+        meta: MetaStore,
+        sqlcipher_key: Option<&str>,
+    ) -> Result<Self> {
+        if let Some(key) = sqlcipher_key {
+            // Must be the first statement on the connection: SQLCipher reads
+            // the key before touching the file header.
+            vault.pragma_update(None, "key", format!("x'{key}'"))?;
+        }
         // Foreign keys are off by default in SQLite, and the outbox references
         // the entry table.
-        connection.pragma_update(None, "foreign_keys", true)?;
-        let store = Self { connection };
+        vault.pragma_update(None, "foreign_keys", true)?;
+
+        let store = Self { vault, meta };
         store.migrate()?;
         Ok(store)
     }
@@ -120,13 +337,13 @@ impl Store {
     /// Applies the schema in section 12.1. Safe to call on every open.
     fn migrate(&self) -> Result<()> {
         let version: i64 = self
-            .connection
+            .vault
             .query_row("PRAGMA user_version", [], |row| row.get(0))?;
-        if version >= SCHEMA_VERSION {
+        if version >= VAULT_SCHEMA_VERSION {
             return Ok(());
         }
 
-        self.connection.execute_batch(
+        self.vault.execute_batch(
             "BEGIN;
              CREATE TABLE IF NOT EXISTS entry (
                id            TEXT PRIMARY KEY,
@@ -143,14 +360,28 @@ impl Store {
                attempts      INTEGER NOT NULL DEFAULT 0,
                last_attempt  INTEGER
              );
-             CREATE TABLE IF NOT EXISTS meta (
-               key           TEXT PRIMARY KEY,
-               value         BLOB NOT NULL
-             );
              PRAGMA user_version = 1;
              COMMIT;",
         )?;
         Ok(())
+    }
+
+    /// The metadata file this vault was opened with.
+    pub fn meta(&self) -> &MetaStore {
+        &self.meta
+    }
+
+    pub fn meta_mut(&mut self) -> &mut MetaStore {
+        &mut self.meta
+    }
+
+    /// Drops the vault connection and returns the metadata file.
+    ///
+    /// This is what a lock does (FR-31): the vault connection and the key that
+    /// opened it go away, while the metadata file stays open so the next
+    /// unlock can read the slot without reopening it.
+    pub fn into_meta(self) -> MetaStore {
+        self.meta
     }
 
     /// Writes a record this device changed, and queues it for the server in
@@ -159,7 +390,7 @@ impl Store {
     /// `base_hlc` is the HLC the server last confirmed for this entry, or
     /// `None` for an entry the server has never seen.
     pub fn write_local(&mut self, record: &Record, base_hlc: Option<Hlc>) -> Result<()> {
-        let transaction = self.connection.transaction()?;
+        let transaction = self.vault.transaction()?;
         upsert(&transaction, record)?;
         transaction.execute(
             "INSERT INTO outbox (entry_id, base_hlc, attempts, last_attempt)
@@ -174,13 +405,13 @@ impl Store {
     /// Writes a record received from the server. This does not touch the
     /// outbox, because the server already holds this version.
     pub fn apply_remote(&mut self, record: &Record) -> Result<()> {
-        upsert(&self.connection, record)?;
+        upsert(&self.vault, record)?;
         Ok(())
     }
 
     pub fn get(&self, id: &str) -> Result<Option<Record>> {
         let record = self
-            .connection
+            .vault
             .query_row(
                 "SELECT id, ciphertext, nonce, hlc, deleted, server_seq, updated_at
                  FROM entry WHERE id = ?1",
@@ -194,7 +425,7 @@ impl Store {
     /// Every live record, newest first. Tombstones are excluded unless asked
     /// for, since the user interface never shows them.
     pub fn list(&self, include_deleted: bool) -> Result<Vec<Record>> {
-        let mut statement = self.connection.prepare(
+        let mut statement = self.vault.prepare(
             "SELECT id, ciphertext, nonce, hlc, deleted, server_seq, updated_at
              FROM entry WHERE (?1 OR deleted = 0) ORDER BY hlc DESC",
         )?;
@@ -209,8 +440,7 @@ impl Store {
     /// The row stays as a tombstone so that the delete can reach the other
     /// devices. Returns false when the entry is not present.
     pub fn tombstone(&mut self, id: &str, hlc: Hlc, updated_at: i64) -> Result<bool> {
-        let existing = self.get(id)?;
-        let Some(existing) = existing else {
+        let Some(existing) = self.get(id)? else {
             return Ok(false);
         };
         let record = Record {
@@ -228,7 +458,7 @@ impl Store {
 
     /// Everything waiting to be pushed, oldest change first.
     pub fn outbox(&self) -> Result<Vec<OutboxItem>> {
-        let mut statement = self.connection.prepare(
+        let mut statement = self.vault.prepare(
             "SELECT o.entry_id, o.base_hlc, o.attempts, o.last_attempt
              FROM outbox o JOIN entry e ON e.id = o.entry_id
              ORDER BY e.hlc ASC",
@@ -260,7 +490,7 @@ impl Store {
 
     /// Removes the entries the server accepted (step 7 of the sync cycle).
     pub fn outbox_clear(&mut self, entry_ids: &[String]) -> Result<()> {
-        let transaction = self.connection.transaction()?;
+        let transaction = self.vault.transaction()?;
         for id in entry_ids {
             transaction.execute("DELETE FROM outbox WHERE entry_id = ?1", params![id])?;
         }
@@ -270,7 +500,7 @@ impl Store {
 
     /// Records a failed push, which drives the backoff in OFF-06.
     pub fn outbox_record_attempt(&self, entry_id: &str, at: i64) -> Result<()> {
-        self.connection.execute(
+        self.vault.execute(
             "UPDATE outbox SET attempts = attempts + 1, last_attempt = ?2 WHERE entry_id = ?1",
             params![entry_id, at],
         )?;
@@ -279,80 +509,54 @@ impl Store {
 
     /// Replaces every record in one transaction (section 10.6, full re-sync).
     ///
-    /// The outbox is kept, because a local change that has not reached the
-    /// server yet must survive a re-sync or it is lost.
+    /// The outbox is cleared with them, because a re-sync replaces the local
+    /// state wholesale.
     pub fn replace_all(&mut self, records: &[Record], cursor: i64) -> Result<()> {
-        let transaction = self.connection.transaction()?;
+        let transaction = self.vault.transaction()?;
         transaction.execute("DELETE FROM outbox", [])?;
         transaction.execute("DELETE FROM entry", [])?;
         for record in records {
             upsert(&transaction, record)?;
         }
-        transaction.execute(
-            "INSERT INTO meta (key, value) VALUES (?1, ?2)
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            params![META_CURSOR, cursor.to_string().as_bytes()],
-        )?;
+        transaction.commit()?;
+        self.meta.set_cursor(cursor)?;
+        Ok(())
+    }
+
+    /// Deletes every entry and every outbox row, leaving the schema in place.
+    ///
+    /// Used by **Wipe this device** together with
+    /// [`MetaStore::clear_device_slot`], and by the development-database wipe
+    /// described in README.md.
+    pub fn clear_entries(&mut self) -> Result<()> {
+        let transaction = self.vault.transaction()?;
+        transaction.execute("DELETE FROM outbox", [])?;
+        transaction.execute("DELETE FROM entry", [])?;
         transaction.commit()?;
         Ok(())
     }
 
-    pub fn meta_get(&self, key: &str) -> Result<Option<Vec<u8>>> {
-        Ok(self
-            .connection
-            .query_row(
-                "SELECT value FROM meta WHERE key = ?1",
-                params![key],
-                |row| row.get(0),
-            )
-            .optional()?)
-    }
+    // Convenience passthroughs, so callers holding a Store do not have to
+    // reach through `meta()` for the things they use most.
 
-    pub fn meta_set(&self, key: &str, value: &[u8]) -> Result<()> {
-        self.connection.execute(
-            "INSERT INTO meta (key, value) VALUES (?1, ?2)
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            params![key, value],
-        )?;
-        Ok(())
-    }
-
-    /// The highest server sequence this device has applied.
     pub fn cursor(&self) -> Result<i64> {
-        Ok(self
-            .meta_get(META_CURSOR)?
-            .and_then(|bytes| String::from_utf8(bytes).ok())
-            .and_then(|text| text.parse().ok())
-            .unwrap_or(0))
+        self.meta.cursor()
     }
 
     pub fn set_cursor(&self, cursor: i64) -> Result<()> {
-        self.meta_set(META_CURSOR, cursor.to_string().as_bytes())
+        self.meta.set_cursor(cursor)
     }
 
-    /// This device's identifier, generated on first use and never changed.
     pub fn device_id(&self) -> Result<u64> {
-        if let Some(bytes) = self.meta_get(META_DEVICE_ID)?
-            && let Ok(bytes) = <[u8; 8]>::try_from(bytes.as_slice())
-        {
-            return Ok(u64::from_be_bytes(bytes));
-        }
-        let (high, _) = Uuid::new_v4().as_u64_pair();
-        self.meta_set(META_DEVICE_ID, &high.to_be_bytes())?;
-        Ok(high)
+        self.meta.device_id()
     }
 
-    /// The stored offset between device time and reference time (FR-38).
     pub fn time_offset_seconds(&self) -> Result<i64> {
-        Ok(self
-            .meta_get(META_TIME_OFFSET)?
-            .and_then(|bytes| String::from_utf8(bytes).ok())
-            .and_then(|text| text.parse().ok())
-            .unwrap_or(0))
+        self.meta.time_offset_seconds()
     }
 
     pub fn set_time_offset_seconds(&self, offset: i64) -> Result<()> {
-        self.meta_set(META_TIME_OFFSET, offset.to_string().as_bytes())
+        self.meta.set_time_offset_seconds(offset)
     }
 }
 
@@ -400,4 +604,55 @@ fn read_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<Record>> {
 /// Generates an identifier for a new entry (section 10.2).
 pub fn new_entry_id() -> String {
     Uuid::new_v4().to_string()
+}
+
+/// Deletes a stage S2 database, which stored payloads in plaintext.
+///
+/// Stage S2 kept `meta`, `entry`, and `outbox` in one unencrypted file, with
+/// the payload written into the `ciphertext` column as it was. Stage S3 splits
+/// the files and encrypts the payloads, so an S2 file is not readable by this
+/// build: the records would fail to decrypt and be reported as damaged, which
+/// looks exactly like data loss.
+///
+/// The choice is to migrate or to discard, and this discards. Those files hold
+/// development data only, and a migration would have to read every plaintext
+/// secret and rewrite it, leaving the plaintext on disk in the free pages of
+/// the old file if anything failed part way. Deleting the file leaves nothing.
+///
+/// Detection is structural rather than a version number: an S2 vault has a
+/// `meta` table inside it, and an S3 vault never does, because `meta` moved to
+/// its own file. Returns true when something was deleted.
+pub fn discard_legacy_plaintext_vault(vault_path: &str, meta_path: &str) -> Result<bool> {
+    if !std::path::Path::new(vault_path).exists() {
+        return Ok(false);
+    }
+
+    let legacy = {
+        let connection = Connection::open(vault_path)?;
+        let count: i64 = connection.query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'meta'",
+            [],
+            |row| row.get(0),
+        )?;
+        count > 0
+        // The connection is dropped here. Windows will not delete an open file.
+    };
+
+    if !legacy {
+        return Ok(false);
+    }
+
+    std::fs::remove_file(vault_path).map_err(|error| {
+        StoreError::Database(rusqlite::Error::InvalidPath(
+            format!("{vault_path}: {error}").into(),
+        ))
+    })?;
+    // Journal and write-ahead files hold copies of the same plaintext pages.
+    for suffix in ["-journal", "-wal", "-shm"] {
+        std::fs::remove_file(format!("{vault_path}{suffix}")).ok();
+    }
+    // Any metadata file beside it belongs to a vault that no longer exists.
+    std::fs::remove_file(meta_path).ok();
+
+    Ok(true)
 }

@@ -7,7 +7,7 @@ import 'package:authenticator/src/vault_controller.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';
-import 'package:path_provider/path_provider.dart';
+import 'package:authenticator/src/services/vault_session.dart';
 
 /// Drives the real screens against the real core on a device.
 ///
@@ -22,8 +22,16 @@ void main() {
 
   setUpAll(() async {
     await RustLib.init();
-    final directory = await getApplicationSupportDirectory();
-    rust.openVault(dbPath: '${directory.path}/ui-test.db');
+
+    final session = VaultSession();
+    switch (await session.load()) {
+      case VaultState.needsSetup:
+        await session.setUp(requireUserAuthentication: false);
+      case VaultState.locked:
+        await session.unlock();
+      case VaultState.lockedNeedsPin:
+        fail('the test device should not have a PIN-protected slot');
+    }
     controller = VaultController(await ReferenceTime.load());
   });
 

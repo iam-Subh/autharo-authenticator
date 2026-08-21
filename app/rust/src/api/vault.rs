@@ -5,43 +5,100 @@
 //! in `authcore`, so that the audit in section 14.2 covers one implementation
 //! rather than one per platform.
 //!
-//! Two conventions hold throughout:
+//! Three conventions hold throughout:
 //!
 //! - **No clock reads.** Dart passes the reference time in. It is the device
 //!   clock plus the stored offset (FR-38), and keeping it a parameter is what
 //!   lets the whole list render from one consistent instant.
 //! - **No secrets returned.** A code goes out; the Base32 secret does not. The
-//!   one exception is [`reveal_secret_for_export`], which is named to be hard
-//!   to call by accident.
+//!   one exception is [`reveal_secret_for_export`], named to be hard to call
+//!   by accident.
+//! - **One exception, and it is deliberate.** The device slot (section 9.2.4)
+//!   needs the platform keystore to wrap the vault key, and a non-exportable
+//!   keystore key can only be driven from platform code. The raw vault key
+//!   therefore crosses this boundary once at setup and once at each unlock.
+//!   See [`begin_device_setup`] for what that costs.
 
 use std::sync::Mutex;
 
-use anyhow::{Context, Result, anyhow};
-use authcore::base32;
+use anyhow::{anyhow, Context, Result};
+use authcore::crypto::{VaultKey, XChaChaCipher};
+use authcore::device_slot::{self, OpenRequest, SetupRequest, SlotState, WrapScheme};
 use authcore::entry::{OtpEntry, Payload};
 use authcore::otp::{self, Algorithm, OtpKind};
 use authcore::otpauth::OtpAuthUri;
-use authcore::store::Store;
-use authcore::vault::{NullCipher, Vault};
+use authcore::store::{MetaStore, Store};
+use authcore::vault::Vault;
 
-/// The open vault. One per process; the application has exactly one.
-static VAULT: Mutex<Option<Vault<NullCipher>>> = Mutex::new(None);
+/// The metadata file. Opened first and independently of the vault, because it
+/// holds the wrapped key the vault needs (section 12.1).
+static META: Mutex<Option<MetaStore>> = Mutex::new(None);
 
-fn with_vault<T>(f: impl FnOnce(&mut Vault<NullCipher>) -> Result<T>) -> Result<T> {
-    let mut guard = VAULT
+/// The open vault. `None` means locked: FR-31 requires that locking zeroes the
+/// vault key, and dropping the vault drops the only copy of it.
+static VAULT: Mutex<Option<Vault<XChaChaCipher>>> = Mutex::new(None);
+
+/// A setup or unlock waiting on the platform keystore.
+static PENDING_SETUP: Mutex<Option<SetupRequest>> = Mutex::new(None);
+static PENDING_OPEN: Mutex<Option<OpenRequest>> = Mutex::new(None);
+
+fn lock_poisoned() -> anyhow::Error {
+    anyhow!("The vault lock was poisoned by an earlier failure. Restart the application.")
+}
+
+/// Reads the metadata file, wherever it currently lives.
+///
+/// While locked it sits in `META`; while unlocked the `Store` owns it. Callers
+/// that only want to read it — the slot state, the time offset — should not
+/// have to know which, and should not fail merely because the vault happens to
+/// be open.
+fn with_meta<T>(f: impl FnOnce(&MetaStore) -> Result<T>) -> Result<T> {
+    if let Some(vault) = VAULT.lock().map_err(|_| lock_poisoned())?.as_ref() {
+        return f(vault.store().meta());
+    }
+    let guard = META.lock().map_err(|_| lock_poisoned())?;
+    let meta = guard
+        .as_ref()
+        .ok_or_else(|| anyhow!("The metadata file is not open."))?;
+    f(meta)
+}
+
+/// Takes ownership of the metadata file so a vault can be opened with it.
+///
+/// If a vault is already open this locks it first, because the metadata file
+/// cannot be in two places at once. Re-opening over an open vault is what an
+/// unlock after a lock timeout looks like, so it has to work rather than fail.
+fn take_meta() -> Result<MetaStore> {
+    if let Some(meta) = META.lock().map_err(|_| lock_poisoned())?.take() {
+        return Ok(meta);
+    }
+    let vault = VAULT
         .lock()
-        .map_err(|_| anyhow!("The vault lock was poisoned by an earlier failure."))?;
+        .map_err(|_| lock_poisoned())?
+        .take()
+        .ok_or_else(|| anyhow!("The metadata file is not open."))?;
+    Ok(vault.into_store().into_meta())
+}
+
+fn with_vault<T>(f: impl FnOnce(&mut Vault<XChaChaCipher>) -> Result<T>) -> Result<T> {
+    let mut guard = VAULT.lock().map_err(|_| lock_poisoned())?;
     let vault = guard
         .as_mut()
-        .ok_or_else(|| anyhow!("The vault is not open."))?;
+        .ok_or_else(|| anyhow!("The vault is locked."))?;
     f(vault)
 }
 
+/// The stored slot, on its way to the platform to be unwrapped.
+pub struct WrappedKeyBlob {
+    pub wrapped: Vec<u8>,
+    pub nonce: Vec<u8>,
+    /// `keystore-v1` or `keystore-pin-v1`.
+    pub scheme: String,
+    /// True when the user must supply a PIN as well (section 9.2.4 step 4).
+    pub needs_pin: bool,
+}
+
 /// One row of the code list, ready to render.
-///
-/// The code is computed here rather than in Dart so the OTP engine stays in one
-/// place. `remaining_seconds` comes along with it so the row and its countdown
-/// cannot disagree about which time step they are showing.
 pub struct EntryView {
     pub id: String,
     /// `"totp"` or `"hotp"`.
@@ -53,7 +110,6 @@ pub struct EntryView {
     pub period: u32,
     /// Seconds until the code changes. Zero for HOTP, which does not expire.
     pub remaining_seconds: u32,
-    /// The current counter, for HOTP entries only.
     pub counter: Option<u64>,
     pub favourite: bool,
     pub icon: Option<String>,
@@ -72,18 +128,10 @@ pub struct EntryPreview {
     pub duplicate_of: Option<String>,
 }
 
-/// The result of adding an entry.
-///
-/// Exactly one field is set. This is a struct rather than an enum with data
-/// because the latter makes the bridge generate a `freezed` union, which would
-/// pull a second code generator and a `build_runner` step into the Flutter
-/// build for the sake of one type.
+/// The result of adding an entry. Exactly one field is set.
 pub struct AddOutcome {
-    /// Set when the entry was stored.
     pub added_id: Option<String>,
-    /// FR-16: "Reject a duplicate secret and offer to open the existing entry."
-    /// A duplicate is not a failure — the user interface offers to open the
-    /// entry that already holds this secret — so it comes back as an outcome.
+    /// FR-16: an entry already holds this secret.
     pub duplicate_of: Option<String>,
 }
 
@@ -103,29 +151,154 @@ impl AddOutcome {
     }
 }
 
-/// Opens the vault at `db_path`, creating it if it does not exist.
-///
-/// Safe to call again; a second call replaces the open vault, which is what a
-/// re-lock and unlock cycle needs.
-#[flutter_rust_bridge::frb(sync)]
-pub fn open_vault(db_path: String) -> Result<()> {
-    let store = Store::open(&db_path).context("The local database could not be opened")?;
-    let vault = Vault::open(store, NullCipher)?;
+// ---------------------------------------------------------------------------
+// Device slot (section 9.2.4)
+// ---------------------------------------------------------------------------
 
-    let mut guard = VAULT
+/// Deletes a stage S2 plaintext database if one is present.
+///
+/// Must run before [`open_meta`]. An S2 file cannot be read by this build —
+/// its payloads were never encrypted, so they fail to decrypt and are reported
+/// as damaged, which is indistinguishable from data loss. Returns true when
+/// something was discarded, so the caller can say so rather than leaving the
+/// user to guess why their development entries vanished.
+#[flutter_rust_bridge::frb(sync)]
+pub fn discard_legacy_vault(vault_path: String, meta_path: String) -> Result<bool> {
+    Ok(authcore::store::discard_legacy_plaintext_vault(
+        &vault_path,
+        &meta_path,
+    )?)
+}
+
+/// Opens the metadata file and reports what this device's key slot needs.
+///
+/// Returns `"absent"`, `"present"`, or `"present_needs_pin"`. Call this before
+/// anything else: it decides whether the next step is setup or unlock.
+#[flutter_rust_bridge::frb(sync)]
+pub fn open_meta(meta_path: String) -> Result<String> {
+    let meta = MetaStore::open(&meta_path).context("The metadata file could not be opened")?;
+    let state = device_slot::state(&meta).map_err(|error| anyhow!("{error}"))?;
+
+    *META.lock().map_err(|_| lock_poisoned())? = Some(meta);
+
+    Ok(match state {
+        SlotState::Absent => "absent",
+        SlotState::Present => "present",
+        SlotState::PresentNeedsPin => "present_needs_pin",
+    }
+    .to_string())
+}
+
+/// First run: generates the vault key and hands it out to be wrapped.
+///
+/// # What this exposes
+///
+/// The returned bytes are the vault key in the clear. They exist in Dart for
+/// as long as it takes to pass them to the keystore, and Dart cannot wipe
+/// memory the way `Zeroizing` does — the garbage collector may keep copies.
+/// This is the unavoidable cost of a non-exportable keystore key: the wrap has
+/// to happen in platform code, and platform code cannot be reached from Rust
+/// without an out-of-band handle to the JVM.
+///
+/// The caller must pass these straight to the wrap call, overwrite the buffer,
+/// and never store or log them. Section 9.4's "do not log key material" covers
+/// the Dart side as much as this one.
+pub fn begin_device_setup() -> Result<Vec<u8>> {
+    let request = device_slot::begin_setup().map_err(|error| anyhow!("{error}"))?;
+    let key = request.key_to_wrap().to_vec();
+
+    *PENDING_SETUP.lock().map_err(|_| lock_poisoned())? = Some(request);
+    Ok(key)
+}
+
+/// Stores the wrapped key and opens the vault (section 9.2.4 steps 3 and 5).
+pub fn finish_device_setup(
+    vault_path: String,
+    wrapped: Vec<u8>,
+    nonce: Vec<u8>,
+    with_pin: bool,
+) -> Result<()> {
+    let request = PENDING_SETUP
         .lock()
-        .map_err(|_| anyhow!("The vault lock was poisoned by an earlier failure."))?;
-    *guard = Some(vault);
+        .map_err(|_| lock_poisoned())?
+        .take()
+        .ok_or_else(|| anyhow!("No setup is in progress."))?;
+
+    let mut meta = take_meta()?;
+
+    let scheme = if with_pin {
+        WrapScheme::KeystoreAndPin
+    } else {
+        WrapScheme::Keystore
+    };
+    let key = request
+        .complete(&mut meta, wrapped, nonce, scheme)
+        .map_err(|error| anyhow!("{error}"))?;
+
+    open_vault_with_key(&vault_path, meta, key)
+}
+
+/// Unlock: reads the stored slot for the platform to unwrap.
+pub fn begin_device_open() -> Result<WrappedKeyBlob> {
+    let request = with_meta(|meta| {
+        device_slot::begin_open(meta)
+            .map_err(|error| anyhow!("{error}"))?
+            .ok_or_else(|| anyhow!("This device has no key slot yet."))
+    })?;
+
+    let blob = WrappedKeyBlob {
+        wrapped: request.wrapped_key().to_vec(),
+        nonce: request.nonce().to_vec(),
+        scheme: request.scheme().as_str().to_string(),
+        needs_pin: request.scheme().needs_pin(),
+    };
+
+    *PENDING_OPEN.lock().map_err(|_| lock_poisoned())? = Some(request);
+    Ok(blob)
+}
+
+/// Adopts the unwrapped key and opens the vault.
+///
+/// The same exposure note as [`begin_device_setup`] applies to `unwrapped`.
+pub fn finish_device_open(vault_path: String, unwrapped: Vec<u8>) -> Result<()> {
+    let request = PENDING_OPEN
+        .lock()
+        .map_err(|_| lock_poisoned())?
+        .take()
+        .ok_or_else(|| anyhow!("No unlock is in progress."))?;
+
+    let key = request
+        .complete(&unwrapped)
+        .map_err(|error| anyhow!("{error}"))?;
+
+    open_vault_with_key(&vault_path, take_meta()?, key)
+}
+
+fn open_vault_with_key(vault_path: &str, meta: MetaStore, key: VaultKey) -> Result<()> {
+    // The SQLCipher key and the record key are separate derivations of the
+    // vault key. `None` here means the file is not encrypted at the database
+    // level; see README.md, "SQLCipher".
+    let store = Store::open(vault_path, meta, None).context("The vault could not be opened")?;
+    let vault = Vault::open(store, XChaChaCipher::new(&key))?;
+
+    *VAULT.lock().map_err(|_| lock_poisoned())? = Some(vault);
     Ok(())
 }
 
-/// Closes the vault and drops the handle. Called when the lock engages.
+/// FR-31: "Locking zeroes the vault key in memory."
+///
+/// Dropping the vault drops the cipher, which drops the only copy of the
+/// record key, and `Zeroizing` wipes it on the way out. There is no
+/// screen-hiding fallback: after this call the records genuinely cannot be
+/// read until the slot is unwrapped again.
 #[flutter_rust_bridge::frb(sync)]
-pub fn close_vault() -> Result<()> {
-    let mut guard = VAULT
-        .lock()
-        .map_err(|_| anyhow!("The vault lock was poisoned by an earlier failure."))?;
-    *guard = None;
+pub fn lock_vault() -> Result<()> {
+    let vault = VAULT.lock().map_err(|_| lock_poisoned())?.take();
+
+    // Put the metadata file back so the next unlock can read the slot.
+    if let Some(vault) = vault {
+        *META.lock().map_err(|_| lock_poisoned())? = Some(vault.into_store().into_meta());
+    }
     Ok(())
 }
 
@@ -134,17 +307,38 @@ pub fn is_vault_open() -> bool {
     VAULT.lock().map(|guard| guard.is_some()).unwrap_or(false)
 }
 
-/// Every entry with its code at `now_unix_seconds`.
+/// Section 9.2.4, **Wipe this device**: destroys the slot and every entry.
 ///
-/// `now_unix_seconds` must already include the FR-38 offset. The caller passes
-/// one value for the whole list so every row shows the same time step.
+/// Both halves matter. Without the slot the records cannot be read, but
+/// ciphertext left on disk is ciphertext an attacker can keep, so the entries
+/// go too.
+pub fn wipe_device() -> Result<()> {
+    let existing = VAULT.lock().map_err(|_| lock_poisoned())?.take();
+
+    let mut meta = match existing {
+        Some(mut vault) => {
+            vault.store_mut().clear_entries()?;
+            vault.into_store().into_meta()
+        }
+        None => take_meta()?,
+    };
+
+    device_slot::wipe(&mut meta).map_err(|error| anyhow!("{error}"))?;
+    *META.lock().map_err(|_| lock_poisoned())? = Some(meta);
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Entries
+// ---------------------------------------------------------------------------
+
+/// Every entry with its code at `now_unix_seconds`.
 pub fn list_entries(now_unix_seconds: i64) -> Result<Vec<EntryView>> {
     with_vault(|vault| {
         let (entries, unreadable) = vault.list()?;
         if unreadable > 0 {
-            // Not fatal: the readable entries still render. The count is
-            // logged rather than returned because there is nothing the user
-            // can do about it until the S3 recovery path exists.
+            // Not fatal: the readable entries still render. Nothing is logged
+            // about their contents, only the count.
             eprintln!("vault: {unreadable} record(s) could not be read");
         }
 
@@ -158,9 +352,10 @@ pub fn list_entries(now_unix_seconds: i64) -> Result<Vec<EntryView>> {
                 _ => OtpKind::Totp,
             };
 
-            // Decoded once per row into a wiped buffer; the Base32 text stays
-            // owned by the payload, which is dropped at the end of the loop.
-            let secret = otp_entry.secret.decode().map_err(|error| anyhow!("{error}"))?;
+            let secret = otp_entry
+                .secret
+                .decode()
+                .map_err(|error| anyhow!("{error}"))?;
 
             let (code, remaining) = match kind {
                 OtpKind::Totp => (
@@ -203,9 +398,6 @@ pub fn list_entries(now_unix_seconds: i64) -> Result<Vec<EntryView>> {
 }
 
 /// Reads an `otpauth://` URI without storing anything (FR-10, FR-11, FR-12).
-///
-/// The scan screen shows this so the user can see what they are about to add,
-/// and so a duplicate is caught before it is written.
 pub fn preview_uri(uri: String) -> Result<EntryPreview> {
     let parsed = OtpAuthUri::parse(&uri).map_err(|error| anyhow!("{error}"))?;
     let duplicate = with_vault(|vault| Ok(vault.find_by_secret(parsed.secret.expose())?))?;
@@ -235,9 +427,6 @@ pub fn add_from_uri(uri: String, now_ms: i64) -> Result<AddOutcome> {
 }
 
 /// Adds an entry the user typed in (FR-13).
-///
-/// The secret arrives as the user typed it and is normalized here, so that the
-/// same validation applies whether an entry was scanned or typed.
 #[allow(clippy::too_many_arguments)]
 pub fn add_manual(
     issuer: Option<String>,
@@ -259,9 +448,10 @@ pub fn add_manual(
     };
     let algorithm = Algorithm::parse(&algorithm)
         .ok_or_else(|| anyhow!("'{algorithm}' is not a supported hash algorithm."))?;
-    let secret = base32::normalize(&secret).map_err(|error| anyhow!("{error}"))?;
+    let secret = authcore::base32::normalize(&secret).map_err(|error| anyhow!("{error}"))?;
 
-    let digits = u8::try_from(digits).map_err(|_| anyhow!("{digits} is not a valid digit count."))?;
+    let digits =
+        u8::try_from(digits).map_err(|_| anyhow!("{digits} is not a valid digit count."))?;
     otp::check_digits(digits)?;
     otp::check_period(period)?;
     if kind == OtpKind::Hotp && counter.is_none() {
@@ -273,7 +463,7 @@ pub fn add_manual(
             return Ok(AddOutcome::duplicate(existing_id));
         }
 
-        let payload = Payload::from_json(&serde_payload(
+        let payload = Payload::from_json(&build_payload(
             kind,
             issuer.clone(),
             &account,
@@ -355,23 +545,22 @@ pub fn advance_hotp(id: String, now_ms: i64) -> Result<String> {
 }
 
 /// FR-38: the stored offset between device time and reference time.
+///
+/// Readable while locked, because it lives in the metadata file rather than
+/// the vault, and the unlock screen needs it to warn about clock drift.
 pub fn time_offset_seconds() -> Result<i64> {
-    with_vault(|vault| Ok(vault.time_offset_seconds()?))
+    with_meta(|meta| Ok(meta.time_offset_seconds()?))
 }
 
 pub fn set_time_offset_seconds(offset: i64) -> Result<()> {
-    with_vault(|vault| {
-        vault.set_time_offset_seconds(offset)?;
-        Ok(())
-    })
+    with_meta(|meta| Ok(meta.set_time_offset_seconds(offset)?))
 }
 
 /// Returns the Base32 secret of one entry.
 ///
-/// This is the only way a secret leaves the core, and it exists for the QR
-/// export in FR-30 and for the plain-text backup in FR-27. FR-36 requires an
-/// unlock before either. The name is deliberately awkward so that a call site
-/// stands out in review.
+/// The only way a secret leaves the core, for the QR export in FR-30 and the
+/// plain-text backup in FR-27. FR-36 requires an unlock before either. The
+/// name is deliberately awkward so a call site stands out in review.
 pub fn reveal_secret_for_export(id: String) -> Result<String> {
     with_vault(|vault| {
         let entry = vault.get(&id)?;
@@ -388,7 +577,7 @@ pub fn reveal_secret_for_export(id: String) -> Result<String> {
 /// Going through JSON keeps `EntryPayload`'s field defaults in one place rather
 /// than restating them here, where they could drift from section 12.2.
 #[allow(clippy::too_many_arguments)]
-fn serde_payload(
+fn build_payload(
     kind: OtpKind,
     issuer: Option<String>,
     account: &str,

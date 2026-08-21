@@ -4,16 +4,18 @@
 //! stored, and the stored record generates the code the user reads. This is
 //! the whole of S1 in one path.
 //!
-//! Encryption arrives in stage S3. Until then the payload bytes go into the
-//! `ciphertext` column as they are, which is why this test asserts that the
-//! stored bytes are still readable — the assertion inverts once S3 lands, and
-//! that inversion is the proof S3 did its job.
+//! Stage S2 wrote the payload bytes into the `ciphertext` column unchanged,
+//! and this file asserted they were still readable so the gap could not be
+//! mistaken for a finished feature. Stage S3 inverted that assertion: the same
+//! test now fails if a payload can be read off disk.
 
+use authcore::crypto::{VaultKey, XChaChaCipher};
 use authcore::entry::{OtpEntry, Payload};
 use authcore::hlc::HlcClock;
 use authcore::otp::totp_at;
 use authcore::otpauth::OtpAuthUri;
-use authcore::store::{Record, Store, new_entry_id};
+use authcore::store::{MetaStore, Record, Store, new_entry_id};
+use authcore::vault::Vault;
 
 /// The RFC 6238 SHA-1 seed, so the generated code can be checked against the
 /// published vector rather than against itself.
@@ -22,7 +24,7 @@ const SCANNED_QR: &str = "otpauth://totp/GitHub:rupsa%40example.com\
 
 #[test]
 fn a_scanned_code_is_stored_and_read_back_as_a_working_entry() {
-    let mut store = Store::open_in_memory().unwrap();
+    let mut store = Store::open_in_memory(MetaStore::open_in_memory().unwrap()).unwrap();
     let device = store.device_id().unwrap();
     let mut clock = HlcClock::new(device);
 
@@ -65,7 +67,7 @@ fn a_scanned_code_is_stored_and_read_back_as_a_working_entry() {
 /// carry this device's identifier so the section 10.4 tiebreak can work.
 #[test]
 fn the_stored_timestamp_carries_this_device() {
-    let mut store = Store::open_in_memory().unwrap();
+    let mut store = Store::open_in_memory(MetaStore::open_in_memory().unwrap()).unwrap();
     let device = store.device_id().unwrap();
     let mut clock = HlcClock::new(device);
 
@@ -91,18 +93,50 @@ fn the_stored_timestamp_carries_this_device() {
     assert_eq!(stored.hlc.device, device);
 }
 
-/// Stage S3 has not encrypted anything yet. This test states that plainly so
-/// the gap cannot be mistaken for a finished feature.
+/// The inverted assertion.
+///
+/// In stage S2 this test asserted the opposite — that the secret was readable
+/// in the stored bytes — because nothing encrypted it, and a test that quietly
+/// passed either way would have hidden that. This is the same test with the
+/// expectation turned around, which is the evidence S3 did its job.
 #[test]
-fn s3_has_not_encrypted_the_payload_yet() {
-    let uri = OtpAuthUri::parse(SCANNED_QR).unwrap();
-    let bytes = OtpEntry::from_uri(&uri, 0).to_json().unwrap();
+fn a_stored_payload_cannot_be_read_off_disk() {
+    let key = VaultKey::from_slice(&[3u8; 32]).unwrap();
+    let mut vault = Vault::open(
+        Store::open_in_memory(MetaStore::open_in_memory().unwrap()).unwrap(),
+        XChaChaCipher::new(&key),
+    )
+    .unwrap();
 
-    let text = String::from_utf8(bytes.to_vec()).unwrap();
+    let uri = OtpAuthUri::parse(SCANNED_QR).unwrap();
+    let payload = OtpEntry::from_uri(&uri, 1_755_734_400_000);
+    let id = vault.add(&payload, 1_755_734_400_000).unwrap();
+
+    let stored = vault.store().get(&id).unwrap().unwrap();
+    let bytes = &stored.ciphertext;
+    let text = String::from_utf8_lossy(bytes);
+
+    for readable in [
+        "GEZDGNBVGY3TQOJQ",  // the secret
+        "GitHub",            // the issuer
+        "rupsa@example.com", // the account name
+        "totp",              // even the entry type
+        "secret",            // or a JSON field name
+    ] {
+        assert!(
+            !text.contains(readable),
+            "{readable:?} is readable in the stored record"
+        );
+    }
+
+    // Not merely unreadable as text: the plaintext must not appear verbatim
+    // anywhere in the ciphertext, and the record must still open with the key.
+    let plaintext = payload.to_json().unwrap();
     assert!(
-        text.contains("GEZDGNBVGY3TQOJQ"),
-        "the payload is still plaintext at stage S1; S3 must invert this test"
+        !bytes.windows(plaintext.len()).any(|w| w == &plaintext[..]),
+        "the plaintext appears verbatim inside the ciphertext"
     );
+    assert_eq!(vault.get(&id).unwrap().payload, payload);
 }
 
 /// Section 9.4 forbids a secret reaching any log level. Both types that hold

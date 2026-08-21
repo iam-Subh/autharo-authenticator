@@ -1,10 +1,9 @@
 import 'package:flutter/material.dart';
-import 'package:path_provider/path_provider.dart';
 
 import 'src/pages/entry_list_page.dart';
-import 'src/rust/api/vault.dart' as rust;
 import 'src/rust/frb_generated.dart';
 import 'src/services/reference_time.dart';
+import 'src/services/vault_session.dart';
 import 'src/vault_controller.dart';
 
 Future<void> main() async {
@@ -37,6 +36,12 @@ class AuthenticatorApp extends StatelessWidget {
 
 /// Opens the vault before the first screen renders.
 ///
+/// Opens the vault before the first frame that shows a code.
+///
+/// The order is fixed by section 9.2.4: read the metadata file, find out
+/// whether this device has a key slot, then either create one or unwrap it.
+/// Only then does a vault exist to list entries from.
+///
 /// The database lives in the application support directory rather than the
 /// documents directory: on Android the documents directory is reachable by the
 /// file picker, and the vault is not a document the user should be handing to
@@ -51,9 +56,26 @@ class _Bootstrap extends StatefulWidget {
 class _BootstrapState extends State<_Bootstrap> {
   late final Future<VaultController> _opening = _open();
 
+  final _session = VaultSession();
+
   Future<VaultController> _open() async {
-    final directory = await getApplicationSupportDirectory();
-    rust.openVault(dbPath: '${directory.path}/vault.db');
+    switch (await _session.load()) {
+      case VaultState.needsSetup:
+        // First run. The keystore key is created here, without a biometric
+        // requirement: FR-32 makes biometric unlock a choice the user makes,
+        // and binding the key before they have made it would lock out a
+        // device with no enrolled biometric.
+        await _session.setUp(requireUserAuthentication: false);
+      case VaultState.locked:
+        await _session.unlock();
+      case VaultState.lockedNeedsPin:
+        // The PIN factor is not built yet, so a slot that needs one cannot be
+        // opened. Saying so beats an empty list that looks like data loss.
+        throw StateError(
+          'This vault is protected by a PIN, which this build cannot yet ask '
+          'for. See the application lock note in README.md.',
+        );
+    }
 
     final time = await ReferenceTime.load();
     final controller = VaultController(time);

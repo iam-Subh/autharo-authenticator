@@ -1,23 +1,26 @@
 //! Tests for the payload/record seam (PRD sections 9.3, 12.2, FR-16 to FR-18).
 //!
-//! These run against `NullCipher`, so they prove the plumbing rather than the
-//! encryption. Stage S3 supplies a real cipher and the same tests must pass
-//! against it unchanged — that is the point of writing them at this seam.
+//! Written in stage S2 against a cipher that did not encrypt, so that they
+//! tested the plumbing. Stage S3 pointed them at `XChaChaCipher` and they
+//! passed unchanged, which is what writing them at the seam was for.
 
-#![cfg(feature = "insecure-null-cipher")]
-
+use authcore::crypto::{VaultKey, XChaChaCipher};
 use authcore::entry::{OtpEntry, Payload};
 use authcore::otpauth::OtpAuthUri;
-use authcore::store::Store;
+use authcore::store::{MetaStore, Store};
 use authcore::vault::{CipherError, RECORD_VERSION, RecordCipher, Vault, VaultError};
 
 const SECRET: &str = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ";
 const NOW: i64 = 1_755_734_400_000;
 
-fn vault() -> Vault<authcore::vault::NullCipher> {
+fn key() -> VaultKey {
+    VaultKey::from_slice(&[42u8; 32]).unwrap()
+}
+
+fn vault() -> Vault<XChaChaCipher> {
     Vault::open(
-        Store::open_in_memory().unwrap(),
-        authcore::vault::NullCipher,
+        Store::open_in_memory(MetaStore::open_in_memory().unwrap()).unwrap(),
+        XChaChaCipher::new(&key()),
     )
     .unwrap()
 }
@@ -115,14 +118,14 @@ fn a_duplicate_secret_is_found_by_its_plaintext() {
 /// section 10.4 conflict rule would resolve against a stale write.
 #[test]
 fn the_clock_resumes_above_the_highest_stored_timestamp() {
-    let store = Store::open_in_memory().unwrap();
-    let mut vault = Vault::open(store, authcore::vault::NullCipher).unwrap();
+    let store = Store::open_in_memory(MetaStore::open_in_memory().unwrap()).unwrap();
+    let mut vault = Vault::open(store, XChaChaCipher::new(&key())).unwrap();
     let id = vault.add(&entry("GitHub", "rupsa", SECRET), NOW).unwrap();
     let before = vault.get(&id).unwrap().hlc;
 
     // Reopen over the same store, then write with an earlier wall clock.
     let store = vault.into_store();
-    let mut reopened = Vault::open(store, authcore::vault::NullCipher).unwrap();
+    let mut reopened = Vault::open(store, XChaChaCipher::new(&key())).unwrap();
     reopened
         .update(&id, &entry("GitHub", "other", SECRET), NOW - 60_000)
         .unwrap();
@@ -136,32 +139,36 @@ fn the_clock_resumes_above_the_highest_stored_timestamp() {
 /// One damaged record must not hide every other code the user needs.
 #[test]
 fn an_unreadable_record_is_skipped_rather_than_failing_the_list() {
-    struct FailsOneEntry(String);
+    /// The real cipher, with one entry made to fail. Delegating rather than
+    /// substituting matters: the records under test were sealed by
+    /// `XChaChaCipher`, so a stub that returned plaintext would report every
+    /// record unreadable and the test would pass for the wrong reason.
+    struct FailsOneEntry {
+        inner: XChaChaCipher,
+        broken_id: String,
+    }
 
     impl RecordCipher for FailsOneEntry {
         fn seal(
             &self,
-            _id: &str,
-            _version: u32,
+            id: &str,
+            version: u32,
             plaintext: &[u8],
         ) -> Result<authcore::vault::Sealed, CipherError> {
-            Ok(authcore::vault::Sealed {
-                ciphertext: plaintext.to_vec(),
-                nonce: Vec::new(),
-            })
+            self.inner.seal(id, version, plaintext)
         }
 
         fn open(
             &self,
             id: &str,
-            _version: u32,
+            version: u32,
             ciphertext: &[u8],
-            _nonce: &[u8],
+            nonce: &[u8],
         ) -> Result<zeroize::Zeroizing<Vec<u8>>, CipherError> {
-            if id == self.0 {
+            if id == self.broken_id {
                 return Err(CipherError::NotAuthentic);
             }
-            Ok(zeroize::Zeroizing::new(ciphertext.to_vec()))
+            self.inner.open(id, version, ciphertext, nonce)
         }
     }
 
@@ -171,7 +178,14 @@ fn an_unreadable_record_is_skipped_rather_than_failing_the_list() {
         .add(&entry("Fine", "rupsa", "MZXW6YTBOI"), NOW + 1)
         .unwrap();
 
-    let vault = Vault::open(vault.into_store(), FailsOneEntry(broken)).unwrap();
+    let vault = Vault::open(
+        vault.into_store(),
+        FailsOneEntry {
+            inner: XChaChaCipher::new(&key()),
+            broken_id: broken,
+        },
+    )
+    .unwrap();
     let (entries, unreadable) = vault.list().unwrap();
 
     assert_eq!(entries.len(), 1, "the readable entry still appears");
@@ -214,7 +228,7 @@ fn the_cipher_receives_the_associated_data_section_9_3_requires() {
     }
 
     let mut vault = Vault::open(
-        Store::open_in_memory().unwrap(),
+        Store::open_in_memory(MetaStore::open_in_memory().unwrap()).unwrap(),
         Recording(RefCell::new(Vec::new())),
     )
     .unwrap();
@@ -228,4 +242,48 @@ fn the_cipher_receives_the_associated_data_section_9_3_requires() {
         assert_eq!(seen_id, id, "the entry identifier must be bound in");
         assert_eq!(version, RECORD_VERSION);
     }
+}
+
+/// The seam now really encrypts. Stage S2's version of this file could not
+/// make this assertion at all.
+#[test]
+fn the_stored_record_is_not_readable() {
+    let mut vault = vault();
+    let id = vault.add(&entry("GitHub", "rupsa", SECRET), NOW).unwrap();
+
+    let stored = vault.store().get(&id).unwrap().unwrap();
+    let text = String::from_utf8_lossy(&stored.ciphertext);
+
+    assert!(!text.contains(SECRET), "the secret is readable on disk");
+    assert!(!text.contains("GitHub"), "the issuer is readable on disk");
+    assert!(
+        !text.contains("rupsa"),
+        "the account name is readable on disk"
+    );
+    assert_eq!(
+        stored.nonce.len(),
+        24,
+        "section 9.3 requires a 192-bit nonce"
+    );
+}
+
+/// A vault opened with a different key must refuse the records rather than
+/// return nonsense.
+#[test]
+fn another_key_cannot_read_this_vault() {
+    let mut vault = vault();
+    vault.add(&entry("GitHub", "rupsa", SECRET), NOW).unwrap();
+
+    let other = VaultKey::from_slice(&[7u8; 32]).unwrap();
+    let wrong = Vault::open(vault.into_store(), XChaChaCipher::new(&other)).unwrap();
+
+    let (entries, unreadable) = wrong.list().unwrap();
+    assert!(
+        entries.is_empty(),
+        "no entry should decrypt under a wrong key"
+    );
+    assert_eq!(
+        unreadable, 1,
+        "and the caller must learn the record was skipped"
+    );
 }

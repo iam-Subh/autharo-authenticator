@@ -6,33 +6,99 @@
 import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `added`, `duplicate`, `serde_payload`, `with_vault`
+// These functions are ignored because they are not marked as `pub`: `added`, `build_payload`, `duplicate`, `lock_poisoned`, `open_vault_with_key`, `with_vault`
 
-/// Opens the vault at `db_path`, creating it if it does not exist.
+/// Deletes a stage S2 plaintext database if one is present.
 ///
-/// Safe to call again; a second call replaces the open vault, which is what a
-/// re-lock and unlock cycle needs.
-void openVault({required String dbPath}) =>
-    RustLib.instance.api.crateApiVaultOpenVault(dbPath: dbPath);
+/// Must run before [`open_meta`]. An S2 file cannot be read by this build —
+/// its payloads were never encrypted, so they fail to decrypt and are reported
+/// as damaged, which is indistinguishable from data loss. Returns true when
+/// something was discarded, so the caller can say so rather than leaving the
+/// user to guess why their development entries vanished.
+bool discardLegacyVault({
+  required String vaultPath,
+  required String metaPath,
+}) => RustLib.instance.api.crateApiVaultDiscardLegacyVault(
+  vaultPath: vaultPath,
+  metaPath: metaPath,
+);
 
-/// Closes the vault and drops the handle. Called when the lock engages.
-void closeVault() => RustLib.instance.api.crateApiVaultCloseVault();
+/// Opens the metadata file and reports what this device's key slot needs.
+///
+/// Returns `"absent"`, `"present"`, or `"present_needs_pin"`. Call this before
+/// anything else: it decides whether the next step is setup or unlock.
+String openMeta({required String metaPath}) =>
+    RustLib.instance.api.crateApiVaultOpenMeta(metaPath: metaPath);
+
+/// First run: generates the vault key and hands it out to be wrapped.
+///
+/// # What this exposes
+///
+/// The returned bytes are the vault key in the clear. They exist in Dart for
+/// as long as it takes to pass them to the keystore, and Dart cannot wipe
+/// memory the way `Zeroizing` does — the garbage collector may keep copies.
+/// This is the unavoidable cost of a non-exportable keystore key: the wrap has
+/// to happen in platform code, and platform code cannot be reached from Rust
+/// without an out-of-band handle to the JVM.
+///
+/// The caller must pass these straight to the wrap call, overwrite the buffer,
+/// and never store or log them. Section 9.4's "do not log key material" covers
+/// the Dart side as much as this one.
+Future<Uint8List> beginDeviceSetup() =>
+    RustLib.instance.api.crateApiVaultBeginDeviceSetup();
+
+/// Stores the wrapped key and opens the vault (section 9.2.4 steps 3 and 5).
+Future<void> finishDeviceSetup({
+  required String vaultPath,
+  required List<int> wrapped,
+  required List<int> nonce,
+  required bool withPin,
+}) => RustLib.instance.api.crateApiVaultFinishDeviceSetup(
+  vaultPath: vaultPath,
+  wrapped: wrapped,
+  nonce: nonce,
+  withPin: withPin,
+);
+
+/// Unlock: reads the stored slot for the platform to unwrap.
+Future<WrappedKeyBlob> beginDeviceOpen() =>
+    RustLib.instance.api.crateApiVaultBeginDeviceOpen();
+
+/// Adopts the unwrapped key and opens the vault.
+///
+/// The same exposure note as [`begin_device_setup`] applies to `unwrapped`.
+Future<void> finishDeviceOpen({
+  required String vaultPath,
+  required List<int> unwrapped,
+}) => RustLib.instance.api.crateApiVaultFinishDeviceOpen(
+  vaultPath: vaultPath,
+  unwrapped: unwrapped,
+);
+
+/// FR-31: "Locking zeroes the vault key in memory."
+///
+/// Dropping the vault drops the cipher, which drops the only copy of the
+/// record key, and `Zeroizing` wipes it on the way out. There is no
+/// screen-hiding fallback: after this call the records genuinely cannot be
+/// read until the slot is unwrapped again.
+void lockVault() => RustLib.instance.api.crateApiVaultLockVault();
 
 bool isVaultOpen() => RustLib.instance.api.crateApiVaultIsVaultOpen();
 
-/// Every entry with its code at `now_unix_seconds`.
+/// Section 9.2.4, **Wipe this device**: destroys the slot and every entry.
 ///
-/// `now_unix_seconds` must already include the FR-38 offset. The caller passes
-/// one value for the whole list so every row shows the same time step.
+/// Both halves matter. Without the slot the records cannot be read, but
+/// ciphertext left on disk is ciphertext an attacker can keep, so the entries
+/// go too.
+Future<void> wipeDevice() => RustLib.instance.api.crateApiVaultWipeDevice();
+
+/// Every entry with its code at `now_unix_seconds`.
 Future<List<EntryView>> listEntries({required PlatformInt64 nowUnixSeconds}) =>
     RustLib.instance.api.crateApiVaultListEntries(
       nowUnixSeconds: nowUnixSeconds,
     );
 
 /// Reads an `otpauth://` URI without storing anything (FR-10, FR-11, FR-12).
-///
-/// The scan screen shows this so the user can see what they are about to add,
-/// and so a duplicate is caught before it is written.
 Future<EntryPreview> previewUri({required String uri}) =>
     RustLib.instance.api.crateApiVaultPreviewUri(uri: uri);
 
@@ -43,9 +109,6 @@ Future<AddOutcome> addFromUri({
 }) => RustLib.instance.api.crateApiVaultAddFromUri(uri: uri, nowMs: nowMs);
 
 /// Adds an entry the user typed in (FR-13).
-///
-/// The secret arrives as the user typed it and is normalized here, so that the
-/// same validation applies whether an entry was scanned or typed.
 Future<AddOutcome> addManual({
   String? issuer,
   required String account,
@@ -107,6 +170,9 @@ Future<String> advanceHotp({
 }) => RustLib.instance.api.crateApiVaultAdvanceHotp(id: id, nowMs: nowMs);
 
 /// FR-38: the stored offset between device time and reference time.
+///
+/// Readable while locked, because it lives in the metadata file rather than
+/// the vault, and the unlock screen needs it to warn about clock drift.
 Future<PlatformInt64> timeOffsetSeconds() =>
     RustLib.instance.api.crateApiVaultTimeOffsetSeconds();
 
@@ -115,26 +181,17 @@ Future<void> setTimeOffsetSeconds({required PlatformInt64 offset}) =>
 
 /// Returns the Base32 secret of one entry.
 ///
-/// This is the only way a secret leaves the core, and it exists for the QR
-/// export in FR-30 and for the plain-text backup in FR-27. FR-36 requires an
-/// unlock before either. The name is deliberately awkward so that a call site
-/// stands out in review.
+/// The only way a secret leaves the core, for the QR export in FR-30 and the
+/// plain-text backup in FR-27. FR-36 requires an unlock before either. The
+/// name is deliberately awkward so a call site stands out in review.
 Future<String> revealSecretForExport({required String id}) =>
     RustLib.instance.api.crateApiVaultRevealSecretForExport(id: id);
 
-/// The result of adding an entry.
-///
-/// Exactly one field is set. This is a struct rather than an enum with data
-/// because the latter makes the bridge generate a `freezed` union, which would
-/// pull a second code generator and a `build_runner` step into the Flutter
-/// build for the sake of one type.
+/// The result of adding an entry. Exactly one field is set.
 class AddOutcome {
-  /// Set when the entry was stored.
   final String? addedId;
 
-  /// FR-16: "Reject a duplicate secret and offer to open the existing entry."
-  /// A duplicate is not a failure — the user interface offers to open the
-  /// entry that already holds this secret — so it comes back as an outcome.
+  /// FR-16: an entry already holds this secret.
   final String? duplicateOf;
 
   const AddOutcome({this.addedId, this.duplicateOf});
@@ -202,10 +259,6 @@ class EntryPreview {
 }
 
 /// One row of the code list, ready to render.
-///
-/// The code is computed here rather than in Dart so the OTP engine stays in one
-/// place. `remaining_seconds` comes along with it so the row and its countdown
-/// cannot disagree about which time step they are showing.
 class EntryView {
   final String id;
 
@@ -219,8 +272,6 @@ class EntryView {
 
   /// Seconds until the code changes. Zero for HOTP, which does not expire.
   final int remainingSeconds;
-
-  /// The current counter, for HOTP entries only.
   final BigInt? counter;
   final bool favourite;
   final String? icon;
@@ -269,4 +320,37 @@ class EntryView {
           counter == other.counter &&
           favourite == other.favourite &&
           icon == other.icon;
+}
+
+/// The stored slot, on its way to the platform to be unwrapped.
+class WrappedKeyBlob {
+  final Uint8List wrapped;
+  final Uint8List nonce;
+
+  /// `keystore-v1` or `keystore-pin-v1`.
+  final String scheme;
+
+  /// True when the user must supply a PIN as well (section 9.2.4 step 4).
+  final bool needsPin;
+
+  const WrappedKeyBlob({
+    required this.wrapped,
+    required this.nonce,
+    required this.scheme,
+    required this.needsPin,
+  });
+
+  @override
+  int get hashCode =>
+      wrapped.hashCode ^ nonce.hashCode ^ scheme.hashCode ^ needsPin.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is WrappedKeyBlob &&
+          runtimeType == other.runtimeType &&
+          wrapped == other.wrapped &&
+          nonce == other.nonce &&
+          scheme == other.scheme &&
+          needsPin == other.needsPin;
 }

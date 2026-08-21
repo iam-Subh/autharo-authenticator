@@ -13,10 +13,11 @@ flutter_rust_bridge = "=2.12.0"
 # translation layer to Dart, so that one audit of `core` covers all platforms
 # (PRD section 14.2).
 #
-# `insecure-null-cipher` is stage S2 scaffolding: there is no vault key yet, so
-# records are written unencrypted. Stage S3 deletes that feature from the core,
-# which breaks this line and forces it to be pointed at the real cipher.
-authcore = { path = "../../core", features = ["insecure-null-cipher"] }
+# Stage S2 named a non-default `insecure-null-cipher` feature here, because
+# there was no vault key yet and records were written unencrypted. Stage S3
+# deleted that feature from the core, this line stopped resolving, and the
+# crate had to be pointed at the real cipher. That breakage was the design.
+authcore = { path = "../../core" }
 anyhow = "1"
 serde_json = "1.0.151"
 

@@ -4,18 +4,11 @@
 //! module is the single place the two meet, so stage S3 changes the cipher here
 //! and nothing above this layer moves.
 //!
-//! # The stage S2 gap
-//!
-//! There is no vault key until S3, so there is nothing to encrypt with yet.
-//! Rather than quietly writing plaintext through a seam that looks encrypted,
-//! the only cipher that exists today is [`NullCipher`], and it sits behind the
-//! non-default feature `insecure-null-cipher`. A caller has to name that
-//! feature to get a working vault.
-//!
-//! That is deliberate. When S3 deletes the feature, every crate that opted in
-//! fails to compile and has to be pointed at the real cipher. A silent default
-//! would let plaintext storage survive into a release, which is exactly the
-//! failure this arrangement is designed to make impossible.
+//! The only implementation is [`crate::crypto::XChaChaCipher`]. Stage S2
+//! shipped a `NullCipher` behind a non-default feature so that plaintext
+//! storage could not happen by accident; stage S3 deleted it, which broke
+//! every crate that had opted in and forced each onto the real cipher. That
+//! was the point of putting it behind a feature rather than a default.
 
 use core::fmt;
 
@@ -79,39 +72,6 @@ pub trait RecordCipher {
         ciphertext: &[u8],
         nonce: &[u8],
     ) -> CipherResult<Zeroizing<Vec<u8>>>;
-}
-
-/// A cipher that does not encrypt.
-///
-/// Stage S2 only. See the module documentation for why this is behind a
-/// non-default feature and what happens to it in S3.
-#[cfg(feature = "insecure-null-cipher")]
-#[derive(Debug, Clone, Copy, Default)]
-pub struct NullCipher;
-
-#[cfg(feature = "insecure-null-cipher")]
-impl RecordCipher for NullCipher {
-    fn seal(
-        &self,
-        _entry_id: &str,
-        _record_version: u32,
-        plaintext: &[u8],
-    ) -> CipherResult<Sealed> {
-        Ok(Sealed {
-            ciphertext: plaintext.to_vec(),
-            nonce: Vec::new(),
-        })
-    }
-
-    fn open(
-        &self,
-        _entry_id: &str,
-        _record_version: u32,
-        ciphertext: &[u8],
-        _nonce: &[u8],
-    ) -> CipherResult<Zeroizing<Vec<u8>>> {
-        Ok(Zeroizing::new(ciphertext.to_vec()))
-    }
 }
 
 /// Anything that stops a vault operation.
@@ -303,6 +263,10 @@ impl<C: RecordCipher> Vault<C> {
 
     pub fn store(&self) -> &Store {
         &self.store
+    }
+
+    pub fn store_mut(&mut self) -> &mut Store {
+        &mut self.store
     }
 
     /// Takes the store back, so a vault can be reopened with a different
