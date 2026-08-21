@@ -1,0 +1,21 @@
+# Rust
+/core/target/
+**/*.rs.bk
+# Flutter / Dart
+.dart_tool/
+.packages
+build/
+.flutter-plugins
+.flutter-plugins-dependencies
+# Editors
+.idea/
+.vscode/
+*.iml
+# OS
+Thumbs.db
+.DS_Store
+# Local secrets and databases
+*.db
+*.db-journal
+*.sqlite
+.env
