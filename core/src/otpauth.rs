@@ -199,7 +199,7 @@ impl OtpAuthUri {
 
     /// The decoded key for the OTP engine.
     pub fn secret_bytes(&self) -> Result<Zeroizing<Vec<u8>>, Base32Error> {
-        base32::decode(self.secret.expose())
+        self.secret.decode()
     }
 
     /// Generates the code this entry shows at a moment in time. For an HOTP

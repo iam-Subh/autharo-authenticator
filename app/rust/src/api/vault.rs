@@ -158,8 +158,9 @@ pub fn list_entries(now_unix_seconds: i64) -> Result<Vec<EntryView>> {
                 _ => OtpKind::Totp,
             };
 
-            let secret = base32::decode(otp_entry.secret.expose())
-                .map_err(|error| anyhow!("{error}"))?;
+            // Decoded once per row into a wiped buffer; the Base32 text stays
+            // owned by the payload, which is dropped at the end of the loop.
+            let secret = otp_entry.secret.decode().map_err(|error| anyhow!("{error}"))?;
 
             let (code, remaining) = match kind {
                 OtpKind::Totp => (
@@ -345,7 +346,7 @@ pub fn advance_hotp(id: String, now_ms: i64) -> Result<String> {
         let next = entry.counter.unwrap_or(0).saturating_add(1);
         entry.counter = Some(next);
 
-        let secret = base32::decode(entry.secret.expose()).map_err(|error| anyhow!("{error}"))?;
+        let secret = entry.secret.decode().map_err(|error| anyhow!("{error}"))?;
         let code = otp::hotp(&secret, next, entry.digits, entry.algorithm)?;
 
         vault.update(&id, &Payload::Hotp(entry), now_ms)?;
