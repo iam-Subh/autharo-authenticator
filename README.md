@@ -8,12 +8,43 @@ sequence in section 18: each stage is finished before the next starts.
 | Stage | Content | State |
 |---|---|---|
 | S1 — Core | TOTP, HOTP, Base32, the `otpauth://` parser, SQLite storage | **Done.** RFC 6238 and RFC 4226 vectors pass for SHA-1, SHA-256, and SHA-512 |
-| S2 — First platform | Android. Flutter UI, QR scan, manual entry, list, copy, application lock | **All but the lock interface.** The lock mechanism exists; the PIN, the timeout, and the biometric prompt do not |
+| S2 — First platform | Android. Flutter UI, QR scan, manual entry, list, copy, application lock | **Done**, pending on-device verification of the lock |
 | S3 — Crypto | Vault key, key slots, Argon2id, XChaCha20-Poly1305, recovery key | **Device slot, record encryption, and SQLCipher done.** Password and recovery slots not started |
 | S4 — Backend | API, PostgreSQL schema, key slots, quotas, enumeration resistance | Not started |
 | S5 — Sync | Sync engine, outbox, HLC, conflict resolution, prune watermark | Not started |
 | S6 — Other platforms | Remaining platforms, screen capture, tray and menu bar | Not started |
 | S7 — Passkeys | `passkeys` package, domain association, PRF slot, fallback | Not started |
+
+## The lock releases the key, it does not hide the screen
+
+FR-31: "Locking zeroes the vault key in memory. Do not implement a lock that
+only hides the screen." So locking drops the key, and while locked the records
+are ciphertext that nothing on the device can read.
+
+With a PIN set, two things are needed to get the key back, per section 9.2.4
+step 4:
+
+```
+PIN --Argon2id(64 MiB, t=3, p=4)--> KEK --seals--> vault key
+                                                       |
+                        Android Keystore key --wraps--/  (the sealed blob)
+```
+
+The keystore is the **outer** layer, and that ordering is the point. Someone
+who copies `meta.db` off the device cannot start guessing the PIN, because
+every attempt has to pass a non-exportable hardware key first — which confines
+guessing to the device, at its rate. Reverse the two and the PIN-sealed blob
+would be exposed the moment the file was read, and six digits is a million
+guesses at whatever KDF cost a user will sit through.
+
+Nothing about the PIN is stored in the clear: the salt and the cost parameters
+travel *inside* the sealed blob, so `meta.db` reveals only the scheme name.
+There is no PIN verifier either — a wrong PIN derives a wrong KEK and Poly1305
+refuses the unwrap, which is what OFF-03 asks for without storing a second,
+weaker thing to attack.
+
+Turning the PIN on or off rewraps the same vault key. No record is
+re-encrypted, so a half-finished change cannot orphan the vault.
 
 ## The vault is now encrypted at rest
 
@@ -54,6 +85,7 @@ core/            Rust core library (authcore). Every security-critical rule live
     secret.rs       SecretString: wiped on drop, redacted in Debug (section 9.4)
     crypto.rs       Vault key, HKDF subkeys, XChaCha20-Poly1305 records (9.2, 9.3)
     device_slot.rs  The device slot state machine (9.2.4)
+    pin.rs          Argon2id over the PIN, and FR-31's rules
     hlc.rs          Hybrid logical clock timestamps (section 10.2)
     store.rs        meta.db and vault.db (section 12.1)
     vault.rs        The payload/record seam and the RecordCipher trait (9.3)
@@ -62,6 +94,7 @@ app/             Flutter application
   lib/src/services/
     vault_keystore.dart   Channel to the Android Keystore
     vault_session.dart    Open, lock, and wipe: the three-way handshake
+    lock_controller.dart  FR-33 and FR-34: when the vault locks itself
   lib/src/rust/           Generated bridge bindings — do not edit by hand
   android/.../VaultKeystore.kt   The non-exportable wrapping key
   rust_builder/           Vendored cargokit. See "Local workarounds".
@@ -114,12 +147,18 @@ over from an earlier one. Use it for anything whose success matters.
 
 ## Known gaps, deliberately
 
-- **The application lock has a mechanism but no interface.** `lock_vault`
-  genuinely drops the vault key rather than hiding the screen, and the
-  integration tests prove the entries become unreachable while locked. What is
-  missing is FR-31's PIN, FR-33's timeout, and FR-32's biometric prompt. The
-  `keystore-pin-v1` scheme is defined and refused at startup rather than
-  silently treated as an ordinary slot.
+- **The lock has not been run on a device yet.** It is built and covered by
+  128 core tests and 18 host tests, but the phone was disconnected before the
+  on-device PIN tests in `integration_test/vault_test.dart` could run. Those
+  are written and waiting.
+
+- **FR-35 counts failures but does not act on them.** The wipe after ten
+  failed attempts is P1 and off by default; the counter and the warning exist,
+  the automatic wipe does not.
+
+- **The lock settings are not persisted.** `LockController` takes a timeout and
+  a background-lock flag, and the defaults apply on every start. The settings
+  screen that would store a choice in `meta` is not built.
 
 - **The vault key crosses into Dart.** A non-exportable keystore key can only
   be driven from platform code, so the raw key passes through Dart once at
