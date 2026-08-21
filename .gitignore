@@ -19,3 +19,11 @@ Thumbs.db
 *.db-journal
 *.sqlite
 .env
+
+# Flutter / Dart, generated
+app/.dart_tool/
+app/build/
+app/rust/target/
+app/.flutter-plugins*
+app/rust_builder/cargokit/build_tool/.dart_tool/
+app/*.iml

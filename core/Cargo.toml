@@ -13,3 +13,14 @@ sha1 = "0.11.0"
 sha2 = "0.11.0"
 uuid = { version = "1.24.1", features = ["v4"] }
 zeroize = "1.9.0"
+
+[features]
+default = []
+
+# Stage S2 only. Enables `vault::NullCipher`, which does not encrypt.
+#
+# This is not a default because the vault must not silently fall back to
+# plaintext storage. Stage S3 deletes this feature; every crate that opted in
+# then fails to compile and has to be pointed at the real cipher. That forced
+# breakage is the point.
+insecure-null-cipher = []

@@ -7,6 +7,7 @@ pub mod otp;
 pub mod otpauth;
 pub mod secret;
 pub mod store;
+pub mod vault;
 
 pub use base32::Base32Error;
 pub use entry::{OtpEntry, Payload, PayloadError};
@@ -15,3 +16,4 @@ pub use otp::{Algorithm, OtpError, OtpKind};
 pub use otpauth::{OtpAuthError, OtpAuthUri};
 pub use secret::SecretString;
 pub use store::{Record, Store, StoreError};
+pub use vault::{RecordCipher, Vault, VaultEntry, VaultError};

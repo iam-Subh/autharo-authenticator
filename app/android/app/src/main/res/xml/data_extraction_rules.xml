@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The vault must never leave the device through a platform backup. Section 12.1
+  calls for SQLCipher, which does not arrive until stage S3, so until then the
+  local database is plaintext on disk and a cloud backup would copy it off the
+  device. Even after S3 the key lives in the Keystore and does not travel with
+  a backup, so a restored copy would be undecryptable anyway.
+-->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="root" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="root" />
+    </device-transfer>
+</data-extraction-rules>
