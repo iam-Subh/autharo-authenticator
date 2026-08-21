@@ -1,0 +1,224 @@
+import 'package:flutter/material.dart';
+
+import '../services/vault_session.dart';
+
+/// Sets, changes, or removes the application lock PIN (FR-31).
+///
+/// The confirmation field is not ceremony. A mistyped PIN here is not
+/// recoverable: it becomes half of what wraps the vault key, and nothing on
+/// the device or the server can work out what the user meant to type.
+class SetPinPage extends StatefulWidget {
+  const SetPinPage({
+    super.key,
+    required this.session,
+    this.hasExistingPin = false,
+  });
+
+  final VaultSession session;
+
+  /// Changes the wording, and offers removal.
+  final bool hasExistingPin;
+
+  @override
+  State<SetPinPage> createState() => _SetPinPageState();
+}
+
+class _SetPinPageState extends State<SetPinPage> {
+  final _pin = TextEditingController();
+  final _confirm = TextEditingController();
+  final _formKey = GlobalKey<FormState>();
+
+  bool _busy = false;
+  bool _useBiometrics = true;
+  String? _error;
+
+  @override
+  void dispose() {
+    _pin.dispose();
+    _confirm.dispose();
+    super.dispose();
+  }
+
+  /// The client-side half of FR-31. The core validates again and is the
+  /// authority — this exists to answer while the user is still typing, not to
+  /// be the check that matters.
+  String? _validate(String? value) {
+    final pin = value ?? '';
+    final digitsOnly = pin.isNotEmpty && RegExp(r'^\d+$').hasMatch(pin);
+
+    if (pin.length < 6) {
+      return digitsOnly || pin.isEmpty
+          ? 'Use at least 6 digits.'
+          : 'Use at least 6 characters.';
+    }
+    if (digitsOnly) {
+      if (pin.split('').toSet().length == 1) {
+        return 'Avoid a PIN of one repeated digit.';
+      }
+      if (_isRun(pin)) {
+        return 'Avoid a run like 123456.';
+      }
+    }
+    return null;
+  }
+
+  static bool _isRun(String pin) {
+    final codes = pin.codeUnits;
+    final step = codes[1] - codes[0];
+    if (step != 1 && step != -1) return false;
+    for (var i = 1; i < codes.length; i++) {
+      if (codes[i] - codes[i - 1] != step) return false;
+    }
+    return true;
+  }
+
+  Future<void> _save() async {
+    if (!(_formKey.currentState?.validate() ?? false)) return;
+
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
+    try {
+      await widget.session.changePin(
+        _pin.text,
+        requireUserAuthentication: _useBiometrics,
+      );
+      if (!mounted) return;
+      Navigator.pop(context, true);
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _error = error.toString();
+        _busy = false;
+      });
+    }
+  }
+
+  Future<void> _remove() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Remove the PIN?'),
+        content: const Text(
+          'Your codes stay encrypted, but anyone who can unlock this device '
+          'will be able to read them.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Keep it'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Remove'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+
+    setState(() => _busy = true);
+    try {
+      await widget.session.changePin(null, requireUserAuthentication: false);
+      if (!mounted) return;
+      Navigator.pop(context, true);
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _error = error.toString();
+        _busy = false;
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: Text(widget.hasExistingPin ? 'Change PIN' : 'Set a PIN'),
+      ),
+      body: Form(
+        key: _formKey,
+        child: ListView(
+          padding: const EdgeInsets.all(24),
+          children: [
+            const Text(
+              'The PIN is combined with a key held by this device. Both are '
+              'needed to open your codes, so a PIN alone is not enough for '
+              'someone who copies the file off the device.',
+            ),
+            const SizedBox(height: 24),
+            TextFormField(
+              controller: _pin,
+              autofocus: true,
+              obscureText: true,
+              enabled: !_busy,
+              validator: _validate,
+              decoration: const InputDecoration(
+                labelText: 'New PIN or passphrase',
+                border: OutlineInputBorder(),
+              ),
+            ),
+            const SizedBox(height: 16),
+            TextFormField(
+              controller: _confirm,
+              obscureText: true,
+              enabled: !_busy,
+              validator: (value) =>
+                  value == _pin.text ? null : 'The two entries do not match.',
+              decoration: const InputDecoration(
+                labelText: 'Enter it again',
+                border: OutlineInputBorder(),
+              ),
+            ),
+            const SizedBox(height: 8),
+            SwitchListTile(
+              value: _useBiometrics,
+              onChanged: _busy
+                  ? null
+                  : (value) => setState(() => _useBiometrics = value),
+              title: const Text('Allow biometric unlock'),
+              subtitle: const Text(
+                'Binds this device\'s key to your fingerprint or face. '
+                'Enrolling a new fingerprint invalidates it.',
+              ),
+              contentPadding: EdgeInsets.zero,
+            ),
+            if (_error != null) ...[
+              const SizedBox(height: 16),
+              Text(
+                _error!,
+                style: TextStyle(color: Theme.of(context).colorScheme.error),
+              ),
+            ],
+            const SizedBox(height: 24),
+            FilledButton(
+              onPressed: _busy ? null : _save,
+              child: _busy
+                  ? const SizedBox(
+                      height: 20,
+                      width: 20,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Text('Save'),
+            ),
+            if (widget.hasExistingPin) ...[
+              const SizedBox(height: 8),
+              TextButton(
+                onPressed: _busy ? null : _remove,
+                child: const Text('Remove the PIN'),
+              ),
+            ],
+            const SizedBox(height: 24),
+            Text(
+              'Setting a PIN takes a moment: the key is deliberately slow to '
+              'derive, so that guessing it is slow too.',
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}

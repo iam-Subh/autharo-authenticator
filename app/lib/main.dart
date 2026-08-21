@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 
 import 'src/pages/entry_list_page.dart';
 import 'src/rust/frb_generated.dart';
+import 'src/pages/unlock_page.dart';
+import 'src/services/lock_controller.dart';
 import 'src/services/reference_time.dart';
 import 'src/services/vault_session.dart';
 import 'src/vault_controller.dart';
@@ -57,30 +59,59 @@ class _BootstrapState extends State<_Bootstrap> {
   late final Future<VaultController> _opening = _open();
 
   final _session = VaultSession();
+  late final _lock = LockController(
+    session: _session,
+    onLocked: () => setState(() => _needsUnlock = true),
+  );
+
+  /// True when the vault is shut and the unlock screen should be showing.
+  /// Distinct from "not yet opened": this is a vault that exists and is locked.
+  bool _needsUnlock = false;
+  VaultController? _controller;
+
+  @override
+  void initState() {
+    super.initState();
+    _lock.start();
+  }
+
+  @override
+  void dispose() {
+    _lock.dispose();
+    _controller?.dispose();
+    super.dispose();
+  }
 
   Future<VaultController> _open() async {
     switch (await _session.load()) {
       case VaultState.needsSetup:
-        // First run. The keystore key is created here, without a biometric
+        // First run. The keystore key is created without a biometric
         // requirement: FR-32 makes biometric unlock a choice the user makes,
         // and binding the key before they have made it would lock out a
-        // device with no enrolled biometric.
+        // device with no enrolled biometric. A PIN is offered afterwards
+        // rather than demanded before the first code can be added.
         await _session.setUp(requireUserAuthentication: false);
       case VaultState.locked:
         await _session.unlock();
       case VaultState.lockedNeedsPin:
-        // The PIN factor is not built yet, so a slot that needs one cannot be
-        // opened. Saying so beats an empty list that looks like data loss.
-        throw StateError(
-          'This vault is protected by a PIN, which this build cannot yet ask '
-          'for. See the application lock note in README.md.',
-        );
+        // The unlock screen collects the PIN; nothing opens until it does.
+        _needsUnlock = true;
+        return _startController();
     }
+    return _startController();
+  }
 
+  Future<VaultController> _startController() async {
     final time = await ReferenceTime.load();
     final controller = VaultController(time);
-    await controller.start();
+    _controller = controller;
+    if (!_needsUnlock) await controller.start();
     return controller;
+  }
+
+  Future<void> _afterUnlock(VaultController controller) async {
+    setState(() => _needsUnlock = false);
+    await controller.start();
   }
 
   @override
@@ -96,7 +127,14 @@ class _BootstrapState extends State<_Bootstrap> {
             body: Center(child: CircularProgressIndicator()),
           );
         }
-        return EntryListPage(controller: snapshot.data!);
+        final controller = snapshot.data!;
+        if (_needsUnlock) {
+          return UnlockPage(
+            session: _session,
+            onUnlocked: () => _afterUnlock(controller),
+          );
+        }
+        return EntryListPage(controller: controller);
       },
     );
   }

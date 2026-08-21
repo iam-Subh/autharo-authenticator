@@ -664,3 +664,37 @@ pub fn discard_legacy_plaintext_vault(vault_path: &str, meta_path: &str) -> Resu
 
     Ok(true)
 }
+
+/// `meta` key counting consecutive failed unlocks (FR-35).
+const META_FAILED_UNLOCKS: &str = "device_slot.failed_unlocks";
+
+impl MetaStore {
+    /// How many unlocks have failed in a row.
+    ///
+    /// Kept in the unencrypted metadata file on purpose: it has to be readable
+    /// and writable while the vault is shut, which is exactly when it matters.
+    /// Someone who can edit that file can reset the counter — but they could
+    /// equally copy the file, so the counter was never what stood between them
+    /// and the vault. It bounds guessing by a person holding the phone, which
+    /// is the case FR-35 is about.
+    pub fn failed_unlocks(&self) -> Result<u32> {
+        Ok(self
+            .get(META_FAILED_UNLOCKS)?
+            .and_then(|bytes| String::from_utf8(bytes).ok())
+            .and_then(|text| text.parse().ok())
+            .unwrap_or(0))
+    }
+
+    /// Records a failed unlock and returns the new total.
+    pub fn record_failed_unlock(&self) -> Result<u32> {
+        let next = self.failed_unlocks()?.saturating_add(1);
+        self.set(META_FAILED_UNLOCKS, next.to_string().as_bytes())?;
+        Ok(next)
+    }
+
+    /// Clears the counter. Called on every successful unlock, so the limit
+    /// applies to consecutive failures rather than to failures for all time.
+    pub fn clear_failed_unlocks(&self) -> Result<()> {
+        self.remove(META_FAILED_UNLOCKS)
+    }
+}

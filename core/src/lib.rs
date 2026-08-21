@@ -7,6 +7,7 @@ pub mod entry;
 pub mod hlc;
 pub mod otp;
 pub mod otpauth;
+pub mod pin;
 pub mod secret;
 pub mod store;
 pub mod vault;

@@ -249,4 +249,97 @@ void main() {
     expect(blob.wrapped.length, 48, reason: '32-byte key plus a GCM tag');
     await session.unlock();
   });
+
+  /// The application lock, against a real keystore (FR-31, FR-35).
+  ///
+  /// These run last and put the device back the way they found it: the PIN is
+  /// removed in the teardown, so a failure here does not leave every later run
+  /// unable to open the vault.
+  group('the PIN factor', () {
+    const pin = '284915';
+
+    tearDown(() async {
+      // Back to a keystore-only slot whatever happened above.
+      if (!rust.isVaultOpen()) {
+        await session.unlock(pin: pin).catchError((_) {});
+      }
+      if (rust.isVaultOpen()) {
+        await session.changePin(null, requireUserAuthentication: false);
+      }
+    });
+
+    test('a PIN is required once set, and the wrong one is refused', () async {
+      await session.changePin(pin, requireUserAuthentication: false);
+
+      // The slot now says so, and the keystore alone is not enough.
+      final blob = await rust.beginDeviceOpen();
+      expect(blob.scheme, 'keystore-pin-v1');
+      expect(blob.needsPin, isTrue);
+
+      session.lock();
+      expect(rust.isVaultOpen(), isFalse);
+
+      await expectLater(
+        session.unlock(),
+        throwsA(predicate((e) => e.toString().contains('PIN'))),
+        reason: 'no PIN supplied',
+      );
+      expect(rust.isVaultOpen(), isFalse);
+
+      final before = rust.failedUnlockAttempts();
+      await expectLater(
+        session.unlock(pin: '999888'),
+        throwsA(anything),
+        reason: 'the wrong PIN',
+      );
+      expect(
+        rust.failedUnlockAttempts(),
+        before + 1,
+        reason: 'FR-35 counts the failure',
+      );
+      expect(rust.isVaultOpen(), isFalse);
+
+      // The right one opens it and clears the count.
+      await session.unlock(pin: pin);
+      expect(rust.isVaultOpen(), isTrue);
+      expect(rust.failedUnlockAttempts(), 0);
+    });
+
+    test('adding a PIN keeps every existing entry readable', () async {
+      final now = DateTime.now().millisecondsSinceEpoch;
+      final added = await rust.addFromUri(
+        uri: 'otpauth://totp/BeforePin:account?secret=$rfcSecret',
+        nowMs: now,
+      );
+
+      await session.changePin(pin, requireUserAuthentication: false);
+      session.lock();
+      await session.unlock(pin: pin);
+
+      // The vault key did not change, so the record still decrypts.
+      final entries = await rust.listEntries(nowUnixSeconds: 59);
+      expect(
+        entries.map((e) => e.id),
+        contains(added.addedId),
+        reason: 'setting a PIN must not re-encrypt or orphan records',
+      );
+
+      await rust.deleteEntry(id: added.addedId!, nowMs: now);
+    });
+
+    test('a PIN that fails FR-31 is refused before anything is stored', () async {
+      for (final bad in ['12345', '123456', '000000']) {
+        await expectLater(
+          session.changePin(bad, requireUserAuthentication: false),
+          throwsA(anything),
+          reason: '$bad should be refused',
+        );
+      }
+
+      // And the slot is untouched.
+      final blob = await rust.beginDeviceOpen();
+      expect(blob.needsPin, isFalse);
+      await session.unlock();
+    });
+  });
 }

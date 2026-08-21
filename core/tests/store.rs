@@ -4,8 +4,8 @@
 //! place of encrypted payloads. Stage S3 supplies the real encryption; nothing
 //! in this layer changes when it does.
 
-use authcore::hlc::{Hlc, HlcClock};
 use authcore::crypto::VaultKey;
+use authcore::hlc::{Hlc, HlcClock};
 use authcore::store::{MetaStore, Record, Store, new_entry_id};
 
 const DEVICE: u64 = 0xa91b_7f0e_44d2_c318;
@@ -384,8 +384,7 @@ fn the_vault_file_is_encrypted_by_sqlcipher() {
 
     {
         let meta = MetaStore::open(&paths.meta).unwrap();
-        let mut store =
-            Store::open(&paths.vault, meta, Some(&key.sqlcipher_key())).unwrap();
+        let mut store = Store::open(&paths.vault, meta, Some(&key.sqlcipher_key())).unwrap();
         store
             .write_local(
                 &record("secret-entry", Hlc::new(1000, 0, DEVICE), b"findthisbody"),
@@ -421,8 +420,7 @@ fn an_encrypted_vault_will_not_open_without_its_key() {
 
     {
         let meta = MetaStore::open(&paths.meta).unwrap();
-        let mut store =
-            Store::open(&paths.vault, meta, Some(&key.sqlcipher_key())).unwrap();
+        let mut store = Store::open(&paths.vault, meta, Some(&key.sqlcipher_key())).unwrap();
         store
             .write_local(&record("e1", Hlc::new(1000, 0, DEVICE), b"body"), None)
             .unwrap();
@@ -454,7 +452,11 @@ fn an_encrypted_vault_will_not_open_without_its_key() {
 #[test]
 fn the_database_key_is_not_the_record_key() {
     let key = VaultKey::from_slice(&[8u8; 32]).unwrap();
-    let record_key_hex: String = key.record_key().iter().map(|b| format!("{b:02x}")).collect();
+    let record_key_hex: String = key
+        .record_key()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
 
     assert_ne!(key.sqlcipher_key().as_str(), record_key_hex);
 }

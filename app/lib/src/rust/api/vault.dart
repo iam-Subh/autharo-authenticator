@@ -6,7 +6,7 @@
 import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `added`, `build_payload`, `duplicate`, `lock_poisoned`, `open_vault_with_key`, `with_vault`
+// These functions are ignored because they are not marked as `pub`: `added`, `build_payload`, `duplicate`, `lock_poisoned`, `open_vault_with_key`, `take_meta`, `with_meta`, `with_vault`
 
 /// Deletes a stage S2 plaintext database if one is present.
 ///
@@ -47,17 +47,31 @@ String openMeta({required String metaPath}) =>
 Future<Uint8List> beginDeviceSetup() =>
     RustLib.instance.api.crateApiVaultBeginDeviceSetup();
 
+/// First run with a PIN: seals the vault key under it, then hands the sealed
+/// blob out to be wrapped by the keystore (section 9.2.4 step 4).
+///
+/// What crosses the boundary here is already ciphertext, so this call does not
+/// carry the exposure that [`begin_device_setup`] does.
+Future<Uint8List> beginDeviceSetupWithPin({required String pin}) =>
+    RustLib.instance.api.crateApiVaultBeginDeviceSetupWithPin(pin: pin);
+
+/// Turns the PIN on, off, or changes it, keeping the same vault key.
+///
+/// The key must not change: every record is already encrypted under it, and
+/// re-encrypting the vault to change a PIN would be both slow and a chance to
+/// lose data. Returns the blob for the keystore to wrap, exactly as setup does.
+Future<Uint8List> beginChangePin({String? newPin}) =>
+    RustLib.instance.api.crateApiVaultBeginChangePin(newPin: newPin);
+
 /// Stores the wrapped key and opens the vault (section 9.2.4 steps 3 and 5).
 Future<void> finishDeviceSetup({
   required String vaultPath,
   required List<int> wrapped,
   required List<int> nonce,
-  required bool withPin,
 }) => RustLib.instance.api.crateApiVaultFinishDeviceSetup(
   vaultPath: vaultPath,
   wrapped: wrapped,
   nonce: nonce,
-  withPin: withPin,
 );
 
 /// Unlock: reads the stored slot for the platform to unwrap.
@@ -74,6 +88,24 @@ Future<void> finishDeviceOpen({
   vaultPath: vaultPath,
   unwrapped: unwrapped,
 );
+
+/// Adopts the unwrapped blob and undoes the PIN layer inside it.
+///
+/// A wrong PIN increments the counter FR-35 reads; a right one clears it, so
+/// the limit applies to consecutive failures.
+Future<void> finishDeviceOpenWithPin({
+  required String vaultPath,
+  required List<int> unwrapped,
+  required String pin,
+}) => RustLib.instance.api.crateApiVaultFinishDeviceOpenWithPin(
+  vaultPath: vaultPath,
+  unwrapped: unwrapped,
+  pin: pin,
+);
+
+/// FR-35: how many unlock attempts have failed in a row.
+int failedUnlockAttempts() =>
+    RustLib.instance.api.crateApiVaultFailedUnlockAttempts();
 
 /// FR-31: "Locking zeroes the vault key in memory."
 ///

@@ -23,7 +23,7 @@ use std::sync::Mutex;
 
 use anyhow::{anyhow, Context, Result};
 use authcore::crypto::{VaultKey, XChaChaCipher};
-use authcore::device_slot::{self, OpenRequest, SetupRequest, SlotState, WrapScheme};
+use authcore::device_slot::{self, OpenRequest, SetupRequest, SlotState};
 use authcore::entry::{OtpEntry, Payload};
 use authcore::otp::{self, Algorithm, OtpKind};
 use authcore::otpauth::OtpAuthUri;
@@ -41,6 +41,14 @@ static VAULT: Mutex<Option<Vault<XChaChaCipher>>> = Mutex::new(None);
 /// A setup or unlock waiting on the platform keystore.
 static PENDING_SETUP: Mutex<Option<SetupRequest>> = Mutex::new(None);
 static PENDING_OPEN: Mutex<Option<OpenRequest>> = Mutex::new(None);
+
+/// The vault key, kept only while unlocked.
+///
+/// Held so that the PIN can be set, changed, or removed without making the
+/// user unlock a second time — rewrapping needs the key itself, and the vault
+/// only keeps subkeys derived from it. Cleared by `lock_vault` along with
+/// everything else, so it lives exactly as long as the unlocked session.
+static CURRENT_KEY: Mutex<Option<VaultKey>> = Mutex::new(None);
 
 fn lock_poisoned() -> anyhow::Error {
     anyhow!("The vault lock was poisoned by an earlier failure. Restart the application.")
@@ -211,13 +219,44 @@ pub fn begin_device_setup() -> Result<Vec<u8>> {
     Ok(key)
 }
 
+/// First run with a PIN: seals the vault key under it, then hands the sealed
+/// blob out to be wrapped by the keystore (section 9.2.4 step 4).
+///
+/// What crosses the boundary here is already ciphertext, so this call does not
+/// carry the exposure that [`begin_device_setup`] does.
+pub fn begin_device_setup_with_pin(pin: String) -> Result<Vec<u8>> {
+    let request = device_slot::begin_setup_with_pin(&pin).map_err(|error| anyhow!("{error}"))?;
+    let blob = request.key_to_wrap().to_vec();
+
+    *PENDING_SETUP.lock().map_err(|_| lock_poisoned())? = Some(request);
+    Ok(blob)
+}
+
+/// Turns the PIN on, off, or changes it, keeping the same vault key.
+///
+/// The key must not change: every record is already encrypted under it, and
+/// re-encrypting the vault to change a PIN would be both slow and a chance to
+/// lose data. Returns the blob for the keystore to wrap, exactly as setup does.
+pub fn begin_change_pin(new_pin: Option<String>) -> Result<Vec<u8>> {
+    let key = CURRENT_KEY
+        .lock()
+        .map_err(|_| lock_poisoned())?
+        .clone()
+        .ok_or_else(|| anyhow!("Unlock the vault before changing the PIN."))?;
+
+    let request = match new_pin {
+        Some(pin) => device_slot::rewrap_with_pin(key, &pin),
+        None => device_slot::rewrap_without_pin(key),
+    }
+    .map_err(|error| anyhow!("{error}"))?;
+
+    let blob = request.key_to_wrap().to_vec();
+    *PENDING_SETUP.lock().map_err(|_| lock_poisoned())? = Some(request);
+    Ok(blob)
+}
+
 /// Stores the wrapped key and opens the vault (section 9.2.4 steps 3 and 5).
-pub fn finish_device_setup(
-    vault_path: String,
-    wrapped: Vec<u8>,
-    nonce: Vec<u8>,
-    with_pin: bool,
-) -> Result<()> {
+pub fn finish_device_setup(vault_path: String, wrapped: Vec<u8>, nonce: Vec<u8>) -> Result<()> {
     let request = PENDING_SETUP
         .lock()
         .map_err(|_| lock_poisoned())?
@@ -225,14 +264,8 @@ pub fn finish_device_setup(
         .ok_or_else(|| anyhow!("No setup is in progress."))?;
 
     let mut meta = take_meta()?;
-
-    let scheme = if with_pin {
-        WrapScheme::KeystoreAndPin
-    } else {
-        WrapScheme::Keystore
-    };
     let key = request
-        .complete(&mut meta, wrapped, nonce, scheme)
+        .complete(&mut meta, wrapped, nonce)
         .map_err(|error| anyhow!("{error}"))?;
 
     open_vault_with_key(&vault_path, meta, key)
@@ -274,6 +307,42 @@ pub fn finish_device_open(vault_path: String, unwrapped: Vec<u8>) -> Result<()> 
     open_vault_with_key(&vault_path, take_meta()?, key)
 }
 
+/// Adopts the unwrapped blob and undoes the PIN layer inside it.
+///
+/// A wrong PIN increments the counter FR-35 reads; a right one clears it, so
+/// the limit applies to consecutive failures.
+pub fn finish_device_open_with_pin(
+    vault_path: String,
+    unwrapped: Vec<u8>,
+    pin: String,
+) -> Result<()> {
+    let request = PENDING_OPEN
+        .lock()
+        .map_err(|_| lock_poisoned())?
+        .take()
+        .ok_or_else(|| anyhow!("No unlock is in progress."))?;
+
+    let key = match request.complete_with_pin(&unwrapped, &pin) {
+        Ok(key) => key,
+        Err(error) => {
+            // Counted before the error is returned, so a caller that stops
+            // looking at the result still leaves the count correct.
+            with_meta(|meta| Ok(meta.record_failed_unlock()?))?;
+            return Err(anyhow!("{error}"));
+        }
+    };
+
+    let meta = take_meta()?;
+    meta.clear_failed_unlocks()?;
+    open_vault_with_key(&vault_path, meta, key)
+}
+
+/// FR-35: how many unlock attempts have failed in a row.
+#[flutter_rust_bridge::frb(sync)]
+pub fn failed_unlock_attempts() -> Result<u32> {
+    with_meta(|meta| Ok(meta.failed_unlocks()?))
+}
+
 fn open_vault_with_key(vault_path: &str, meta: MetaStore, key: VaultKey) -> Result<()> {
     // Two layers, two keys, both HKDF subkeys of the vault key. SQLCipher
     // covers the file — the schema, the row count, the timestamps — and the
@@ -282,6 +351,7 @@ fn open_vault_with_key(vault_path: &str, meta: MetaStore, key: VaultKey) -> Resu
         .context("The vault could not be opened")?;
     let vault = Vault::open(store, XChaChaCipher::new(&key))?;
 
+    *CURRENT_KEY.lock().map_err(|_| lock_poisoned())? = Some(key);
     *VAULT.lock().map_err(|_| lock_poisoned())? = Some(vault);
     Ok(())
 }
@@ -294,6 +364,10 @@ fn open_vault_with_key(vault_path: &str, meta: MetaStore, key: VaultKey) -> Resu
 /// read until the slot is unwrapped again.
 #[flutter_rust_bridge::frb(sync)]
 pub fn lock_vault() -> Result<()> {
+    // The key goes first. If anything below fails, the vault is still shut.
+    // `VaultKey` wipes its buffer as it drops.
+    CURRENT_KEY.lock().map_err(|_| lock_poisoned())?.take();
+
     let vault = VAULT.lock().map_err(|_| lock_poisoned())?.take();
 
     // Put the metadata file back so the next unlock can read the slot.
@@ -314,6 +388,7 @@ pub fn is_vault_open() -> bool {
 /// ciphertext left on disk is ciphertext an attacker can keep, so the entries
 /// go too.
 pub fn wipe_device() -> Result<()> {
+    CURRENT_KEY.lock().map_err(|_| lock_poisoned())?.take();
     let existing = VAULT.lock().map_err(|_| lock_poisoned())?.take();
 
     let mut meta = match existing {
