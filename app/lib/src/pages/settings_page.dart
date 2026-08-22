@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../rust/api/vault.dart' as rust;
 import '../services/lock_controller.dart';
 import '../services/vault_session.dart';
+import 'create_account_page.dart';
 import 'set_pin_page.dart';
 
 /// The lock settings (FR-31 to FR-36).
@@ -27,11 +28,22 @@ class SettingsPage extends StatefulWidget {
 class _SettingsPageState extends State<SettingsPage> {
   bool _hasPin = false;
   bool _busy = false;
+  String? _accountEmail;
 
   @override
   void initState() {
     super.initState();
     _readSlot();
+    _readAccount();
+  }
+
+  void _readAccount() {
+    try {
+      setState(() => _accountEmail = rust.accountEmail());
+    } catch (_) {
+      // A device with no account, or a metadata file that cannot be read.
+      // Neither is a reason to fail the screen.
+    }
   }
 
   /// Asks the core whether this device's slot uses a PIN, rather than keeping
@@ -149,6 +161,34 @@ class _SettingsPageState extends State<SettingsPage> {
                     Navigator.of(context).popUntil((route) => route.isFirst);
                   },
           ),
+          const Divider(),
+          const _SectionHeader('Sync'),
+          if (_accountEmail == null)
+            ListTile(
+              leading: const Icon(Icons.cloud_outlined),
+              title: const Text('Create an account'),
+              subtitle: const Text(
+                'Lets your codes reach your other devices. They stay encrypted.',
+              ),
+              onTap: _busy
+                  ? null
+                  : () async {
+                      final created = await Navigator.push<bool>(
+                        context,
+                        MaterialPageRoute(
+                          builder: (_) =>
+                              CreateAccountPage(session: widget.session),
+                        ),
+                      );
+                      if (created == true) _readAccount();
+                    },
+            )
+          else
+            ListTile(
+              leading: const Icon(Icons.cloud_done_outlined),
+              title: const Text('Account'),
+              subtitle: Text(_accountEmail!),
+            ),
           const Divider(),
           const _SectionHeader('This device'),
           ListTile(

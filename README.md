@@ -1,6 +1,6 @@
 # Cross-Platform Authenticator App
 
-Implementation of the PRD, version 0.12. The build order is the dependency
+Implementation of the PRD, version 0.13. The build order is the dependency
 sequence in section 18: each stage is finished before the next starts.
 
 ## Stage status
@@ -10,7 +10,7 @@ sequence in section 18: each stage is finished before the next starts.
 | S1 — Core | TOTP, HOTP, Base32, the `otpauth://` parser, SQLite storage | **Done.** RFC 6238 and RFC 4226 vectors pass for SHA-1, SHA-256, and SHA-512 |
 | S2 — First platform | Android. Flutter UI, QR scan, manual entry, list, copy, application lock | **Done**, verified on a physical device |
 | S3 — Crypto | Vault key, key slots, Argon2id, XChaCha20-Poly1305, recovery key | **Done.** Device slot, record encryption, page encryption, password slot, recovery key |
-| S4 — Backend | API, PostgreSQL schema, key slots, quotas, enumeration resistance | Not started |
+| S4 — Backend | API, PostgreSQL schema, key slots, quotas, enumeration resistance | **In progress.** Exit criterion met; sign-up UI built. No sync engine — that is S5 |
 | S5 — Sync | Sync engine, outbox, HLC, conflict resolution, prune watermark | Not started |
 | S6 — Other platforms | Remaining platforms, screen capture, tray and menu bar | Not started |
 | S7 — Passkeys | `passkeys` package, domain association, PRF slot, fallback | Not started |
@@ -263,13 +263,81 @@ exists for synced accounts only; a local-only vault explicitly cannot be
 recovered (§9.2.4). Building the screen now would mean building it against an
 account flow S4 has not settled.
 
-Carried forward so it does not fall between stages, **S4 owes two P0 items of
-interface** that the core already supports:
+Both are now built. FR-29 and FR-55 show the 24 words once, numbered, with the
+warning that they cannot be shown again; §9.2.3 step 4's three-word
+confirmation gates the end of sign-up, at the positions the core picked at
+random. Eight widget tests cover the gate, including that a wrong word names
+its position and does not complete sign-up.
 
-- **FR-29 / FR-55**: show the recovery key at sign-up, for every method, and
-  let the user export it later after re-authentication.
-- **§9.2.3 step 4**: require three random words to be confirmed before sign-up
-  completes. `RecoveryPhrase::indices_to_confirm` already picks them.
+Still owed by a later stage: FR-29's second half, exporting the recovery key
+after re-authentication.
+
+## The server (S4)
+
+Axum over PostgreSQL 16, per section 14.2. `server/` is its own crate, run
+against a development database in Docker:
+
+```sh
+docker run -d --name authcore-pg -e POSTGRES_PASSWORD=devonly   -e POSTGRES_USER=authcore -e POSTGRES_DB=authcore -p 15432:5432 postgres:16-alpine
+cd server && cargo run
+```
+
+Port 15432 rather than 55432: Windows reserves 55400–55499, and Docker's bind
+fails there with a permissions error that does not mention the reservation.
+`netsh interface ipv4 show excludedportrange protocol=tcp` lists the ranges.
+
+Migrations are numbered from `0001` and applied by sqlx at startup, embedded at
+compile time so a deployment cannot run against a schema it was not built for.
+`0002` adds the session table as its own step rather than an edit to `0001` —
+S7 will alter `key_slot` the same way.
+
+### The exit criterion, and the test that nearly did not work
+
+The criterion is that a database dump holds no plaintext issuer, account name,
+or secret. `server/tests/dump.rs` runs the whole sign-up and record push, then
+searches `pg_dump` output — the artifact the criterion is about, rather than
+the endpoints, because an endpoint can be correct while the database still
+holds something it should not.
+
+**The first version passed while the server leaked everything.** It had a
+control — a marker stored in the clear and asserted present, so a broken search
+would be caught. But the control was a device name, a `text` column that
+`pg_dump` writes as readable text, while the secret lives in
+`record.ciphertext`, a `bytea` column that `pg_dump` writes as hex. An ASCII
+search could not see a plaintext secret at all. Pushing the payload unencrypted
+on purpose produced a **passing** test.
+
+Two fixes: the search now looks for each marker as literal text *and* as the
+hex a `bytea` dump carries, and there is a second control written into the
+`bytea` column itself. Both were re-verified the way the fault was found — with
+the payload pushed in the clear the test fails naming the secret, and with it
+sealed it passes.
+
+The lesson generalises: a control has to be in the same column type, and
+through the same path, as the thing it is standing in for.
+
+### Enumeration resistance has two halves
+
+Section 9.5 is easy to half-build. The body and the timing both have to match:
+
+| Half | How |
+|---|---|
+| Body | The fabricated salt is an HMAC over the normalised address with a server-held key: stable per address, unpredictable without the key, and the same 128-bit length as a real one |
+| Timing | Both paths are padded to a fixed floor above either branch. A matching body with a distinguishable response time still answers the question |
+
+The test compares status, response shape, salt length, parameters, stability
+across two calls, and elapsed time over five requests each.
+
+`SERVER_KEY` is required in a release build. A key generated at startup would
+change the fake salts on every restart — and a real account's salt does not
+change, so the instability would itself be the answer.
+
+### What is deliberately absent
+
+The sync engine. S4 ends at the dump test; the cycle, the conflict rules in
+section 10.4, and the outbox drain are S5, with a 1000-operation convergence
+test of their own. The record endpoints store rows and report a base-revision
+mismatch — they do not merge.
 
 ## Layout
 
