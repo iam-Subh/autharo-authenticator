@@ -1,0 +1,51 @@
+[package]
+name = "authserver"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+# Axum, per section 14.2.
+axum = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
+tower-http = { version = "0.6", features = ["trace"] }
+
+sqlx = { version = "0.8", default-features = false, features = [
+    "runtime-tokio", "tls-rustls", "postgres", "uuid", "chrono", "json", "migrate", "macros",
+] }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+
+# Section 9.2.1 step 5: the server hashes the authentication key again.
+argon2 = "0.5"
+# Section 9.5: the fake salt is an HMAC over the address with a server key.
+hmac = "0.13"
+sha2 = "0.11"
+subtle = "2"
+base64 = "0.22"
+getrandom = "0.4"
+zeroize = { version = "1", features = ["zeroize_derive"] }
+
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1"
+thiserror = "2"
+
+[dev-dependencies]
+# NOT authcore. The client crate links SQLite3 Multiple Ciphers and sqlx links
+# its own SQLite, and two crates claiming the native `sqlite3` library is a
+# hard cargo error — the same duplicate-SQLite hazard as section 12.1 rule 5,
+# caught here by the `links` key rather than at runtime.
+#
+# The dump test therefore seals its record with the same primitive the record
+# cipher uses, rather than by calling into the client. What the test needs is a
+# ciphertext that genuinely contains the marker, and this gives it one.
+chacha20poly1305 = "0.11"
+getrandom = "0.4"
+uuid = { version = "1", features = ["v4"] }
+serde_json = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tokio = { version = "1", features = ["full"] }
