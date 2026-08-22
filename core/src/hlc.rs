@@ -106,6 +106,36 @@ pub struct HlcClock {
     last: Hlc,
 }
 
+/// Section 10.2's forward drift bound: five minutes.
+///
+/// # What this is for
+///
+/// The HLC takes the maximum of the local and remote wall-clock components, so
+/// a remote value propagates. One device with its clock set an hour ahead
+/// therefore issues timestamps an hour ahead, every device that syncs with it
+/// adopts that time, and **that device wins every conflict until real time
+/// catches up** — no later write on a correct device can override it.
+///
+/// The bound is on the *incoming* value only. A local clock that is simply
+/// wrong is the user's own problem and affects only their device; a value that
+/// arrives over the network affects everyone.
+///
+/// Five minutes is large enough to absorb ordinary clock skew between devices
+/// that are all roughly right, and small enough that a badly set clock costs
+/// minutes rather than hours.
+pub const MAX_FORWARD_DRIFT_MS: u64 = 5 * 60 * 1000;
+
+/// What a clock did with a remote timestamp.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DriftOutcome {
+    /// Within the bound and used as it was.
+    Accepted,
+    /// Beyond the bound. The wall-clock component was clamped to the local
+    /// time plus [`MAX_FORWARD_DRIFT_MS`]; the timestamp is still ordered
+    /// after the local one, so the write is not lost.
+    Clamped { ahead_by_ms: u64 },
+}
+
 impl HlcClock {
     /// `device` is the random 64-bit identifier assigned at install and held
     /// in the `meta` table. It never changes.
@@ -139,8 +169,24 @@ impl HlcClock {
     /// Folds a timestamp received from another device into this clock, then
     /// issues a timestamp for the write that observes it. The result is always
     /// greater than both the local and the remote timestamp.
+    ///
+    /// A remote value more than [`MAX_FORWARD_DRIFT_MS`] ahead of local time
+    /// is clamped first — see [`Self::observe_checked`] if the caller wants to
+    /// know that happened.
     pub fn observe(&mut self, remote: Hlc, physical_ms: u64) -> Hlc {
+        self.observe_checked(remote, physical_ms).0
+    }
+
+    /// [`Self::observe`], reporting whether the remote timestamp was clamped.
+    ///
+    /// Clamping rather than rejecting: a rejected write would be lost, and the
+    /// device that sent it is not necessarily wrong about the write — only
+    /// about the time. Clamping keeps the change and takes away the unearned
+    /// priority.
+    pub fn observe_checked(&mut self, remote: Hlc, physical_ms: u64) -> (Hlc, DriftOutcome) {
         let physical_ms = physical_ms & WALL_MASK;
+        let (remote, outcome) = clamp_drift(remote, physical_ms);
+
         let wall = physical_ms.max(self.last.wall_ms).max(remote.wall_ms);
 
         self.last = if wall == self.last.wall_ms && wall == remote.wall_ms {
@@ -152,8 +198,28 @@ impl HlcClock {
         } else {
             Hlc::new(wall, 0, self.device)
         };
-        self.last
+        (self.last, outcome)
     }
+}
+
+/// Applies section 10.2's bound to a timestamp arriving from elsewhere.
+///
+/// Only the wall-clock component is touched. The counter and the device
+/// identifier are kept, so the value stays unique and still orders against
+/// other writes from the same device in the same millisecond.
+pub fn clamp_drift(remote: Hlc, local_physical_ms: u64) -> (Hlc, DriftOutcome) {
+    let ceiling = local_physical_ms.saturating_add(MAX_FORWARD_DRIFT_MS) & WALL_MASK;
+
+    if remote.wall_ms <= ceiling {
+        return (remote, DriftOutcome::Accepted);
+    }
+
+    (
+        Hlc::new(ceiling, remote.counter, remote.device),
+        DriftOutcome::Clamped {
+            ahead_by_ms: remote.wall_ms - local_physical_ms,
+        },
+    )
 }
 
 /// Bumps the counter, rolling into the next millisecond if it would overflow.
@@ -257,5 +323,131 @@ mod tests {
         let next = clock.tick(1000);
         assert_eq!((next.wall_ms, next.counter), (1001, 0));
         assert!(next > Hlc::new(1000, u16::MAX, DEVICE_A));
+    }
+}
+
+#[cfg(test)]
+mod drift_tests {
+    use super::*;
+
+    const LOCAL: u64 = 0xa91b_7f0e_44d2_c318;
+    const REMOTE: u64 = 0x0123_4567_89ab_cdef;
+
+    /// Section 10.2's whole reason: a device an hour ahead must not win every
+    /// conflict for an hour.
+    #[test]
+    fn a_clock_an_hour_ahead_is_clamped() {
+        let now = 1_755_734_400_000;
+        let hour_ahead = Hlc::new(now + 60 * 60 * 1000, 0, REMOTE);
+
+        let (clamped, outcome) = clamp_drift(hour_ahead, now);
+
+        assert!(matches!(outcome, DriftOutcome::Clamped { .. }));
+        assert_eq!(clamped.wall_ms, now + MAX_FORWARD_DRIFT_MS);
+        assert!(
+            clamped.wall_ms < hour_ahead.wall_ms,
+            "the timestamp must lose its unearned lead"
+        );
+    }
+
+    /// And the point of clamping rather than rejecting: the write survives.
+    #[test]
+    fn a_clamped_write_is_kept_and_still_ordered() {
+        let now = 1_755_734_400_000;
+        let mut clock = HlcClock::new(LOCAL);
+        let local_write = clock.tick(now);
+
+        let far_future = Hlc::new(now + 60 * 60 * 1000, 0, REMOTE);
+        let (issued, outcome) = clock.observe_checked(far_future, now);
+
+        assert!(matches!(outcome, DriftOutcome::Clamped { .. }));
+        assert!(
+            issued > local_write,
+            "the observing write must still come after the local one"
+        );
+        assert!(
+            issued.wall_ms <= now + MAX_FORWARD_DRIFT_MS,
+            "and must not have adopted the remote device's hour"
+        );
+    }
+
+    /// Ordinary skew between roughly-correct devices must pass untouched, or
+    /// the bound would fire constantly and clamp honest writes.
+    #[test]
+    fn ordinary_skew_is_accepted() {
+        let now = 1_755_734_400_000;
+
+        for ahead_ms in [0, 1, 1_000, 30_000, MAX_FORWARD_DRIFT_MS] {
+            let remote = Hlc::new(now + ahead_ms, 3, REMOTE);
+            let (result, outcome) = clamp_drift(remote, now);
+
+            assert_eq!(outcome, DriftOutcome::Accepted, "{ahead_ms}ms was clamped");
+            assert_eq!(result, remote);
+        }
+    }
+
+    /// A remote clock that is *behind* is not a problem: it loses conflicts on
+    /// its own, and clamping it upward would hand it priority it did not earn.
+    #[test]
+    fn a_slow_remote_clock_is_left_alone() {
+        let now = 1_755_734_400_000;
+        let behind = Hlc::new(now - 60 * 60 * 1000, 0, REMOTE);
+
+        let (result, outcome) = clamp_drift(behind, now);
+
+        assert_eq!(outcome, DriftOutcome::Accepted);
+        assert_eq!(result, behind);
+    }
+
+    /// The counter and device identifier survive clamping, or two clamped
+    /// writes from one device in the same millisecond would collide.
+    #[test]
+    fn clamping_keeps_the_counter_and_the_device() {
+        let now = 1_755_734_400_000;
+        let remote = Hlc::new(now + 60 * 60 * 1000, 42, REMOTE);
+
+        let (clamped, _) = clamp_drift(remote, now);
+
+        assert_eq!(clamped.counter, 42);
+        assert_eq!(clamped.device, REMOTE);
+    }
+
+    /// Two clamped writes from the same far-future device must still order
+    /// against each other rather than becoming equal.
+    #[test]
+    fn two_clamped_writes_stay_distinct() {
+        let now = 1_755_734_400_000;
+        let far = now + 60 * 60 * 1000;
+
+        let (first, _) = clamp_drift(Hlc::new(far, 1, REMOTE), now);
+        let (second, _) = clamp_drift(Hlc::new(far, 2, REMOTE), now);
+
+        assert_ne!(first, second);
+        assert!(second > first);
+    }
+
+    /// The bound is on what arrives, not on the local clock. A device whose
+    /// own clock is ahead affects only itself, and refusing its local writes
+    /// would make the application unusable on a wrongly-set phone.
+    #[test]
+    fn a_local_clock_that_is_ahead_is_not_clamped() {
+        let mut clock = HlcClock::new(LOCAL);
+        let far_local = 1_755_734_400_000 + 60 * 60 * 1000;
+
+        let issued = clock.tick(far_local);
+
+        assert_eq!(issued.wall_ms, far_local);
+    }
+
+    /// Reported so a caller can surface it. A user whose device keeps clamping
+    /// its peers has a clock problem worth telling them about.
+    #[test]
+    fn the_report_says_how_far_ahead_it_was() {
+        let now = 1_755_734_400_000;
+        let ahead = 60 * 60 * 1000;
+
+        let (_, outcome) = clamp_drift(Hlc::new(now + ahead, 0, REMOTE), now);
+
+        assert_eq!(outcome, DriftOutcome::Clamped { ahead_by_ms: ahead });
     }
 }
