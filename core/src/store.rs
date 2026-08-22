@@ -763,3 +763,66 @@ impl MetaStore {
         self.remove(META_FAILED_UNLOCKS)
     }
 }
+
+/// `meta` key holding entries awaiting section 10.4's HOTP counter rule.
+///
+/// Kept in the metadata file rather than the vault because the sync cycle runs
+/// while locked (OFF-09) and has to be able to write this list without a key.
+/// It is a list of entry identifiers — no payload, nothing secret.
+const META_COUNTER_RECONCILE: &str = "sync.counter_reconcile";
+
+impl MetaStore {
+    fn reconcile_list(&self) -> Result<Vec<String>> {
+        Ok(self
+            .get(META_COUNTER_RECONCILE)?
+            .and_then(|bytes| String::from_utf8(bytes).ok())
+            .map(|text| {
+                text.split('\n')
+                    .filter(|line| !line.is_empty())
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default())
+    }
+
+    fn write_reconcile_list(&self, ids: &[String]) -> Result<()> {
+        if ids.is_empty() {
+            return self.remove(META_COUNTER_RECONCILE);
+        }
+        self.set(META_COUNTER_RECONCILE, ids.join("\n").as_bytes())
+    }
+}
+
+impl Store {
+    /// Records that an entry's conflict was decided by HLC alone.
+    ///
+    /// Section 10.4's HOTP rule takes the *larger* counter, not the newer one,
+    /// and the counter lives inside the ciphertext. While the vault is locked
+    /// the cycle cannot read it, so the entry is listed here and reconciled
+    /// when a key is available. Deferring is correct; skipping would leave a
+    /// counter behind the issuer's and produce rejected codes.
+    pub fn mark_for_counter_reconcile(&self, entry_id: &str) -> Result<()> {
+        let mut ids = self.meta.reconcile_list()?;
+        if !ids.iter().any(|id| id == entry_id) {
+            ids.push(entry_id.to_string());
+            self.meta.write_reconcile_list(&ids)?;
+        }
+        Ok(())
+    }
+
+    /// The entries awaiting reconciliation, oldest first.
+    pub fn counter_reconcile_list(&self) -> Result<Vec<String>> {
+        self.meta.reconcile_list()
+    }
+
+    /// Clears entries once their counters have been reconciled.
+    pub fn clear_counter_reconcile(&self, done: &[String]) -> Result<()> {
+        let remaining: Vec<String> = self
+            .meta
+            .reconcile_list()?
+            .into_iter()
+            .filter(|id| !done.contains(id))
+            .collect();
+        self.meta.write_reconcile_list(&remaining)
+    }
+}

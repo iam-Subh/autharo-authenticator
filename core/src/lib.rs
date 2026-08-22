@@ -12,6 +12,7 @@ pub mod otpauth;
 pub mod pin;
 pub mod secret;
 pub mod store;
+pub mod sync;
 pub mod vault;
 
 pub use base32::Base32Error;
