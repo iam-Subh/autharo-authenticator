@@ -189,11 +189,18 @@ void main() {
       );
 
       // The button sits below the fold on a phone, so it has to be scrolled
-      // to — the same as a user would. The validation message then renders on
-      // the email field, which scrolling moved off screen, and a ListView does
-      // not build off-screen children; so the assertion needs the field back
-      // in view before it can see anything.
-      Future<void> submitAndReturnToTheField() async {
+      // to. The assertion then stays where the button is, which is where the
+      // user is looking — and where the message has to be, because the email
+      // field above has been disposed by the ListView and cannot show an
+      // inline error. That is the whole point of the fix this covers.
+      Future<void> submit() async {
+        // The email field autofocuses, so on a real phone the soft keyboard
+        // covers the bottom of the screen and a tap aimed at the button lands
+        // on the keyboard instead. Nothing like this happens on the host,
+        // which is why the host run passed.
+        FocusManager.instance.primaryFocus?.unfocus();
+        await tester.pumpAndSettle();
+
         final button = find.widgetWithText(FilledButton, 'Create account');
         await tester.scrollUntilVisible(
           button,
@@ -203,25 +210,29 @@ void main() {
         await tester.pumpAndSettle();
         await tester.tap(button);
         await tester.pumpAndSettle();
-
-        await tester.scrollUntilVisible(
-          find.widgetWithText(TextFormField, 'Email address'),
-          -200,
-          scrollable: find.byType(Scrollable).first,
-        );
-        await tester.pumpAndSettle();
       }
 
       // Section 16.4 and decision 6: an email address is required.
-      await submitAndReturnToTheField();
-      expect(find.text('An email address is required.'), findsOneWidget);
+      await submit();
+      expect(
+        find.text('An email address is required.'),
+        findsWidgets,
+        reason: 'the message must reach the user even with the field off screen',
+      );
 
+      // Scroll back up to type, then submit again.
+      await tester.scrollUntilVisible(
+        find.widgetWithText(TextFormField, 'Email address'),
+        -200,
+        scrollable: find.byType(Scrollable).first,
+      );
+      await tester.pumpAndSettle();
       await tester.enterText(
         find.widgetWithText(TextFormField, 'Email address'),
         'not-an-address',
       );
-      await submitAndReturnToTheField();
-      expect(find.textContaining('does not look like'), findsOneWidget);
+      await submit();
+      expect(find.textContaining('does not look like'), findsWidgets);
     });
 
     testWidgets('the real phrase renders and its real positions confirm',
