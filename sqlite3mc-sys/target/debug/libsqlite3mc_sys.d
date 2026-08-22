@@ -1,0 +1,1 @@
+D:\Authentication\ App\sqlite3mc-sys\target\debug\libsqlite3mc_sys.rlib: D:\Authentication\ App\sqlite3mc-sys\build.rs D:\Authentication\ App\sqlite3mc-sys\src\lib.rs D:\Authentication\ App\sqlite3mc-sys\vendor\sqlite3mc_amalgamation.c

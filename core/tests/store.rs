@@ -307,8 +307,8 @@ fn reopening_keeps_the_records() {
     }
 }
 
-/// The stage S2 database stored payloads in plaintext. This build must destroy
-/// it rather than try to read it, and rather than leave it on disk.
+/// A stage S2 database stored payloads in plaintext. It must be destroyed
+/// rather than read, and rather than left on disk (section 12.1 rule 4).
 #[test]
 fn a_stage_s2_plaintext_database_is_discarded() {
     let paths = Paths::new();
@@ -331,7 +331,7 @@ fn a_stage_s2_plaintext_database_is_discarded() {
     assert!(std::path::Path::new(&paths.vault).exists());
 
     let discarded =
-        authcore::store::discard_legacy_plaintext_vault(&paths.vault, &paths.meta).unwrap();
+        authcore::store::discard_unencrypted_vault(&paths.vault, &paths.meta).unwrap();
 
     assert!(discarded, "an S2 file must be recognised");
     assert!(
@@ -344,60 +344,96 @@ fn a_stage_s2_plaintext_database_is_discarded() {
     );
 }
 
+/// An encrypted vault must survive. This is the case the header check gets
+/// right and the old schema check could not distinguish.
 #[test]
-fn a_current_database_is_left_alone() {
+fn an_encrypted_database_is_left_alone() {
     let paths = Paths::new();
+    let key = VaultKey::from_slice(&[3u8; 32]).unwrap();
     {
         let meta = MetaStore::open(&paths.meta).unwrap();
-        let mut store = Store::open(&paths.vault, meta, None).unwrap();
+        let mut store = Store::open(&paths.vault, meta, Some(&key.sqlcipher_key())).unwrap();
         store
             .write_local(&record("keep", Hlc::new(1000, 0, DEVICE), b"body"), None)
             .unwrap();
     }
 
-    let discarded =
-        authcore::store::discard_legacy_plaintext_vault(&paths.vault, &paths.meta).unwrap();
+    let discarded = authcore::store::discard_unencrypted_vault(&paths.vault, &paths.meta).unwrap();
 
-    assert!(!discarded, "an S3 vault has no meta table and must survive");
+    assert!(!discarded, "an encrypted vault must survive");
     let meta = MetaStore::open(&paths.meta).unwrap();
-    let store = Store::open(&paths.vault, meta, None).unwrap();
+    let store = Store::open(&paths.vault, meta, Some(&key.sqlcipher_key())).unwrap();
     assert_eq!(store.get("keep").unwrap().unwrap().ciphertext, b"body");
+}
+
+/// The stage S3 shape: the right schema, the right record encryption, but a
+/// plain SQLite file because no page-encrypting library was linked. The old
+/// schema-based check missed this entirely, because an S3 vault has no `meta`
+/// table to find.
+#[test]
+fn a_plaintext_stage_s3_database_is_discarded() {
+    let paths = Paths::new();
+    {
+        let meta = MetaStore::open(&paths.meta).unwrap();
+        let mut store = Store::open(&paths.vault, meta, None).unwrap();
+        store
+            .write_local(&record("e1", Hlc::new(1000, 0, DEVICE), b"body"), None)
+            .unwrap();
+    }
+    std::fs::write(&paths.meta, b"stale").unwrap();
+
+    let discarded = authcore::store::discard_unencrypted_vault(&paths.vault, &paths.meta).unwrap();
+
+    assert!(discarded, "a plain SQLite file must be recognised");
+    assert!(!std::path::Path::new(&paths.vault).exists());
+    assert!(
+        !std::path::Path::new(&paths.meta).exists(),
+        "its metadata file names a vault that no longer exists"
+    );
+}
+
+/// An empty file is what an interrupted first run leaves. SQLite initialises
+/// one happily, so deleting it would be gratuitous.
+#[test]
+fn an_empty_file_is_left_alone() {
+    let paths = Paths::new();
+    std::fs::write(&paths.vault, b"").unwrap();
+
+    assert!(!authcore::store::discard_unencrypted_vault(&paths.vault, &paths.meta).unwrap());
+    assert!(std::path::Path::new(&paths.vault).exists());
 }
 
 #[test]
 fn a_missing_database_is_not_an_error() {
     let paths = Paths::new();
-    assert!(!authcore::store::discard_legacy_plaintext_vault(&paths.vault, &paths.meta).unwrap());
+    assert!(!authcore::store::discard_unencrypted_vault(&paths.vault, &paths.meta).unwrap());
 }
 
-/// The page-encryption layer of section 12.1 is not linked.
+/// The inverted assertion. Section 12.1 rule 1: test the bytes, not the open.
 ///
-/// This asserts the gap rather than hiding it, the same way the stage S2
-/// pipeline test asserted that payloads were readable before S3 encrypted
-/// them. When SQLite3 Multiple Ciphers lands, this test fails, and inverting
-/// it is the evidence the layer is really there.
+/// This file previously asserted the opposite — that `vault.db` still began
+/// with a plain `SQLite format 3` header — because no page-encrypting library
+/// was linked, and a test that quietly passed either way would have hidden
+/// that. Turning the expectation around is the evidence the layer is there.
 ///
-/// What it is NOT saying: that anything secret is exposed. The record layer is
-/// mandatory and is linked — the test below pins that. Section 12.1: "The
-/// database layer is defence in depth. Ship it, but do not block the record
-/// layer on it."
+/// Checking the bytes rather than the open is not pedantry. SQLite3 Multiple
+/// Ciphers opens an unencrypted database transparently, so a missing or wrong
+/// key looks exactly like success: the file opens, queries run, tests pass.
+/// The header is the one thing a working connection cannot fake.
 #[test]
-fn the_database_layer_is_not_linked_yet() {
+fn the_vault_file_is_encrypted() {
     let paths = Paths::new();
     let key = VaultKey::from_slice(&[5u8; 32]).unwrap();
 
     {
         let meta = MetaStore::open(&paths.meta).unwrap();
-        // The key is accepted and ignored: plain SQLite treats `PRAGMA key` as
-        // a no-op rather than an error, which is exactly why this needs a test
-        // and not a comment.
         let mut store = Store::open(&paths.vault, meta, Some(&key.sqlcipher_key())).unwrap();
         store
             .write_local(
                 &record(
-                    "an-entry",
+                    "an-entry-id",
                     Hlc::new(1000, 0, DEVICE),
-                    b"sealed-by-the-record-layer",
+                    b"findthisbody-if-you-can",
                 ),
                 None,
             )
@@ -405,50 +441,82 @@ fn the_database_layer_is_not_linked_yet() {
     }
 
     let bytes = std::fs::read(&paths.vault).unwrap();
+    assert!(!bytes.is_empty(), "the file should have been written");
+
     assert!(
-        bytes.starts_with(b"SQLite format 3"),
-        "the file is encrypted — the database layer is linked. Invert this          test and restore the two it replaced."
+        !bytes.starts_with(b"SQLite format 3"),
+        "the file still has a plain SQLite header, so nothing encrypted it"
+    );
+
+    let text = String::from_utf8_lossy(&bytes);
+    assert!(!text.contains("findthisbody"), "a record body is readable");
+    assert!(
+        !text.contains("an-entry-id"),
+        "an entry identifier is readable"
+    );
+    assert!(
+        !text.contains("CREATE TABLE"),
+        "the schema is readable, so the page layer is not covering the file"
     );
 }
 
-/// What the file leaks without the database layer, stated exactly.
-///
-/// Section 12.1's table: the row structure is visible, no secret is. Anything
-/// more than this appearing in the file is a bug in the record layer.
+/// The key must be required, not merely accepted. With transparent open, this
+/// is worth asserting separately from the header check above.
 #[test]
-fn without_the_database_layer_only_the_structure_leaks() {
+fn an_encrypted_vault_will_not_open_without_its_key() {
     let paths = Paths::new();
+    let key = VaultKey::from_slice(&[6u8; 32]).unwrap();
 
     {
         let meta = MetaStore::open(&paths.meta).unwrap();
-        let mut store = Store::open(&paths.vault, meta, None).unwrap();
+        let mut store = Store::open(&paths.vault, meta, Some(&key.sqlcipher_key())).unwrap();
         store
-            .write_local(
-                &record(
-                    "entry-id-here",
-                    Hlc::new(1000, 0, DEVICE),
-                    b"ciphertext-bytes",
-                ),
-                None,
-            )
+            .write_local(&record("e1", Hlc::new(1000, 0, DEVICE), b"body"), None)
             .unwrap();
     }
 
-    let bytes = std::fs::read(&paths.vault).unwrap();
-    let text = String::from_utf8_lossy(&bytes);
-
-    // Visible, and section 12.1 says so: the schema and the row structure.
+    let meta = MetaStore::open(&paths.meta).unwrap();
     assert!(
-        text.contains("CREATE TABLE"),
-        "the schema is visible, as documented"
+        Store::open(&paths.vault, meta, None).is_err(),
+        "an encrypted file must not open unkeyed"
     );
 
-    // The payload column holds whatever the record layer put there. In the
-    // real application that is XChaCha20-Poly1305 output; `core/tests/vault.rs`
-    // and `pipeline.rs` prove no plaintext reaches it.
+    let wrong = VaultKey::from_slice(&[7u8; 32]).unwrap();
+    let meta = MetaStore::open(&paths.meta).unwrap();
     assert!(
-        text.contains("ciphertext-bytes"),
-        "this test writes its own bytes, so they are expected here"
+        Store::open(&paths.vault, meta, Some(&wrong.sqlcipher_key())).is_err(),
+        "a wrong key must not open the file"
+    );
+
+    let meta = MetaStore::open(&paths.meta).unwrap();
+    let store = Store::open(&paths.vault, meta, Some(&key.sqlcipher_key())).unwrap();
+    assert_eq!(store.get("e1").unwrap().unwrap().ciphertext, b"body");
+}
+
+/// The transparent-open hazard from the other side: a plaintext file left by
+/// an earlier build must not be silently adopted and written into.
+#[test]
+fn a_plaintext_file_is_not_silently_adopted() {
+    let paths = Paths::new();
+
+    {
+        let connection = rusqlite::Connection::open(&paths.vault).unwrap();
+        connection
+            .execute_batch("CREATE TABLE leftover (x TEXT); INSERT INTO leftover VALUES ('old');")
+            .unwrap();
+    }
+    assert!(
+        std::fs::read(&paths.vault)
+            .unwrap()
+            .starts_with(b"SQLite format 3"),
+        "precondition: this file is plaintext"
+    );
+
+    let key = VaultKey::from_slice(&[8u8; 32]).unwrap();
+    let meta = MetaStore::open(&paths.meta).unwrap();
+    assert!(
+        Store::open(&paths.vault, meta, Some(&key.sqlcipher_key())).is_err(),
+        "a keyed open of a plaintext file must fail rather than adopt it"
     );
 }
 

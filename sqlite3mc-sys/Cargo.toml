@@ -1,0 +1,14 @@
+[package]
+name = "sqlite3mc-sys"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "SQLite3 Multiple Ciphers, compiled as the SQLite that rusqlite links"
+
+# Declared so cargo knows this crate owns the native `sqlite3` library. Two
+# crates claiming the same `links` value is a hard error, which is a second
+# guard against the duplicate-SQLite hazard in PRD section 12.1 rule 5.
+links = "sqlite3mc"
+
+[build-dependencies]
+cc = "1"

@@ -8,13 +8,16 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
 // These functions are ignored because they are not marked as `pub`: `added`, `build_payload`, `duplicate`, `lock_poisoned`, `open_vault_with_key`, `take_meta`, `with_meta`, `with_vault`
 
-/// Deletes a stage S2 plaintext database if one is present.
+/// Deletes an unencrypted vault file if one is present (section 12.1 rule 4).
 ///
-/// Must run before [`open_meta`]. An S2 file cannot be read by this build —
-/// its payloads were never encrypted, so they fail to decrypt and are reported
-/// as damaged, which is indistinguishable from data loss. Returns true when
-/// something was discarded, so the caller can say so rather than leaving the
-/// user to guess why their development entries vanished.
+/// Must run before [`open_meta`]. Two earlier shapes qualify: the stage S2
+/// file with plaintext payloads, and the stage S3 file whose payloads were
+/// encrypted but whose pages were not. Neither opens under a key now.
+///
+/// Discarded rather than migrated because a copy-and-delete would leave the
+/// old plaintext pages on flash, where wear levelling makes their removal
+/// unprovable. Returns true when something was deleted, so the interface can
+/// say so rather than leaving the user to guess why their entries vanished.
 bool discardLegacyVault({
   required String vaultPath,
   required String metaPath,

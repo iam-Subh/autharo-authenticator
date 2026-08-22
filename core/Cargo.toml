@@ -11,19 +11,20 @@ getrandom = "0.4.3"
 hkdf = "0.13.0"
 hmac = "0.13.0"
 percent-encoding = "2.3.2"
-# Plain SQLite. The page-encryption layer of section 12.1 is NOT linked; see
-# README.md, "Database encryption is not linked".
+# Page-level encryption per section 12.1, via SQLite3 Multiple Ciphers.
 #
-# SQLCipher was linked and working on the host, then removed: its vendored
-# OpenSSL cannot cross-compile to Android from Windows. OpenSSL's Configure
-# wants a `aarch64-linux-android-clang` that the Windows NDK does not provide
-# under that name, and Android is the platform that ships. Section 12.1 allows
-# any page-encrypting build and names SQLite3 Multiple Ciphers, which needs no
-# OpenSSL and no Perl; that is the way back.
+# `bundled` is deliberately absent: it would compile a second SQLite, and
+# section 12.1 rule 5 warns that the wrong copy can win silently — the wrong
+# one here being the copy with no encryption. The sqlite3mc-sys build script
+# fails the build if that feature reappears.
 #
-# `VaultKey::sqlcipher_key` and `Store::open`'s key parameter are kept, so
-# relinking is a dependency change rather than a redesign.
-rusqlite = { version = "0.40.2", features = ["bundled"] }
+# Default features give pregenerated bindings, so no C header is needed at
+# build time and no bindgen runs.
+rusqlite = "0.40.2"
+
+# Compiles the SQLite that rusqlite links against. Not referenced from Rust;
+# see store.rs for the one line that keeps the linker from dropping it.
+sqlite3mc-sys = { path = "../sqlite3mc-sys" }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 sha1 = "0.11.0"

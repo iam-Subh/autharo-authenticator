@@ -165,16 +165,19 @@ impl AddOutcome {
 // Device slot (section 9.2.4)
 // ---------------------------------------------------------------------------
 
-/// Deletes a stage S2 plaintext database if one is present.
+/// Deletes an unencrypted vault file if one is present (section 12.1 rule 4).
 ///
-/// Must run before [`open_meta`]. An S2 file cannot be read by this build —
-/// its payloads were never encrypted, so they fail to decrypt and are reported
-/// as damaged, which is indistinguishable from data loss. Returns true when
-/// something was discarded, so the caller can say so rather than leaving the
-/// user to guess why their development entries vanished.
+/// Must run before [`open_meta`]. Two earlier shapes qualify: the stage S2
+/// file with plaintext payloads, and the stage S3 file whose payloads were
+/// encrypted but whose pages were not. Neither opens under a key now.
+///
+/// Discarded rather than migrated because a copy-and-delete would leave the
+/// old plaintext pages on flash, where wear levelling makes their removal
+/// unprovable. Returns true when something was deleted, so the interface can
+/// say so rather than leaving the user to guess why their entries vanished.
 #[flutter_rust_bridge::frb(sync)]
 pub fn discard_legacy_vault(vault_path: String, meta_path: String) -> Result<bool> {
-    Ok(authcore::store::discard_legacy_plaintext_vault(
+    Ok(authcore::store::discard_unencrypted_vault(
         &vault_path,
         &meta_path,
     )?)

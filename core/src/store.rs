@@ -28,6 +28,9 @@
 use core::fmt;
 
 use rusqlite::{Connection, OptionalExtension, params};
+// Keeps the linker from dropping the crate that compiles SQLite3 Multiple
+// Ciphers. Nothing in this file calls into it directly — rusqlite does.
+use sqlite3mc_sys as _;
 use uuid::Uuid;
 
 use crate::hlc::{Hlc, HlcParseError};
@@ -321,18 +324,9 @@ impl Store {
         sqlcipher_key: Option<&str>,
     ) -> Result<Self> {
         if let Some(key) = sqlcipher_key {
-            // Must be the first statement on the connection: SQLCipher reads
-            // the key before it touches the file header.
-            //
-            // The `x'...'` form supplies a raw key and skips SQLCipher's own
-            // PBKDF2. That is correct here and not a shortcut: the input is
-            // already a uniformly random HKDF subkey, so stretching it would
-            // add cost without adding entropy. A passphrase would need the KDF.
-            //
-            // Built by hand rather than through `pragma_update`, which quotes
-            // its argument and would turn the blob literal into a string.
-            vault.execute_batch(&format!("PRAGMA key = \"x'{key}'\";"))?;
+            apply_encryption(&vault, key)?;
         }
+
         // Foreign keys are off by default in SQLite, and the outbox references
         // the entry table.
         vault.pragma_update(None, "foreign_keys", true)?;
@@ -568,6 +562,59 @@ impl Store {
     }
 }
 
+/// Turns on page encryption for this connection (section 12.1).
+///
+/// # Every line here is load-bearing
+///
+/// SQLite3 Multiple Ciphers **opens an unencrypted database transparently**.
+/// If the key is never applied, or applied wrongly, an old plaintext file
+/// opens and every query works — so a test that checks the database opens
+/// proves nothing at all. `core/tests/store.rs` asserts on the file's bytes
+/// instead, which is section 12.1's first rule.
+///
+/// The order is fixed: cipher, then its parameters, then the key. SQLite3MC
+/// reads the configuration when the key is supplied, so anything set after the
+/// key is ignored — silently.
+fn apply_encryption(vault: &Connection, key: &str) -> Result<()> {
+    // Section 12.1 rule 2: name the cipher, do not accept the default. This
+    // library's default has changed between releases, and a changed default
+    // makes an existing database unopenable — the file is still encrypted, and
+    // nothing on the device can read it. ChaCha20-Poly1305 also matches the
+    // record layer, so one primitive covers both.
+    vault.execute_batch("PRAGMA cipher = 'chacha20';")?;
+
+    // Rule 2 again: pin the iteration count. It is unused while the key is
+    // supplied raw below, because a uniformly random 256-bit key needs no
+    // stretching — but pinning it means a future switch to a passphrase
+    // inherits a stated cost rather than whatever the release defaults to.
+    vault.execute_batch("PRAGMA kdf_iter = 64007;")?;
+
+    // Rule 3, belt to the compile-time SQLITE_TEMP_STORE=3 brace. Temporary
+    // tables and sort spills would otherwise write plaintext pages next to the
+    // encrypted file.
+    vault.execute_batch("PRAGMA temp_store = MEMORY;")?;
+
+    // `hexkey` takes the key as it is. `key` would treat it as a passphrase
+    // and run it through the KDF, which would derive a different key and leave
+    // every existing database unopenable.
+    vault.execute_batch(&format!("PRAGMA hexkey = '{key}';"))?;
+
+    // Proof that the key took. Reading the schema forces SQLite to decrypt
+    // page one; a wrong key fails here rather than at the first query, and an
+    // unkeyed open of an encrypted file fails here too.
+    vault
+        .query_row("SELECT count(*) FROM sqlite_master", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .map_err(|_| {
+            StoreError::Database(rusqlite::Error::InvalidPath(
+                "the vault could not be decrypted with this key".into(),
+            ))
+        })?;
+
+    Ok(())
+}
+
 fn upsert(connection: &Connection, record: &Record) -> rusqlite::Result<()> {
     connection.execute(
         "INSERT INTO entry (id, ciphertext, nonce, hlc, deleted, server_seq, updated_at)
@@ -614,55 +661,73 @@ pub fn new_entry_id() -> String {
     Uuid::new_v4().to_string()
 }
 
-/// Deletes a stage S2 database, which stored payloads in plaintext.
+/// Deletes an unencrypted vault file (PRD section 12.1 rule 4).
 ///
-/// Stage S2 kept `meta`, `entry`, and `outbox` in one unencrypted file, with
-/// the payload written into the `ciphertext` column as it was. Stage S3 splits
-/// the files and encrypts the payloads, so an S2 file is not readable by this
-/// build: the records would fail to decrypt and be reported as damaged, which
-/// looks exactly like data loss.
+/// Two earlier shapes need discarding, and one check covers both. Stage S2
+/// kept `meta`, `entry`, and `outbox` in one unencrypted file with payloads
+/// written in the clear. Stage S3 split the files and encrypted the payloads
+/// but had no page-encrypting library, so `vault.db` was still a plain SQLite
+/// file. Neither opens under a key now, and neither should.
 ///
-/// The choice is to migrate or to discard, and this discards. Those files hold
-/// development data only, and a migration would have to read every plaintext
-/// secret and rewrite it, leaving the plaintext on disk in the free pages of
-/// the old file if anything failed part way. Deleting the file leaves nothing.
+/// # Why the header, and not the schema
 ///
-/// Detection is structural rather than a version number: an S2 vault has a
-/// `meta` table inside it, and an S3 vault never does, because `meta` moved to
-/// its own file. Returns true when something was deleted.
-pub fn discard_legacy_plaintext_vault(vault_path: &str, meta_path: &str) -> Result<bool> {
-    if !std::path::Path::new(vault_path).exists() {
+/// An earlier version of this function looked for a `meta` table, which only
+/// recognised the S2 shape. The file header recognises both and anything else
+/// that is not encrypted: a plain SQLite database begins with the ASCII bytes
+/// `SQLite format 3`, and an encrypted one does not, because the header is
+/// encrypted with everything else.
+///
+/// # Why discard rather than migrate
+///
+/// Section 12.1 rule 4. Nothing has shipped, so there is no user data to
+/// preserve — and a copy-and-delete migration would read every plaintext
+/// secret and rewrite it, leaving the old pages on flash. Wear levelling means
+/// their removal cannot be proved, so the honest options are "delete the file"
+/// or "leave plaintext somewhere unprovable". Returns true when something was
+/// deleted.
+pub fn discard_unencrypted_vault(vault_path: &str, meta_path: &str) -> Result<bool> {
+    use std::io::Read;
+
+    let path = std::path::Path::new(vault_path);
+    if !path.exists() {
         return Ok(false);
     }
 
-    let legacy = {
-        let connection = Connection::open(vault_path)?;
-        let count: i64 = connection.query_row(
-            "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'meta'",
-            [],
-            |row| row.get(0),
-        )?;
-        count > 0
-        // The connection is dropped here. Windows will not delete an open file.
-    };
-
-    if !legacy {
-        return Ok(false);
+    // Only the first 16 bytes are needed, so a large vault is not read in.
+    let mut header = [0u8; 15];
+    {
+        let mut file = std::fs::File::open(path).map_err(open_failed(vault_path))?;
+        match file.read_exact(&mut header) {
+            Ok(()) => {}
+            // A file too short to hold a header is not a database. An empty
+            // file is what an interrupted first run leaves, and SQLite is
+            // happy to initialise it, so it is left alone.
+            Err(_) => return Ok(false),
+        }
     }
 
-    std::fs::remove_file(vault_path).map_err(|error| {
-        StoreError::Database(rusqlite::Error::InvalidPath(
-            format!("{vault_path}: {error}").into(),
-        ))
-    })?;
+    if &header != b"SQLite format 3" {
+        return Ok(false); // Encrypted, and therefore current.
+    }
+
+    std::fs::remove_file(path).map_err(open_failed(vault_path))?;
     // Journal and write-ahead files hold copies of the same plaintext pages.
     for suffix in ["-journal", "-wal", "-shm"] {
         std::fs::remove_file(format!("{vault_path}{suffix}")).ok();
     }
     // Any metadata file beside it belongs to a vault that no longer exists.
+    // Keeping it would leave a device slot whose key opens nothing.
     std::fs::remove_file(meta_path).ok();
 
     Ok(true)
+}
+
+fn open_failed(path: &str) -> impl Fn(std::io::Error) -> StoreError + '_ {
+    move |error| {
+        StoreError::Database(rusqlite::Error::InvalidPath(
+            format!("{path}: {error}").into(),
+        ))
+    }
 }
 
 /// `meta` key counting consecutive failed unlocks (FR-35).
