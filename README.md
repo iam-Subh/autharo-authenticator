@@ -1,6 +1,6 @@
 # Cross-Platform Authenticator App
 
-Implementation of the PRD, version 0.11. The build order is the dependency
+Implementation of the PRD, version 0.12. The build order is the dependency
 sequence in section 18: each stage is finished before the next starts.
 
 ## Stage status
@@ -9,7 +9,7 @@ sequence in section 18: each stage is finished before the next starts.
 |---|---|---|
 | S1 — Core | TOTP, HOTP, Base32, the `otpauth://` parser, SQLite storage | **Done.** RFC 6238 and RFC 4226 vectors pass for SHA-1, SHA-256, and SHA-512 |
 | S2 — First platform | Android. Flutter UI, QR scan, manual entry, list, copy, application lock | **Done**, verified on a physical device |
-| S3 — Crypto | Vault key, key slots, Argon2id, XChaCha20-Poly1305, recovery key | **Done except database encryption** (below). Device slot, record encryption, password slot, recovery key all built |
+| S3 — Crypto | Vault key, key slots, Argon2id, XChaCha20-Poly1305, recovery key | **Done.** Device slot, record encryption, page encryption, password slot, recovery key |
 | S4 — Backend | API, PostgreSQL schema, key slots, quotas, enumeration resistance | Not started |
 | S5 — Sync | Sync engine, outbox, HLC, conflict resolution, prune watermark | Not started |
 | S6 — Other platforms | Remaining platforms, screen capture, tray and menu bar | Not started |
@@ -45,6 +45,99 @@ weaker thing to attack.
 
 Turning the PIN on or off rewraps the same vault key. No record is
 re-encrypted, so a half-finished change cannot orphan the vault.
+
+### The timeout measures sleep, not taps
+
+FR-33 requires a monotonic clock that counts across device sleep. Three clocks
+were available and only one is correct:
+
+| Clock | Why not |
+|---|---|
+| Wall clock (`DateTime.now`) | The user can set it backwards, which would hold the vault open |
+| `CLOCK_MONOTONIC` (Dart's `Stopwatch`) | Stops during deep sleep. A phone in a pocket overnight returns as though no time passed |
+| **`SystemClock.elapsedRealtime()`** (`CLOCK_BOOTTIME`) | Counts through both. Chosen |
+
+It resets to zero on reboot, so a reading *lower* than the stored one is
+treated as expired — a reboot cannot mean less time passed.
+
+FR-33a puts the policy in `meta.db`, which is the unencrypted file, because the
+application has to know whether it may open without asking *before* it opens
+anything. A setting that reset at every start would do nothing.
+
+FR-33a in 0.10 makes this explicit: the file holds the *whole* lock policy —
+the timeout, FR-34's background flag, and any later lock option — and no secret
+and no vault content.
+
+## The vault is now encrypted at rest
+
+Section 9.2.4's device slot is built, so a local-only vault is encrypted even
+though no sync account exists. The chain is:
+
+```
+Android Keystore key (non-exportable, StrongBox where present)
+  wraps -> vault key (256-bit, generated on first run)
+             |- HKDF "record"    -> XChaCha20-Poly1305 over each entry payload
+             \- HKDF "database"  -> derived, ready, and currently unused
+```
+
+Section 12.1 defines two layers doing different jobs, and is explicit that one
+is not a substitute for the other:
+
+| Layer | Protects | Status |
+|---|---|---|
+| Record encryption (XChaCha20-Poly1305, §9.3) | The secret, the issuer, the account name | **Linked and verified on-device.** Mandatory |
+| Database encryption (§12.1) | The row structure: entry count, change times, the device identifier in each HLC | **Not linked.** Defence in depth; see below |
+
+Neither subkey is the vault key and neither is the other, so a weakness in one
+construction stays there. The second key is derived and unused rather than
+absent, so linking a library is a dependency change, not a redesign.
+
+### Database library: SQLite3 Multiple Ciphers
+
+Section 12.1 asks that the chosen library and the reason be recorded here.
+
+**Chosen: SQLite3 Multiple Ciphers 2.5.0** (SQLite 3.53.4), vendored as a C
+amalgamation in `sqlite3mc-sys/vendor/` and compiled with `cc`.
+
+**Why not SQLCipher.** It was linked first and worked on the host, then came
+out: its vendored OpenSSL cannot cross-compile to Android from Windows.
+OpenSSL's `Configure` wants a compiler named `aarch64-linux-android-clang`, the
+Windows NDK ships `aarch64-linux-android26-clang.cmd`, and `Configure` exits
+255. SQLite3MC has no OpenSSL, no Perl, and no `Configure` — one C file and
+`cc`, which cross-compiles with the NDK clang cargokit already sets up. That is
+the exact step OpenSSL failed at, and it is why the Perl dependency is gone.
+
+**How it takes over.** `rusqlite` is used without `bundled`, so
+`libsqlite3-sys` compiles no SQLite and only emits the link request; its
+default features use pregenerated bindings, so no header and no bindgen are
+needed. `sqlite3mc-sys` produces the `sqlite3` static library that request
+resolves to.
+
+#### The five rules from section 12.1, and where each one lives
+
+| Rule | Where it is enforced |
+|---|---|
+| 1. Test the bytes, not the open | `core/tests/store.rs` asserts the file has no `SQLite format 3` header, refuses an unkeyed open, refuses a wrong key, and refuses to adopt a leftover plaintext file. An on-device test asserts the header too |
+| 2. Set the cipher and KDF explicitly | `PRAGMA cipher = 'chacha20'` and `PRAGMA kdf_iter = 64007` in `apply_encryption`, before the key. Never the default |
+| 3. `temp_store` in memory | `SQLITE_TEMP_STORE=3` at compile time — always memory, not overridable — plus the PRAGMA |
+| 4. Wipe, do not migrate | `discard_unencrypted_vault` deletes any vault whose header is plain SQLite, with its journal and WAL |
+| 5. One SQLite only | `sqlite3mc-sys` declares `links = "sqlite3mc"` and its build script panics if `bundled` reappears. `cargo tree` shows a single `libsqlite3-sys` |
+
+**Rule 1 is the one that matters here.** SQLite3MC opens an unencrypted
+database *transparently*: if the key were never applied, or applied wrongly,
+the old plaintext file would open and every query would work. A test that
+checks the database opens proves nothing. Only the header does.
+
+Rule 2 has a second consequence worth stating: the key is supplied with
+`PRAGMA hexkey`, not `PRAGMA key`. `key` would treat the hex as a passphrase
+and run it through the KDF, deriving a different key — and every existing
+vault would stop opening.
+
+**One-time effect of rule 4.** The first run after this change found a
+plaintext vault on the test device and deleted it, along with `meta.db` and the
+device slot inside it. That is the intended behaviour and it is why the first
+device run after the switch showed failures partway through: the vault the
+earlier tests had opened no longer existed. Runs after it are stable.
 
 ### The timeout measures sleep, not taps
 
@@ -164,11 +257,19 @@ A typo in the phrase is reported as a typo, not as a wrong vault: BIP-39's
 checksum catches it, and the difference matters — one message says check your
 spelling, the other says your vault is gone.
 
-**No sign-up screen yet, deliberately.** §16.2 is "enable sync later", and
-there is no sync to enable. The recovery slot exists for synced accounts only;
-a local-only vault explicitly cannot be recovered (§9.2.4). Building the screen
-now would mean building it against an account flow S4 has not settled. The
-derivation is done and tested so S4 inherits it.
+**No sign-up screen yet, deliberately — and it is an S4 deliverable.** §16.2
+is "enable sync later", and there is no sync to enable. The recovery slot
+exists for synced accounts only; a local-only vault explicitly cannot be
+recovered (§9.2.4). Building the screen now would mean building it against an
+account flow S4 has not settled.
+
+Carried forward so it does not fall between stages, **S4 owes two P0 items of
+interface** that the core already supports:
+
+- **FR-29 / FR-55**: show the recovery key at sign-up, for every method, and
+  let the user export it later after re-authentication.
+- **§9.2.3 step 4**: require three random words to be confirmed before sign-up
+  completes. `RecoveryPhrase::indices_to_confirm` already picks them.
 
 ## Layout
 

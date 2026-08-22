@@ -330,8 +330,7 @@ fn a_stage_s2_plaintext_database_is_discarded() {
     std::fs::write(&paths.meta, b"stale").unwrap();
     assert!(std::path::Path::new(&paths.vault).exists());
 
-    let discarded =
-        authcore::store::discard_unencrypted_vault(&paths.vault, &paths.meta).unwrap();
+    let discarded = authcore::store::discard_unencrypted_vault(&paths.vault, &paths.meta).unwrap();
 
     assert!(discarded, "an S2 file must be recognised");
     assert!(

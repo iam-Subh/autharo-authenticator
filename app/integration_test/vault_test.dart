@@ -207,6 +207,20 @@ void main() {
     expect(await vaultFile.exists(), isTrue, reason: 'the vault file should exist');
 
     final bytes = await vaultFile.readAsBytes();
+
+    // Section 12.1 rule 1, on the device: test the bytes, not the open.
+    // SQLite3 Multiple Ciphers opens an unencrypted database transparently, so
+    // every other test in this file would still pass if the key were never
+    // applied. The file header is the one thing a working connection cannot
+    // fake — a plain SQLite database starts with these bytes and an encrypted
+    // one does not.
+    final header = String.fromCharCodes(bytes.take(15));
+    expect(
+      header,
+      isNot('SQLite format 3'),
+      reason: 'the vault on this device is not encrypted at the page level',
+    );
+
     final text = String.fromCharCodes(bytes.where((b) => b >= 32 && b < 127));
 
     for (final readable in [
@@ -214,6 +228,7 @@ void main() {
       'InspectMe',        // the issuer
       'findthisaccount',  // the account name
       '"secret"',         // even a payload field name
+      'CREATE TABLE',     // and the schema, which the page layer covers
     ]) {
       expect(
         text.contains(readable),
