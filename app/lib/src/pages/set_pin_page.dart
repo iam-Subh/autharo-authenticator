@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../services/vault_session.dart';
+import '../ui/form_page.dart';
 
 /// Sets, changes, or removes the application lock PIN (FR-31).
 ///
@@ -150,91 +151,68 @@ class _SetPinPageState extends State<SetPinPage> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: Text(widget.hasExistingPin ? 'Change PIN' : 'Set a PIN'),
-      ),
-      body: Form(
-        key: _formKey,
-        child: ListView(
-          padding: const EdgeInsets.all(24),
-          children: [
-            const Text(
-              'The PIN is combined with a key held by this device. Both are '
-              'needed to open your codes, so a PIN alone is not enough for '
-              'someone who copies the file off the device.',
-            ),
-            const SizedBox(height: 24),
-            TextFormField(
-              controller: _pin,
-              autofocus: true,
-              obscureText: true,
-              enabled: !_busy,
-              validator: _validate,
-              decoration: const InputDecoration(
-                labelText: 'New PIN or passphrase',
-                border: OutlineInputBorder(),
-              ),
-            ),
-            const SizedBox(height: 16),
-            TextFormField(
-              controller: _confirm,
-              obscureText: true,
-              enabled: !_busy,
-              validator: (value) =>
-                  value == _pin.text ? null : 'The two entries do not match.',
-              decoration: const InputDecoration(
-                labelText: 'Enter it again',
-                border: OutlineInputBorder(),
-              ),
-            ),
-            const SizedBox(height: 8),
-            SwitchListTile(
-              value: _useBiometrics,
-              onChanged: _busy
-                  ? null
-                  : (value) => setState(() => _useBiometrics = value),
-              title: const Text('Allow biometric unlock'),
-              subtitle: const Text(
-                'Binds this device\'s key to your fingerprint or face. '
-                'Enrolling a new fingerprint invalidates it.',
-              ),
-              contentPadding: EdgeInsets.zero,
-            ),
-            if (_error != null) ...[
-              const SizedBox(height: 16),
-              Text(
-                _error!,
-                style: TextStyle(color: Theme.of(context).colorScheme.error),
-              ),
-            ],
-            const SizedBox(height: 24),
-            FilledButton(
-              onPressed: _busy ? null : _save,
-              child: _busy
-                  ? const SizedBox(
-                      height: 20,
-                      width: 20,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    )
-                  : const Text('Save'),
-            ),
-            if (widget.hasExistingPin) ...[
-              const SizedBox(height: 8),
-              TextButton(
-                onPressed: _busy ? null : _remove,
-                child: const Text('Remove the PIN'),
-              ),
-            ],
-            const SizedBox(height: 24),
-            Text(
-              'Setting a PIN takes a moment: the key is deliberately slow to '
-              'derive, so that guessing it is slow too.',
-              style: Theme.of(context).textTheme.bodySmall,
-            ),
-          ],
+    return FormPage(
+      title: widget.hasExistingPin ? 'Change PIN' : 'Set a PIN',
+      formKey: _formKey,
+      busy: _busy,
+      errorMessage: _error,
+      actionLabel: 'Save',
+      onAction: _save,
+      secondaryAction: widget.hasExistingPin
+          ? TextButton(
+              onPressed: _busy ? null : _remove,
+              child: const Text('Remove the PIN'),
+            )
+          : null,
+      children: [
+        const Text(
+          'The PIN is combined with a key held by this device. Both are needed '
+          'to open your codes, so a PIN alone is not enough for someone who '
+          'copies the file off the device.',
         ),
-      ),
+        const SizedBox(height: 24),
+        TextFormField(
+          controller: _pin,
+          // Not autofocused: the keyboard would cover the pinned action.
+          obscureText: true,
+          enabled: !_busy,
+          validator: _validate,
+          decoration: const InputDecoration(
+            labelText: 'New PIN or passphrase',
+            border: OutlineInputBorder(),
+          ),
+        ),
+        const SizedBox(height: 16),
+        TextFormField(
+          controller: _confirm,
+          obscureText: true,
+          enabled: !_busy,
+          validator: (value) =>
+              value == _pin.text ? null : 'The two entries do not match.',
+          decoration: const InputDecoration(
+            labelText: 'Enter it again',
+            border: OutlineInputBorder(),
+          ),
+        ),
+        const SizedBox(height: 8),
+        SwitchListTile(
+          value: _useBiometrics,
+          onChanged:
+              _busy ? null : (value) => setState(() => _useBiometrics = value),
+          title: const Text('Allow biometric unlock'),
+          subtitle: const Text(
+            'Binds the key held by this device to your fingerprint or face. '
+            'Enrolling a new fingerprint invalidates it.',
+          ),
+          contentPadding: EdgeInsets.zero,
+        ),
+        const SizedBox(height: 16),
+        Text(
+          'Setting a PIN takes a moment: the key is deliberately slow to '
+          'derive, so that guessing it is slow too.',
+          style: Theme.of(context).textTheme.bodySmall,
+        ),
+      ],
     );
   }
 }

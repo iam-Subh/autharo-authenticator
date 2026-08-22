@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../rust/api/vault.dart' as rust;
 import '../services/vault_session.dart';
+import '../ui/form_page.dart';
 import 'recovery_key_page.dart';
 
 /// Creating a sync account (PRD section 16.2).
@@ -145,84 +146,64 @@ class _CreateAccountPageState extends State<CreateAccountPage> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(title: const Text('Create an account')),
-      body: Form(
-        key: _formKey,
-        child: ListView(
-          padding: const EdgeInsets.all(24),
-          children: [
-            const Text(
-              'An account lets your codes reach your other devices. They stay '
-              'encrypted on the way and on the server — the key that opens '
-              'them never leaves your devices.',
-            ),
-            const SizedBox(height: 24),
-            TextFormField(
-              controller: _email,
-              autofocus: true,
-              keyboardType: TextInputType.emailAddress,
-              autocorrect: false,
-              enabled: !_busy,
-              validator: _validateEmail,
-              decoration: const InputDecoration(
-                labelText: 'Email address',
-                border: OutlineInputBorder(),
-                helperText: 'Used for recovery and for approving new devices.',
-              ),
-            ),
-            const SizedBox(height: 16),
-            TextFormField(
-              controller: _password,
-              obscureText: true,
-              enabled: !_busy,
-              validator: _validatePassword,
-              decoration: const InputDecoration(
-                labelText: 'Password',
-                border: OutlineInputBorder(),
-              ),
-            ),
-            const SizedBox(height: 16),
-            TextFormField(
-              controller: _confirm,
-              obscureText: true,
-              enabled: !_busy,
-              validator: (value) =>
-                  value == _password.text ? null : 'The two entries do not match.',
-              decoration: const InputDecoration(
-                labelText: 'Enter the password again',
-                border: OutlineInputBorder(),
-              ),
-            ),
-            if (_error != null) ...[
-              const SizedBox(height: 16),
-              // Beside the button rather than only on the field, because the
-              // field may be scrolled out of view when the button is pressed.
-              Text(
-                _error!,
-                style: TextStyle(color: Theme.of(context).colorScheme.error),
-              ),
-            ],
-            const SizedBox(height: 24),
-            FilledButton(
-              onPressed: _busy ? null : _create,
-              child: _busy
-                  ? const SizedBox(
-                      height: 20,
-                      width: 20,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    )
-                  : const Text('Create account'),
-            ),
-            const SizedBox(height: 24),
-            Text(
-              'Your existing codes are kept as they are. Creating an account '
-              'adds a way to unlock them, it does not re-encrypt them.',
-              style: Theme.of(context).textTheme.bodySmall,
-            ),
-          ],
+    return FormPage(
+      title: 'Create an account',
+      formKey: _formKey,
+      busy: _busy,
+      errorMessage: _error,
+      actionLabel: 'Create account',
+      onAction: _create,
+      children: [
+        const Text(
+          'An account lets your codes reach your other devices. They stay '
+          'encrypted on the way and on the server — the key that opens them '
+          'never leaves your devices.',
         ),
-      ),
+        const SizedBox(height: 24),
+        TextFormField(
+          controller: _email,
+          // Not autofocused: the keyboard would open over the pinned action
+          // before the user has read anything.
+          keyboardType: TextInputType.emailAddress,
+          autocorrect: false,
+          enabled: !_busy,
+          validator: _validateEmail,
+          decoration: const InputDecoration(
+            labelText: 'Email address',
+            border: OutlineInputBorder(),
+            helperText: 'Used for recovery and for approving new devices.',
+          ),
+        ),
+        const SizedBox(height: 16),
+        TextFormField(
+          controller: _password,
+          obscureText: true,
+          enabled: !_busy,
+          validator: _validatePassword,
+          decoration: const InputDecoration(
+            labelText: 'Password',
+            border: OutlineInputBorder(),
+          ),
+        ),
+        const SizedBox(height: 16),
+        TextFormField(
+          controller: _confirm,
+          obscureText: true,
+          enabled: !_busy,
+          validator: (value) =>
+              value == _password.text ? null : 'The two entries do not match.',
+          decoration: const InputDecoration(
+            labelText: 'Enter the password again',
+            border: OutlineInputBorder(),
+          ),
+        ),
+        const SizedBox(height: 24),
+        Text(
+          'Your existing codes are kept as they are. Creating an account adds '
+          'a way to unlock them, it does not re-encrypt them.',
+          style: Theme.of(context).textTheme.bodySmall,
+        ),
+      ],
     );
   }
 }

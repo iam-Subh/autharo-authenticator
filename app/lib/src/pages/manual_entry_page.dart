@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 
+import '../ui/form_page.dart';
+
 /// FR-13: "Enter an account by hand. Ask for issuer, account name, secret,
 /// type, algorithm, digits, and period."
 ///
@@ -20,6 +22,7 @@ class _ManualEntryPageState extends State<ManualEntryPage> {
   final _secret = TextEditingController();
   final _counter = TextEditingController(text: '0');
 
+  String? _error;
   String _kind = 'totp';
   String _algorithm = 'SHA1';
   int _digits = 6;
@@ -58,20 +61,50 @@ class _ManualEntryPageState extends State<ManualEntryPage> {
     return 'otpauth://$_kind/${Uri.encodeComponent(label)}?$query';
   }
 
+  /// Validates from the controllers rather than through the `Form`.
+  ///
+  /// The fields scroll, and a `ListView` disposes what scrolls away, so
+  /// `Form.validate()` silently skips any field that is off screen and returns
+  /// true having checked nothing. The controllers are owned by this State and
+  /// outlive the widgets. See `FormPage` for the whole story.
+  String? _firstProblem() {
+    if (_account.text.trim().isEmpty) {
+      return 'An account name is required.';
+    }
+    if (_secret.text.trim().isEmpty) {
+      return 'A setup key is required.';
+    }
+    if (_kind == 'hotp') {
+      final counter = int.tryParse(_counter.text.trim());
+      if (counter == null || counter < 0) {
+        return 'The starting counter must be a whole number, zero or more.';
+      }
+    }
+    return null;
+  }
+
   void _submit() {
-    if (!_form.currentState!.validate()) return;
+    // Runs the visible fields' validators for inline feedback. The result is
+    // ignored; the controller check below is what decides.
+    _form.currentState?.validate();
+
+    final problem = _firstProblem();
+    if (problem != null) {
+      setState(() => _error = problem);
+      return;
+    }
     Navigator.of(context).pop(_buildUri());
   }
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(title: const Text('Enter a setup key')),
-      body: Form(
-        key: _form,
-        child: ListView(
-          padding: const EdgeInsets.all(16),
-          children: [
+    return FormPage(
+      title: 'Enter a setup key',
+      formKey: _form,
+      errorMessage: _error,
+      actionLabel: 'Add account',
+      onAction: _submit,
+      children: [
             TextFormField(
               controller: _issuer,
               textCapitalization: TextCapitalization.words,
@@ -212,14 +245,7 @@ class _ManualEntryPageState extends State<ManualEntryPage> {
                 ],
               ],
             ),
-            const SizedBox(height: 24),
-            FilledButton(
-              onPressed: _submit,
-              child: const Text('Add account'),
-            ),
-          ],
-        ),
-      ),
+      ],
     );
   }
 }
