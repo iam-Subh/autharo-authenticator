@@ -188,17 +188,39 @@ void main() {
         MaterialApp(home: CreateAccountPage(session: VaultSession())),
       );
 
+      // The button sits below the fold on a phone, so it has to be scrolled
+      // to — the same as a user would. The validation message then renders on
+      // the email field, which scrolling moved off screen, and a ListView does
+      // not build off-screen children; so the assertion needs the field back
+      // in view before it can see anything.
+      Future<void> submitAndReturnToTheField() async {
+        final button = find.widgetWithText(FilledButton, 'Create account');
+        await tester.scrollUntilVisible(
+          button,
+          200,
+          scrollable: find.byType(Scrollable).first,
+        );
+        await tester.pumpAndSettle();
+        await tester.tap(button);
+        await tester.pumpAndSettle();
+
+        await tester.scrollUntilVisible(
+          find.widgetWithText(TextFormField, 'Email address'),
+          -200,
+          scrollable: find.byType(Scrollable).first,
+        );
+        await tester.pumpAndSettle();
+      }
+
       // Section 16.4 and decision 6: an email address is required.
-      await tester.tap(find.widgetWithText(FilledButton, 'Create account'));
-      await tester.pumpAndSettle();
+      await submitAndReturnToTheField();
       expect(find.text('An email address is required.'), findsOneWidget);
 
       await tester.enterText(
         find.widgetWithText(TextFormField, 'Email address'),
         'not-an-address',
       );
-      await tester.tap(find.widgetWithText(FilledButton, 'Create account'));
-      await tester.pumpAndSettle();
+      await submitAndReturnToTheField();
       expect(find.textContaining('does not look like'), findsOneWidget);
     });
 

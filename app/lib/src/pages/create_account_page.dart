@@ -66,8 +66,36 @@ class _CreateAccountPageState extends State<CreateAccountPage> {
     return null;
   }
 
+  /// Validates from the controllers rather than through the `Form`.
+  ///
+  /// `Form.validate()` only reaches fields that are currently built, and this
+  /// page is a `ListView`, which disposes its off-screen children. On a phone
+  /// the button sits below the fold, so scrolling to it unregisters the email
+  /// field — and `validate()` then returns true having run no validator at
+  /// all. The form silently stopped checking anything.
+  ///
+  /// The controllers are owned by this State and outlive the widgets, so
+  /// checking them directly is correct regardless of what is on screen. The
+  /// per-field validators stay for inline feedback while a field is visible.
+  String? _firstProblem() {
+    return _validateEmail(_email.text) ??
+        _validatePassword(_password.text) ??
+        (_confirm.text == _password.text
+            ? null
+            : 'The two password entries do not match.');
+  }
+
   Future<void> _create() async {
-    if (!(_formKey.currentState?.validate() ?? false)) return;
+    // Runs the visible fields' validators too, so an on-screen field shows its
+    // message inline. The result is deliberately ignored: the check below is
+    // the one that decides.
+    _formKey.currentState?.validate();
+
+    final problem = _firstProblem();
+    if (problem != null) {
+      setState(() => _error = problem);
+      return;
+    }
 
     setState(() {
       _busy = true;
@@ -168,6 +196,8 @@ class _CreateAccountPageState extends State<CreateAccountPage> {
             ),
             if (_error != null) ...[
               const SizedBox(height: 16),
+              // Beside the button rather than only on the field, because the
+              // field may be scrolled out of view when the button is pressed.
               Text(
                 _error!,
                 style: TextStyle(color: Theme.of(context).colorScheme.error),

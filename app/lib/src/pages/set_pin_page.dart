@@ -72,8 +72,24 @@ class _SetPinPageState extends State<SetPinPage> {
     return true;
   }
 
+  /// Validates from the controllers, not through the `Form`.
+  ///
+  /// Same reason as the create-account screen: a `ListView` disposes its
+  /// off-screen children, so `Form.validate()` skips any field that has
+  /// scrolled away and returns true having checked nothing.
+  String? _firstProblem() {
+    return _validate(_pin.text) ??
+        (_confirm.text == _pin.text ? null : 'The two entries do not match.');
+  }
+
   Future<void> _save() async {
-    if (!(_formKey.currentState?.validate() ?? false)) return;
+    _formKey.currentState?.validate();
+
+    final problem = _firstProblem();
+    if (problem != null) {
+      setState(() => _error = problem);
+      return;
+    }
 
     setState(() {
       _busy = true;
