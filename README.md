@@ -473,6 +473,12 @@ third-party code shipped with `flutter_rust_bridge`. It called `project.exec {}`
 from a task action, which Gradle 9 removed, and Flutter 3.44 ships Gradle 9.1 —
 so every build failed. It is patched to use an injected `ExecOperations`.
 
+The exit-code half of this patch is a defect in upstream cargokit, not a local
+choice. [docs/upstream-cargokit-issue.md](docs/upstream-cargokit-issue.md)
+holds the issue text, the reproduction, and the pull request body, drafted and
+waiting to be posted by a person. Getting it merged removes one line from the
+local patch burden.
+
 Regenerating the bridge overwrites that directory and silently reverts the
 patch, and the resulting build failure names nothing about cargokit. So
 `app/test/cargokit_patch_test.dart` fails loudly if `project.exec` reappears at
