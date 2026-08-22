@@ -1,5 +1,7 @@
 import 'package:authenticator/main.dart';
+import 'package:authenticator/src/pages/create_account_page.dart';
 import 'package:authenticator/src/pages/entry_list_page.dart';
+import 'package:authenticator/src/pages/recovery_key_page.dart';
 import 'package:authenticator/src/rust/api/vault.dart' as rust;
 import 'package:authenticator/src/rust/frb_generated.dart';
 import 'package:authenticator/src/services/reference_time.dart';
@@ -170,5 +172,100 @@ void main() {
       findsNothing,
       reason: 'the vault should open at the real application support path',
     );
+  });
+
+  /// The sign-up screens on a real device (FR-29, FR-55, section 9.2.3).
+  ///
+  /// These are host-tested against a fabricated phrase. Here they run against
+  /// the real core: the phrase comes from BIP-39 over a real random recovery
+  /// key, and the positions to confirm come from the core's own random choice.
+  /// A screen that works on a fabricated 24 words and fails on real ones would
+  /// pass every host test.
+  group('sign-up screens', () {
+    testWidgets('the create-account screen refuses an address it cannot use',
+        (tester) async {
+      await tester.pumpWidget(
+        MaterialApp(home: CreateAccountPage(session: VaultSession())),
+      );
+
+      // Section 16.4 and decision 6: an email address is required.
+      await tester.tap(find.widgetWithText(FilledButton, 'Create account'));
+      await tester.pumpAndSettle();
+      expect(find.text('An email address is required.'), findsOneWidget);
+
+      await tester.enterText(
+        find.widgetWithText(TextFormField, 'Email address'),
+        'not-an-address',
+      );
+      await tester.tap(find.widgetWithText(FilledButton, 'Create account'));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('does not look like'), findsOneWidget);
+    });
+
+    testWidgets('the real phrase renders and its real positions confirm',
+        (tester) async {
+      // A real account, so the words are BIP-39 over real entropy.
+      final email = 'screens-${DateTime.now().microsecondsSinceEpoch}@example.com';
+      final recovery = await rust.createAccount(
+        email: email,
+        password: 'correct horse battery staple',
+      );
+
+      final words = recovery.phrase.split(' ');
+      final indices = recovery.confirmIndices.map((i) => i.toInt()).toList();
+      expect(words.length, 24);
+      expect(indices.length, 3);
+
+      var confirmed = false;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: RecoveryKeyPage(
+            phrase: recovery.phrase,
+            confirmIndices: indices,
+            onConfirmed: () => confirmed = true,
+          ),
+        ),
+      );
+
+      // Every real word is on screen.
+      for (final word in words) {
+        expect(find.text(word), findsWidgets, reason: '$word is missing');
+      }
+
+      final scroller = find.byType(Scrollable).first;
+      await tester.scrollUntilVisible(
+        find.byType(CheckboxListTile),
+        200,
+        scrollable: scroller,
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byType(CheckboxListTile));
+      await tester.pumpAndSettle();
+
+      final continueButton = find.widgetWithText(FilledButton, 'Continue');
+      await tester.scrollUntilVisible(continueButton, 200, scrollable: scroller);
+      await tester.pumpAndSettle();
+      await tester.tap(continueButton);
+      await tester.pumpAndSettle();
+
+      // The positions the core picked, typed back.
+      for (final index in indices) {
+        await tester.enterText(
+          find.widgetWithText(TextField, 'Word ${index + 1}'),
+          words[index],
+        );
+      }
+      final confirmButton = find.widgetWithText(FilledButton, 'Confirm');
+      await tester.scrollUntilVisible(
+        confirmButton,
+        200,
+        scrollable: find.byType(Scrollable).first,
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(confirmButton);
+      await tester.pumpAndSettle();
+
+      expect(confirmed, isTrue, reason: 'the real phrase did not confirm');
+    });
   });
 }
