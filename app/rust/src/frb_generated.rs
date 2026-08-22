@@ -1275,6 +1275,7 @@ impl SseDecode for crate::api::vault::EntryView {
         let mut var_counter = <Option<u64>>::sse_decode(deserializer);
         let mut var_favourite = <bool>::sse_decode(deserializer);
         let mut var_icon = <Option<String>>::sse_decode(deserializer);
+        let mut var_awaitingReconcile = <bool>::sse_decode(deserializer);
         return crate::api::vault::EntryView {
             id: var_id,
             kind: var_kind,
@@ -1287,6 +1288,7 @@ impl SseDecode for crate::api::vault::EntryView {
             counter: var_counter,
             favourite: var_favourite,
             icon: var_icon,
+            awaiting_reconcile: var_awaitingReconcile,
         };
     }
 }
@@ -1595,6 +1597,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::vault::EntryView {
             self.counter.into_into_dart().into_dart(),
             self.favourite.into_into_dart().into_dart(),
             self.icon.into_into_dart().into_dart(),
+            self.awaiting_reconcile.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -1739,6 +1742,7 @@ impl SseEncode for crate::api::vault::EntryView {
         <Option<u64>>::sse_encode(self.counter, serializer);
         <bool>::sse_encode(self.favourite, serializer);
         <Option<String>>::sse_encode(self.icon, serializer);
+        <bool>::sse_encode(self.awaiting_reconcile, serializer);
     }
 }
 

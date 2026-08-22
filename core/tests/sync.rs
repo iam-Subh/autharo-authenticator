@@ -396,7 +396,7 @@ fn a_conflict_is_listed_for_counter_reconciliation() {
         "an HLC-only resolution must be recorded, not silently accepted"
     );
 
-    store.clear_counter_reconcile(&["e1".to_string()]).unwrap();
+    store.clear_reconcile("e1").unwrap();
     assert!(sync::needs_counter_reconcile(&store).unwrap().is_empty());
 }
 

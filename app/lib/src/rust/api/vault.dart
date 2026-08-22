@@ -6,7 +6,7 @@
 import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `added`, `build_payload`, `duplicate`, `lock_poisoned`, `open_vault_with_key`, `take_meta`, `with_meta`, `with_vault`
+// These functions are ignored because they are not marked as `pub`: `added`, `build_payload`, `duplicate`, `lock_poisoned`, `now_ms_for_reconcile`, `open_vault_with_key`, `take_meta`, `with_meta`, `with_vault`
 
 /// Deletes an unencrypted vault file if one is present (section 12.1 rule 4).
 ///
@@ -411,6 +411,11 @@ class EntryView {
   final bool favourite;
   final String? icon;
 
+  /// True when a conflict resolved while locked is still waiting for section
+  /// 10.4's counter rule. `code` is empty and the interface must say why
+  /// rather than showing a code that may be behind the issuer's counter.
+  final bool awaitingReconcile;
+
   const EntryView({
     required this.id,
     required this.kind,
@@ -423,6 +428,7 @@ class EntryView {
     this.counter,
     required this.favourite,
     this.icon,
+    required this.awaitingReconcile,
   });
 
   @override
@@ -437,7 +443,8 @@ class EntryView {
       remainingSeconds.hashCode ^
       counter.hashCode ^
       favourite.hashCode ^
-      icon.hashCode;
+      icon.hashCode ^
+      awaitingReconcile.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -454,7 +461,8 @@ class EntryView {
           remainingSeconds == other.remainingSeconds &&
           counter == other.counter &&
           favourite == other.favourite &&
-          icon == other.icon;
+          icon == other.icon &&
+          awaitingReconcile == other.awaitingReconcile;
 }
 
 /// The lock policy (FR-33, FR-33a, FR-34).

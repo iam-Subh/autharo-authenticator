@@ -18,11 +18,21 @@
 //! and pretending otherwise would silently take the newer counter instead of
 //! the larger one, which produces codes the issuer has already rejected.
 //!
-//! The resolution is explicit rather than implicit. Every entry whose conflict
-//! was decided by HLC alone is recorded in [`Store`]'s reconcile list, and
-//! [`needs_counter_reconcile`] reports it. When the vault is next unlocked the
-//! caller walks that list and applies the counter rule with the payloads in
-//! hand. Deferred, not skipped, and visible in the type.
+//! The resolution follows section 10.4's five steps. The part that is easy to
+//! get wrong is step 2: the reconcile record must keep the **discarded
+//! ciphertext**, not just the entry identifier. The winning record replaces
+//! the loser in the entry table, so an identifier alone would leave the other
+//! counter existing nowhere, and the reconcile step at unlock would have
+//! nothing to compare — silently keeping whatever the HLC chose, which is the
+//! outcome the rule exists to prevent.
+//!
+//! Both directions are recorded. When the remote wins, the local record is the
+//! discarded one; when the local wins, the remote is. The counter rule takes
+//! the larger value regardless of which HLC was higher, so the losing side is
+//! worth keeping either way.
+//!
+//! Applying it needs a key, so it lives in [`crate::reconcile`] rather than
+//! here. This module stays free of `Vault`.
 
 use core::fmt;
 
@@ -281,10 +291,35 @@ fn apply_remote(
     };
 
     if !take {
+        // The local record won. The remote is discarded — and may hold the
+        // larger counter, which the HLC comparison above cannot see.
+        if let Some(ciphertext) = &incoming.ciphertext
+            && !incoming.deleted
+        {
+            store.record_reconcile(
+                &incoming.entry_id,
+                ciphertext,
+                incoming.nonce.as_deref().unwrap_or(&[]),
+                now_ms as i64,
+            )?;
+        }
         return Ok(Applied::Kept);
     }
 
-    let had_conflict = local.is_some();
+    // The remote record won, so the local one is about to be overwritten.
+    // Keep it before that happens: after `apply_remote` it is gone.
+    if let Some(current) = &local
+        && !current.deleted
+        && !incoming.deleted
+        && !current.ciphertext.is_empty()
+    {
+        store.record_reconcile(
+            &incoming.entry_id,
+            &current.ciphertext,
+            &current.nonce,
+            now_ms as i64,
+        )?;
+    }
 
     store.apply_remote(&Record {
         id: incoming.entry_id.clone(),
@@ -295,12 +330,6 @@ fn apply_remote(
         server_seq: Some(incoming.server_seq),
         updated_at: now_ms as i64,
     })?;
-
-    // A conflict decided by HLC alone may have picked the newer HOTP counter
-    // rather than the larger one. Recorded now, applied when unlocked.
-    if had_conflict && !incoming.deleted {
-        store.mark_for_counter_reconcile(&incoming.entry_id)?;
-    }
 
     Ok(Applied::Took { clamped })
 }
@@ -339,10 +368,14 @@ pub fn full_resync<T: SyncTransport>(store: &mut Store, transport: &mut T) -> Re
     Ok(count)
 }
 
-/// Entries whose conflict was decided by HLC alone and may need section
-/// 10.4's HOTP counter rule applied once the vault is open.
+/// Entries whose conflict was decided by HLC alone and still need section
+/// 10.4's counter rule applied. See [`crate::reconcile`] for applying them.
 pub fn needs_counter_reconcile(store: &Store) -> core::result::Result<Vec<String>, StoreError> {
-    store.counter_reconcile_list()
+    Ok(store
+        .reconcile_pending()?
+        .into_iter()
+        .map(|record| record.entry_id)
+        .collect())
 }
 
 fn none_if_empty(bytes: &[u8]) -> Option<Vec<u8>> {

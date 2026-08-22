@@ -10,6 +10,7 @@ pub mod lock_policy;
 pub mod otp;
 pub mod otpauth;
 pub mod pin;
+pub mod reconcile;
 pub mod secret;
 pub mod store;
 pub mod sync;

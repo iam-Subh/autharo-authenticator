@@ -217,6 +217,37 @@ impl<C: RecordCipher> Vault<C> {
     }
 
     /// Replaces the payload of an existing entry (FR-17).
+    /// Seals a payload for a given entry identifier without storing it.
+    ///
+    /// The counterpart to [`Self::open_record`]. Used where a record has to be
+    /// produced for an entry that is not the one currently stored — the
+    /// reconcile path in section 10.4, and the tests that stand in for another
+    /// device. The associated data binds the identifier, so a record sealed
+    /// here opens only under that identifier.
+    pub fn seal_record(&self, id: &str, payload: &Payload) -> Result<(Vec<u8>, Vec<u8>)> {
+        let plaintext = payload.to_json()?;
+        let sealed = self
+            .cipher
+            .seal(id, RECORD_VERSION, &plaintext)
+            .map_err(VaultError::Cipher)?;
+        Ok((sealed.ciphertext, sealed.nonce))
+    }
+
+    /// Opens a ciphertext that is not the one currently stored for `id`.
+    ///
+    /// Used by [`crate::reconcile`] to read the discarded side of a conflict,
+    /// which the sync cycle kept precisely because it no longer exists in the
+    /// entry table. The associated data still binds the entry identifier and
+    /// the record version, so this cannot be used to open a ciphertext
+    /// belonging to a different entry.
+    pub fn open_record(&self, id: &str, ciphertext: &[u8], nonce: &[u8]) -> Result<Payload> {
+        let plaintext = self
+            .cipher
+            .open(id, RECORD_VERSION, ciphertext, nonce)
+            .map_err(VaultError::Cipher)?;
+        Ok(Payload::from_json(&plaintext)?)
+    }
+
     pub fn update(&mut self, id: &str, payload: &Payload, now_ms: i64) -> Result<()> {
         let existing = self
             .store

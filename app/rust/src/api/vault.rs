@@ -29,6 +29,7 @@ use authcore::entry::{OtpEntry, Payload};
 use authcore::lock_policy::LockPolicy;
 use authcore::otp::{self, Algorithm, OtpKind};
 use authcore::otpauth::OtpAuthUri;
+use authcore::reconcile;
 use authcore::store::{MetaStore, Store};
 use authcore::vault::Vault;
 
@@ -123,6 +124,10 @@ pub struct EntryView {
     pub counter: Option<u64>,
     pub favourite: bool,
     pub icon: Option<String>,
+    /// True when a conflict resolved while locked is still waiting for section
+    /// 10.4's counter rule. `code` is empty and the interface must say why
+    /// rather than showing a code that may be behind the issuer's counter.
+    pub awaiting_reconcile: bool,
 }
 
 /// What an `otpauth://` URI holds, shown before the user commits to adding it.
@@ -508,7 +513,24 @@ fn open_vault_with_key(vault_path: &str, meta: MetaStore, key: VaultKey) -> Resu
     // record cipher covers each payload inside it.
     let store = Store::open(vault_path, meta, Some(&key.sqlcipher_key()))
         .context("The vault could not be opened")?;
-    let vault = Vault::open(store, XChaChaCipher::new(&key))?;
+    let mut vault = Vault::open(store, XChaChaCipher::new(&key))?;
+
+    // Section 10.4 step 4: the reconcile runs *inside* the unlock path,
+    // before the code list becomes usable. A lazy pass would leave a window in
+    // which the user unlocks, taps an HOTP entry, and gets a code from the
+    // smaller counter — the exact failure the rule exists to prevent, reached
+    // by a different route.
+    let device_id = vault.store().device_id()?;
+    let mut clock = authcore::hlc::HlcClock::new(device_id);
+    let report = reconcile::run(&mut vault, &mut clock, now_ms_for_reconcile())
+        .map_err(|error| anyhow!("{error}"))?;
+    if report.counters_raised > 0 {
+        // Counts only. Section 9.4 forbids naming an entry at any log level.
+        eprintln!(
+            "reconcile: raised {} counter(s) after a locked conflict",
+            report.counters_raised
+        );
+    }
 
     *CURRENT_KEY.lock().map_err(|_| lock_poisoned())? = Some(key);
     *VAULT.lock().map_err(|_| lock_poisoned())? = Some(vault);
@@ -587,6 +609,28 @@ pub fn list_entries(now_unix_seconds: i64) -> Result<Vec<EntryView>> {
                 _ => OtpKind::Totp,
             };
 
+            // Section 10.4 step 3. Belt to the unlock-path brace: if a
+            // reconcile is still pending, this entry may be holding the
+            // smaller counter, and a code from it is one the issuer has
+            // already rejected. Refusing beats being confidently wrong.
+            if vault.store().reconcile_pending_for(&entry.id)? {
+                views.push(EntryView {
+                    id: entry.id,
+                    kind: kind.as_str().to_string(),
+                    issuer: otp_entry.issuer.clone(),
+                    account: otp_entry.account.clone(),
+                    code: String::new(),
+                    digits: u32::from(otp_entry.digits),
+                    period: otp_entry.period,
+                    remaining_seconds: 0,
+                    counter: otp_entry.counter,
+                    favourite: otp_entry.favourite,
+                    icon: otp_entry.icon.clone(),
+                    awaiting_reconcile: true,
+                });
+                continue;
+            }
+
             let secret = otp_entry
                 .secret
                 .decode()
@@ -626,6 +670,7 @@ pub fn list_entries(now_unix_seconds: i64) -> Result<Vec<EntryView>> {
                 counter: otp_entry.counter,
                 favourite: otp_entry.favourite,
                 icon: otp_entry.icon.clone(),
+                awaiting_reconcile: false,
             });
         }
         Ok(views)
@@ -843,4 +888,18 @@ fn build_payload(
     );
     object.insert("created_at".into(), now_ms.into());
     Ok(serde_json::to_vec(&serde_json::Value::Object(object))?)
+}
+
+/// The timestamp for a reconcile correction.
+///
+/// The one place in this crate that reads a clock, and it is unavoidable: the
+/// corrected write happens during unlock, with no Dart call in flight to carry
+/// the reference time from FR-38. The value only orders a correction the user
+/// did not ask for, so a small error costs nothing — unlike a TOTP code, which
+/// is why every other entry point still takes the time as a parameter.
+fn now_ms_for_reconcile() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }

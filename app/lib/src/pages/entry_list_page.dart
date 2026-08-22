@@ -362,7 +362,32 @@ class _EntryTile extends StatelessWidget {
           if (subtitle != null)
             Text(subtitle, overflow: TextOverflow.ellipsis),
           const SizedBox(height: 6),
-          CodeDisplay(code: entry.code, expiring: _expiring),
+          // Section 10.4 step 3: an entry whose counter is still being
+          // reconciled must not show a code. The stored counter may be behind
+          // the issuer's, and a code from it has already been rejected — so
+          // saying why is better than showing a number that will not work.
+          if (entry.awaitingReconcile)
+            Row(
+              children: [
+                Icon(
+                  Icons.sync_problem_outlined,
+                  size: 16,
+                  color: Theme.of(context).colorScheme.error,
+                ),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: Text(
+                    'Catching up with your other devices. Unlock again in a '
+                    'moment to use this code.',
+                    style: TextStyle(
+                      color: Theme.of(context).colorScheme.error,
+                    ),
+                  ),
+                ),
+              ],
+            )
+          else
+            CodeDisplay(code: entry.code, expiring: _expiring),
         ],
       ),
       trailing: Row(

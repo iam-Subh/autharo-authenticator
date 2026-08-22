@@ -1277,8 +1277,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   EntryView dco_decode_entry_view(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 11)
-      throw Exception('unexpected arr length: expect 11 but see ${arr.length}');
+    if (arr.length != 12)
+      throw Exception('unexpected arr length: expect 12 but see ${arr.length}');
     return EntryView(
       id: dco_decode_String(arr[0]),
       kind: dco_decode_String(arr[1]),
@@ -1291,6 +1291,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       counter: dco_decode_opt_box_autoadd_u_64(arr[8]),
       favourite: dco_decode_bool(arr[9]),
       icon: dco_decode_opt_String(arr[10]),
+      awaitingReconcile: dco_decode_bool(arr[11]),
     );
   }
 
@@ -1494,6 +1495,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_counter = sse_decode_opt_box_autoadd_u_64(deserializer);
     var var_favourite = sse_decode_bool(deserializer);
     var var_icon = sse_decode_opt_String(deserializer);
+    var var_awaitingReconcile = sse_decode_bool(deserializer);
     return EntryView(
       id: var_id,
       kind: var_kind,
@@ -1506,6 +1508,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       counter: var_counter,
       favourite: var_favourite,
       icon: var_icon,
+      awaitingReconcile: var_awaitingReconcile,
     );
   }
 
@@ -1724,6 +1727,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_opt_box_autoadd_u_64(self.counter, serializer);
     sse_encode_bool(self.favourite, serializer);
     sse_encode_opt_String(self.icon, serializer);
+    sse_encode_bool(self.awaitingReconcile, serializer);
   }
 
   @protected
