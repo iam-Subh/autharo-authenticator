@@ -104,6 +104,6 @@ REM script sat between them turning the failure into a success. Gradle then
 REM packaged the APK with the PREVIOUS librust_lib_authenticator.so and
 REM reported a successful build. Tests ran against stale native code.
 REM
-REM run_build_tool.sh already ends in `exit $exit_code`, so this was a Windows
-REM-only defect, which is why it survived upstream.
+REM run_build_tool.sh already ends in `exit $exit_code`, so the defect was
+REM confined to Windows, which is why it survived upstream.
 exit /b %TOOL_EXIT%
