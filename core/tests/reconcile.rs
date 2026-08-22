@@ -163,7 +163,7 @@ fn the_larger_counter_wins_even_though_the_smaller_one_was_newer() {
     );
 
     // The unlock path.
-    let report = reconcile::run(&mut vault, &mut clock, NOW + 30_000).unwrap();
+    let report = reconcile::run(&mut vault).unwrap();
 
     assert_eq!(report.counters_raised, 1);
     assert_eq!(
@@ -202,7 +202,7 @@ fn the_local_counter_is_recovered_when_the_remote_wins_on_hlc() {
         "the HLC winner is in place"
     );
 
-    reconcile::run(&mut vault, &mut clock, NOW + 80_000).unwrap();
+    reconcile::run(&mut vault).unwrap();
 
     assert_eq!(
         vault.get("e1").unwrap().payload.as_otp().unwrap().counter,
@@ -260,7 +260,7 @@ fn a_pending_record_survives_a_crash_and_applies_on_the_next_unlock() {
         "still blocked after the crash"
     );
 
-    let report = reconcile::run(&mut reopened, &mut clock, NOW + 40_000).unwrap();
+    let report = reconcile::run(&mut reopened).unwrap();
 
     assert_eq!(report.counters_raised, 1);
     assert_eq!(
@@ -302,7 +302,7 @@ fn a_raised_counter_is_queued_to_propagate() {
     sync::run_cycle(vault.store_mut(), &mut clock, &mut server, NOW + 20_000).unwrap();
 
     let hlc_before = vault.store().get("e1").unwrap().unwrap().hlc;
-    reconcile::run(&mut vault, &mut clock, NOW + 30_000).unwrap();
+    reconcile::run(&mut vault).unwrap();
 
     let after = vault.store().get("e1").unwrap().unwrap();
     assert!(
@@ -342,7 +342,7 @@ fn nothing_changes_when_the_winner_already_has_the_larger_counter() {
     sync::run_cycle(vault.store_mut(), &mut clock, &mut server, NOW + 20_000).unwrap();
 
     let before = vault.store().get("e1").unwrap().unwrap().hlc;
-    let report = reconcile::run(&mut vault, &mut clock, NOW + 30_000).unwrap();
+    let report = reconcile::run(&mut vault).unwrap();
 
     assert_eq!(report.counters_raised, 0);
     assert_eq!(report.already_correct, 1);
@@ -389,7 +389,7 @@ fn a_totp_conflict_clears_without_a_change() {
     });
     sync::run_cycle(vault.store_mut(), &mut clock, &mut server, NOW + 20_000).unwrap();
 
-    let report = reconcile::run(&mut vault, &mut clock, NOW + 30_000).unwrap();
+    let report = reconcile::run(&mut vault).unwrap();
 
     assert_eq!(report.counters_raised, 0);
     assert!(
@@ -403,18 +403,23 @@ fn a_totp_conflict_clears_without_a_change() {
 #[test]
 fn a_record_for_a_deleted_entry_is_dropped() {
     let mut vault = vault();
-    let mut clock = HlcClock::new(DEVICE_A);
 
     put(&mut vault, "e1", &hotp(1), Hlc::new(NOW, 0, DEVICE_A));
     let (ciphertext, nonce) = sealed_elsewhere("e1", &hotp(9));
     vault
         .store()
-        .record_reconcile("e1", &ciphertext, &nonce, NOW as i64)
+        .record_reconcile(
+            "e1",
+            &ciphertext,
+            &nonce,
+            Hlc::new(NOW, 0, DEVICE_B),
+            NOW as i64,
+        )
         .unwrap();
 
     vault.delete("e1", (NOW + 100) as i64).unwrap();
 
-    let report = reconcile::run(&mut vault, &mut clock, NOW + 200).unwrap();
+    let report = reconcile::run(&mut vault).unwrap();
 
     assert_eq!(report.orphaned, 1);
     assert!(vault.store().reconcile_pending().unwrap().is_empty());
@@ -449,6 +454,10 @@ fn the_record_holds_the_discarded_ciphertext() {
 
     let pending = vault.store().reconcile_pending().unwrap();
     assert_eq!(pending.len(), 1);
+    assert!(
+        pending[0].hlc.is_some(),
+        "step 7 needs the discarded timestamp"
+    );
     assert_eq!(
         pending[0].ciphertext, ciphertext,
         "the discarded ciphertext must be kept verbatim"
@@ -460,4 +469,182 @@ fn the_record_holds_the_discarded_ciphertext() {
         .open_record("e1", &pending[0].ciphertext, &pending[0].nonce)
         .unwrap();
     assert_eq!(opened.as_otp().unwrap().counter, Some(31));
+}
+
+// ---------------------------------------------------------------------------
+// Section 10.4 step 4: every candidate is kept
+// ---------------------------------------------------------------------------
+
+/// Three conflicts before one unlock. Keeping only the first candidate loses
+/// the third exactly as overwriting would, and the reconcile then returns a
+/// counter that is neither the largest nor obviously wrong.
+#[test]
+fn every_candidate_is_kept_and_the_largest_counter_wins() {
+    let mut vault = vault();
+    let mut clock = HlcClock::new(DEVICE_A);
+    let mut server = FakeServer::default();
+
+    put(
+        &mut vault,
+        "e1",
+        &hotp(1),
+        Hlc::new(NOW + 50_000, 0, DEVICE_A),
+    );
+
+    // Three remote records, each older than the local one so the local keeps
+    // winning on HLC and each remote is discarded in turn. The largest counter
+    // arrives last.
+    for (offset, counter) in [(0u64, 10u64), (1_000, 500), (2_000, 77)] {
+        let (ciphertext, nonce) = sealed_elsewhere("e1", &hotp(counter));
+        server.hold(WireRecord {
+            entry_id: "e1".to_string(),
+            ciphertext: Some(ciphertext),
+            nonce: Some(nonce),
+            hlc: Hlc::new(NOW + offset, 0, DEVICE_B),
+            deleted: false,
+            server_seq: 0,
+        });
+        sync::run_cycle(vault.store_mut(), &mut clock, &mut server, NOW + 60_000).unwrap();
+    }
+
+    let pending = vault.store().reconcile_pending().unwrap();
+    assert_eq!(
+        pending.len(),
+        3,
+        "each conflict must add a candidate, not replace the last"
+    );
+
+    let report = reconcile::run(&mut vault).unwrap();
+
+    assert_eq!(report.candidates, 3);
+    assert_eq!(report.examined, 1, "one entry, three candidates");
+    assert_eq!(
+        vault.get("e1").unwrap().payload.as_otp().unwrap().counter,
+        Some(500),
+        "the largest of every candidate, not the first or the last"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Section 10.4 step 7: the corrected timestamp comes from the records
+// ---------------------------------------------------------------------------
+
+/// The correction must beat every record it corrects, and must not reach
+/// further than that.
+#[test]
+fn the_corrected_timestamp_is_derived_from_the_candidates() {
+    let mut vault = vault();
+    let mut clock = HlcClock::new(DEVICE_A);
+    let mut server = FakeServer::default();
+
+    let local_hlc = Hlc::new(NOW + 10_000, 0, DEVICE_A);
+    put(&mut vault, "e1", &hotp(2), local_hlc);
+
+    let remote_hlc = Hlc::new(NOW + 5_000, 3, DEVICE_B);
+    let (ciphertext, nonce) = sealed_elsewhere("e1", &hotp(90));
+    server.hold(WireRecord {
+        entry_id: "e1".to_string(),
+        ciphertext: Some(ciphertext),
+        nonce: Some(nonce),
+        hlc: remote_hlc,
+        deleted: false,
+        server_seq: 0,
+    });
+    sync::run_cycle(vault.store_mut(), &mut clock, &mut server, NOW + 20_000).unwrap();
+
+    reconcile::run(&mut vault).unwrap();
+
+    let corrected = vault.store().get("e1").unwrap().unwrap().hlc;
+    let device = vault.store().device_id().unwrap();
+
+    assert!(corrected > local_hlc, "must beat the record it corrects");
+    assert!(
+        corrected > remote_hlc,
+        "and the candidate it took the counter from"
+    );
+    assert_eq!(
+        corrected.device, device,
+        "the correcting device owns the timestamp"
+    );
+
+    // Derived from the largest participating timestamp, not from a clock: the
+    // wall-clock component is that record's, with the counter stepped once.
+    assert_eq!(corrected.wall_ms, local_hlc.wall_ms);
+    assert_eq!(corrected.counter, local_hlc.counter + 1);
+}
+
+/// The failure a clock read would cause, in the direction that is hardest to
+/// notice: a device whose clock is behind writes a correction that loses to
+/// the record it corrects, so the counter reverts at every unlock.
+///
+/// The derivation cannot do this, because it never looks at a clock. Asserted
+/// by running the whole reconcile with wall-clock values far behind the
+/// records and checking the correction still wins.
+#[test]
+fn a_device_with_a_slow_clock_still_writes_a_winning_correction() {
+    let mut vault = vault();
+    let mut clock = HlcClock::new(DEVICE_A);
+    let mut server = FakeServer::default();
+
+    // The records are far in the future relative to any clock this device has.
+    let local_hlc = Hlc::new(NOW + 900_000, 0, DEVICE_A);
+    put(&mut vault, "e1", &hotp(4), local_hlc);
+
+    let (ciphertext, nonce) = sealed_elsewhere("e1", &hotp(60));
+    server.hold(WireRecord {
+        entry_id: "e1".to_string(),
+        ciphertext: Some(ciphertext),
+        nonce: Some(nonce),
+        hlc: Hlc::new(NOW + 800_000, 0, DEVICE_B),
+        deleted: false,
+        server_seq: 0,
+    });
+    // The cycle runs with a "now" long before those timestamps.
+    sync::run_cycle(vault.store_mut(), &mut clock, &mut server, NOW).unwrap();
+
+    reconcile::run(&mut vault).unwrap();
+
+    let corrected = vault.store().get("e1").unwrap().unwrap().hlc;
+    assert!(
+        corrected > local_hlc,
+        "a correction written from a slow clock would lose and revert"
+    );
+    assert_eq!(
+        vault.get("e1").unwrap().payload.as_otp().unwrap().counter,
+        Some(60)
+    );
+}
+
+/// Running twice must not move the timestamp again. The second pass has no
+/// candidates, so there is nothing to correct.
+#[test]
+fn a_second_reconcile_changes_nothing() {
+    let mut vault = vault();
+    let mut clock = HlcClock::new(DEVICE_A);
+    let mut server = FakeServer::default();
+
+    put(
+        &mut vault,
+        "e1",
+        &hotp(3),
+        Hlc::new(NOW + 10_000, 0, DEVICE_A),
+    );
+    let (ciphertext, nonce) = sealed_elsewhere("e1", &hotp(40));
+    server.hold(WireRecord {
+        entry_id: "e1".to_string(),
+        ciphertext: Some(ciphertext),
+        nonce: Some(nonce),
+        hlc: Hlc::new(NOW, 0, DEVICE_B),
+        deleted: false,
+        server_seq: 0,
+    });
+    sync::run_cycle(vault.store_mut(), &mut clock, &mut server, NOW + 20_000).unwrap();
+
+    reconcile::run(&mut vault).unwrap();
+    let after_first = vault.store().get("e1").unwrap().unwrap().hlc;
+
+    let second = reconcile::run(&mut vault).unwrap();
+
+    assert_eq!(second.examined, 0);
+    assert_eq!(vault.store().get("e1").unwrap().unwrap().hlc, after_first);
 }

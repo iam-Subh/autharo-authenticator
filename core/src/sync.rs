@@ -300,6 +300,9 @@ fn apply_remote(
                 &incoming.entry_id,
                 ciphertext,
                 incoming.nonce.as_deref().unwrap_or(&[]),
+                // The clamped value, not the raw one: a candidate keeps the
+                // timestamp it would have been stored under.
+                hlc,
                 now_ms as i64,
             )?;
         }
@@ -317,6 +320,7 @@ fn apply_remote(
             &incoming.entry_id,
             &current.ciphertext,
             &current.nonce,
+            current.hlc,
             now_ms as i64,
         )?;
     }
@@ -370,12 +374,21 @@ pub fn full_resync<T: SyncTransport>(store: &mut Store, transport: &mut T) -> Re
 
 /// Entries whose conflict was decided by HLC alone and still need section
 /// 10.4's counter rule applied. See [`crate::reconcile`] for applying them.
+///
+/// One name per entry, however many candidates it holds. A single cycle can
+/// record two for the same entry — once when the pulled record is compared,
+/// and again when the push comes back as a conflict and is compared a second
+/// time — and both are kept, because either could hold the larger counter.
+/// The caller wants to know which entries are waiting, not how many
+/// comparisons happened.
 pub fn needs_counter_reconcile(store: &Store) -> core::result::Result<Vec<String>, StoreError> {
-    Ok(store
+    let mut names: Vec<String> = store
         .reconcile_pending()?
         .into_iter()
         .map(|record| record.entry_id)
-        .collect())
+        .collect();
+    names.dedup();
+    Ok(names)
 }
 
 fn none_if_empty(bytes: &[u8]) -> Option<Vec<u8>> {

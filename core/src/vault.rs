@@ -217,6 +217,44 @@ impl<C: RecordCipher> Vault<C> {
     }
 
     /// Replaces the payload of an existing entry (FR-17).
+    /// Writes a payload under a timestamp the caller chose.
+    ///
+    /// Used only by [`crate::reconcile`], which derives the corrected
+    /// timestamp from the conflicting records rather than from a clock
+    /// (section 10.4 step 7). Every other write goes through the vault's own
+    /// clock; this exists because a clock read there would walk around the
+    /// drift bound in section 10.2, which applies to incoming values only.
+    ///
+    /// The supplied timestamp is folded into the vault's clock, so later local
+    /// writes still sort after it.
+    pub fn write_with_hlc(
+        &mut self,
+        id: &str,
+        payload: &Payload,
+        hlc: Hlc,
+        base_hlc: Option<Hlc>,
+    ) -> Result<()> {
+        let plaintext = payload.to_json()?;
+        let sealed = self.cipher.seal(id, RECORD_VERSION, &plaintext)?;
+        self.clock.observe(hlc, hlc.wall_ms);
+
+        self.store.write_local(
+            &Record {
+                id: id.to_string(),
+                ciphertext: sealed.ciphertext,
+                nonce: sealed.nonce,
+                hlc,
+                deleted: false,
+                server_seq: None,
+                // Display only (section 12.1), and derived from the timestamp
+                // rather than read from a clock.
+                updated_at: hlc.wall_ms as i64,
+            },
+            base_hlc,
+        )?;
+        Ok(())
+    }
+
     /// Seals a payload for a given entry identifier without storing it.
     ///
     /// The counterpart to [`Self::open_record`]. Used where a record has to be

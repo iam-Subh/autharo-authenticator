@@ -39,8 +39,10 @@ use crate::hlc::{Hlc, HlcParseError};
 const VAULT_SCHEMA_VERSION: i64 = 1;
 /// Schema version for the metadata file.
 ///
-/// 2 adds the `reconcile` table for section 10.4's deferred HOTP rule.
-const META_SCHEMA_VERSION: i64 = 2;
+/// 2 added the `reconcile` table for section 10.4's deferred HOTP rule.
+/// 3 replaced it: one row per entry could hold only one discarded candidate,
+/// and section 10.4 step 4 requires every candidate to be kept.
+const META_SCHEMA_VERSION: i64 = 3;
 
 /// `meta` key holding the sync cursor, the highest server sequence seen.
 const META_CURSOR: &str = "cursor";
@@ -200,6 +202,56 @@ impl MetaStore {
                  PRAGMA user_version = 2;
                  COMMIT;",
             )?;
+        }
+        if version < 3 {
+            // Section 10.4 step 4: "Keep every discarded candidate, not one
+            // per entry." Version 2 keyed the table on `entry_id`, so a second
+            // conflict before unlock had to either overwrite the first
+            // candidate or be dropped. With three candidates, either choice
+            // can lose the largest counter — and the reconcile then returns a
+            // wrong value with nothing to signal it.
+            //
+            // Step 7 also needs the discarded record's HLC, which version 2
+            // did not keep. Rows carried over from it have an empty `hlc`,
+            // which the reconcile treats as unknown.
+            let has_old: bool = self
+                .connection
+                .query_row(
+                    "SELECT count(*) FROM sqlite_master
+                      WHERE type = 'table' AND name = 'reconcile'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .map(|count| count > 0)?;
+
+            self.connection.execute_batch(
+                "BEGIN;
+                 CREATE TABLE IF NOT EXISTS reconcile_candidate (
+                   id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                   entry_id      TEXT NOT NULL,
+                   ciphertext    BLOB NOT NULL,
+                   nonce         BLOB NOT NULL,
+                   hlc           TEXT NOT NULL,
+                   recorded_at   INTEGER NOT NULL
+                 );
+                 CREATE INDEX IF NOT EXISTS reconcile_candidate_entry_idx
+                   ON reconcile_candidate (entry_id);
+                 COMMIT;",
+            )?;
+
+            if has_old {
+                self.connection.execute_batch(
+                    "BEGIN;
+                     INSERT INTO reconcile_candidate
+                       (entry_id, ciphertext, nonce, hlc, recorded_at)
+                     SELECT entry_id, ciphertext, nonce, '', recorded_at
+                       FROM reconcile;
+                     DROP TABLE reconcile;
+                     COMMIT;",
+                )?;
+            }
+
+            self.connection.execute_batch("PRAGMA user_version = 3;")?;
         }
         Ok(())
     }
@@ -791,117 +843,144 @@ impl MetaStore {
     }
 }
 
-/// One side of a conflict that was resolved without being able to read the
-/// counters (section 10.4, deferred HOTP rule).
+/// One discarded candidate from a conflict resolved without reading the
+/// counters (section 10.4).
 ///
-/// Holds the **discarded** record: whichever of the two the HLC rule threw
-/// away. The winner is already in the entry table; this is the other one, kept
-/// so the reconcile step at unlock has both counters to compare.
+/// Holds a record the HLC rule threw away. An entry may have several: each
+/// conflict before the next unlock adds one, and step 4 requires every one to
+/// be kept, because any of them could hold the largest counter.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ReconcileRecord {
+pub struct ReconcileCandidate {
+    /// Row identifier. The table is keyed on this rather than on the entry, so
+    /// one entry can hold several candidates.
+    pub id: i64,
     pub entry_id: String,
     /// The discarded ciphertext. Opaque to the code that writes it.
     pub ciphertext: Vec<u8>,
     pub nonce: Vec<u8>,
+    /// The HLC the discarded record carried. Step 7 derives the corrected
+    /// timestamp from these rather than from a clock.
+    ///
+    /// `None` only for rows carried over from schema version 2, which did not
+    /// keep it.
+    pub hlc: Option<Hlc>,
     pub recorded_at: i64,
 }
 
 impl MetaStore {
-    fn put_reconcile(&self, record: &ReconcileRecord) -> Result<()> {
-        // Keeps the first discarded value if one is already pending. A second
-        // conflict before unlock means three candidates, and the one already
-        // recorded may hold the largest counter; overwriting it could lose the
-        // very value the reconcile exists to find.
+    fn insert_candidate(
+        &self,
+        entry_id: &str,
+        ciphertext: &[u8],
+        nonce: &[u8],
+        hlc: Hlc,
+        at: i64,
+    ) -> Result<()> {
+        // Always an insert. Section 10.4 step 4: an entry may hold several
+        // candidates, and dropping or overwriting one can lose the largest
+        // counter.
         self.connection.execute(
-            "INSERT INTO reconcile (entry_id, ciphertext, nonce, recorded_at)
-             VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(entry_id) DO NOTHING",
-            params![
-                record.entry_id,
-                record.ciphertext,
-                record.nonce,
-                record.recorded_at
-            ],
+            "INSERT INTO reconcile_candidate
+               (entry_id, ciphertext, nonce, hlc, recorded_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![entry_id, ciphertext, nonce, hlc.to_string(), at],
         )?;
         Ok(())
     }
 
-    fn list_reconcile(&self) -> Result<Vec<ReconcileRecord>> {
+    fn list_candidates(&self) -> Result<Vec<ReconcileCandidate>> {
         let mut statement = self.connection.prepare(
-            "SELECT entry_id, ciphertext, nonce, recorded_at
-               FROM reconcile ORDER BY recorded_at ASC",
+            "SELECT id, entry_id, ciphertext, nonce, hlc, recorded_at
+               FROM reconcile_candidate ORDER BY entry_id, id",
         )?;
         let rows = statement.query_map([], |row| {
-            Ok(ReconcileRecord {
-                entry_id: row.get(0)?,
-                ciphertext: row.get(1)?,
-                nonce: row.get(2)?,
-                recorded_at: row.get(3)?,
-            })
+            let hlc: String = row.get(4)?;
+            Ok((
+                ReconcileCandidate {
+                    id: row.get(0)?,
+                    entry_id: row.get(1)?,
+                    ciphertext: row.get(2)?,
+                    nonce: row.get(3)?,
+                    hlc: None,
+                    recorded_at: row.get(5)?,
+                },
+                hlc,
+            ))
         })?;
-        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+
+        let mut candidates = Vec::new();
+        for row in rows {
+            let (mut candidate, hlc) = row?;
+            // An empty string is a version 2 row, which kept no timestamp.
+            candidate.hlc = hlc.parse::<Hlc>().ok();
+            candidates.push(candidate);
+        }
+        Ok(candidates)
     }
 
-    fn delete_reconcile(&self, entry_id: &str) -> Result<()> {
+    fn delete_candidates(&self, entry_id: &str) -> Result<()> {
         self.connection.execute(
-            "DELETE FROM reconcile WHERE entry_id = ?1",
+            "DELETE FROM reconcile_candidate WHERE entry_id = ?1",
             params![entry_id],
         )?;
         Ok(())
     }
 
-    fn reconcile_pending_for(&self, entry_id: &str) -> Result<bool> {
-        let (count,): (i64,) = self.connection.query_row(
-            "SELECT count(*) FROM reconcile WHERE entry_id = ?1",
+    fn has_candidates(&self, entry_id: &str) -> Result<bool> {
+        let count: i64 = self.connection.query_row(
+            "SELECT count(*) FROM reconcile_candidate WHERE entry_id = ?1",
             params![entry_id],
-            |row| Ok((row.get(0)?,)),
+            |row| row.get(0),
         )?;
         Ok(count > 0)
     }
 }
 
 impl Store {
-    /// Records the discarded side of a conflict (section 10.4 step 2).
+    /// Records a discarded candidate (section 10.4 steps 2 and 3).
     ///
     /// Called by the sync cycle, which may be locked, so nothing here reads a
     /// payload. Both directions are recorded: when the remote wins the local
-    /// record is kept, and when the local wins the remote one is — because the
-    /// HOTP rule takes the larger counter regardless of which HLC was higher.
+    /// record is discarded, and when the local wins the remote one is —
+    /// because the counter rule takes the larger value regardless of which HLC
+    /// was higher.
     pub fn record_reconcile(
         &self,
         entry_id: &str,
         discarded_ciphertext: &[u8],
         discarded_nonce: &[u8],
+        discarded_hlc: Hlc,
         at: i64,
     ) -> Result<()> {
         if discarded_ciphertext.is_empty() {
             // A tombstone has no payload and no counter to compare.
             return Ok(());
         }
-        self.meta.put_reconcile(&ReconcileRecord {
-            entry_id: entry_id.to_string(),
-            ciphertext: discarded_ciphertext.to_vec(),
-            nonce: discarded_nonce.to_vec(),
-            recorded_at: at,
-        })
+        self.meta.insert_candidate(
+            entry_id,
+            discarded_ciphertext,
+            discarded_nonce,
+            discarded_hlc,
+            at,
+        )
     }
 
-    /// Everything awaiting reconciliation, oldest first.
-    pub fn reconcile_pending(&self) -> Result<Vec<ReconcileRecord>> {
-        self.meta.list_reconcile()
+    /// Every pending candidate, grouped by entry and oldest first within each.
+    pub fn reconcile_pending(&self) -> Result<Vec<ReconcileCandidate>> {
+        self.meta.list_candidates()
     }
 
-    /// Section 10.4 step 3: whether this entry may produce a code yet.
+    /// Section 10.4 step 5: whether this entry may produce a code yet.
     ///
-    /// An entry with a pending record may be holding the smaller counter, and
-    /// a code from a counter behind the issuer's is one the issuer has already
-    /// rejected. Refusing is better than being confidently wrong.
+    /// An entry with a candidate outstanding may be holding the smaller
+    /// counter, and a code from a counter behind the issuer's is one the
+    /// issuer has already rejected. Refusing beats being confidently wrong.
     pub fn reconcile_pending_for(&self, entry_id: &str) -> Result<bool> {
-        self.meta.reconcile_pending_for(entry_id)
+        self.meta.has_candidates(entry_id)
     }
 
-    /// Section 10.4 step 5: cleared only once the reconcile has completed.
+    /// Section 10.4 step 9: cleared only once the correction is written.
     pub fn clear_reconcile(&self, entry_id: &str) -> Result<()> {
-        self.meta.delete_reconcile(entry_id)
+        self.meta.delete_candidates(entry_id)
     }
 }

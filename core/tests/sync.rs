@@ -396,6 +396,15 @@ fn a_conflict_is_listed_for_counter_reconciliation() {
         "an HLC-only resolution must be recorded, not silently accepted"
     );
 
+    // Section 10.4 step 4: every comparison keeps its candidate, so one entry
+    // may hold several. A cycle compares twice — once for the pulled record
+    // and once when the push comes back as a conflict — and both are kept,
+    // because either could carry the larger counter.
+    assert!(
+        !store.reconcile_pending().unwrap().is_empty(),
+        "the discarded record itself must be kept, not just the name"
+    );
+
     store.clear_reconcile("e1").unwrap();
     assert!(sync::needs_counter_reconcile(&store).unwrap().is_empty());
 }

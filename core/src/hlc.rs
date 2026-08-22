@@ -223,7 +223,11 @@ pub fn clamp_drift(remote: Hlc, local_physical_ms: u64) -> (Hlc, DriftOutcome) {
 }
 
 /// Bumps the counter, rolling into the next millisecond if it would overflow.
-fn advance(wall_ms: u64, counter: u16, device: u64) -> Hlc {
+///
+/// Public because section 10.4 step 7 derives a corrected timestamp this way:
+/// the largest candidate HLC, its counter increased by one, and the correcting
+/// device's identifier. That is the whole derivation, and it uses no clock.
+pub fn advance(wall_ms: u64, counter: u16, device: u64) -> Hlc {
     match counter.checked_add(1) {
         Some(counter) => Hlc::new(wall_ms, counter, device),
         None => Hlc::new(wall_ms + 1, 0, device),

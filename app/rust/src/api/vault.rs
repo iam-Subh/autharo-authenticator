@@ -520,10 +520,11 @@ fn open_vault_with_key(vault_path: &str, meta: MetaStore, key: VaultKey) -> Resu
     // which the user unlocks, taps an HOTP entry, and gets a code from the
     // smaller counter — the exact failure the rule exists to prevent, reached
     // by a different route.
-    let device_id = vault.store().device_id()?;
-    let mut clock = authcore::hlc::HlcClock::new(device_id);
-    let report = reconcile::run(&mut vault, &mut clock, now_ms_for_reconcile())
-        .map_err(|error| anyhow!("{error}"))?;
+    // No clock is read. Section 10.4 step 7 derives the corrected timestamp
+    // from the conflicting records themselves, which is why this call takes
+    // no time argument — a clock here would walk around section 10.2's drift
+    // bound, and be wrong in both directions.
+    let report = reconcile::run(&mut vault).map_err(|error| anyhow!("{error}"))?;
     if report.counters_raised > 0 {
         // Counts only. Section 9.4 forbids naming an entry at any log level.
         eprintln!(
@@ -888,18 +889,4 @@ fn build_payload(
     );
     object.insert("created_at".into(), now_ms.into());
     Ok(serde_json::to_vec(&serde_json::Value::Object(object))?)
-}
-
-/// The timestamp for a reconcile correction.
-///
-/// The one place in this crate that reads a clock, and it is unavoidable: the
-/// corrected write happens during unlock, with no Dart call in flight to carry
-/// the reference time from FR-38. The value only orders a correction the user
-/// did not ask for, so a small error costs nothing — unlike a TOTP code, which
-/// is why every other entry point still takes the time as a parameter.
-fn now_ms_for_reconcile() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
 }
