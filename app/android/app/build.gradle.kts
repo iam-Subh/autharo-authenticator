@@ -49,6 +49,10 @@ android {
             // TODO: Add your own signing config for the release build.
             // Signing with the debug keys for now, so `flutter run --release` works.
             signingConfig = signingConfigs.getByName("debug")
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro",
+            )
         }
     }
 }
@@ -61,4 +65,19 @@ kotlin {
 
 flutter {
     source = "../.."
+}
+
+dependencies {
+    // FR-32. The vault's wrapping key can be bound to per-use authentication,
+    // and a key bound that way can only be used through a BiometricPrompt
+    // carrying the Cipher as a CryptoObject. `local_auth` pulls this in
+    // transitively, but the keystore code depends on it directly and a
+    // transitive dependency is one a plugin upgrade can take away.
+    implementation("androidx.biometric:biometric:1.1.0")
+
+    // Android's supported passkey client. The Play Services adapter keeps the
+    // same API available on supported devices before Android 14.
+    implementation("androidx.credentials:credentials:1.6.0")
+    implementation("androidx.credentials:credentials-play-services-auth:1.6.0")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
 }

@@ -3,6 +3,11 @@ name = "rust_lib_authenticator"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+# Type-check the Android JNI module on a host that does not have an Android NDK.
+# Production Android builds use the same JNI API.
+jni-host-check = []
+
 [lib]
 crate-type = ["cdylib", "staticlib"]
 
@@ -19,7 +24,27 @@ flutter_rust_bridge = "=2.12.0"
 # crate had to be pointed at the real cipher. That breakage was the design.
 authcore = { path = "../../core" }
 anyhow = "1"
+
+# The socket for the sync client. Deliberately here and not in `authcore`:
+# rustls has to cross-compile to every target the app ships to, and keeping it
+# out of the core means the crate holding the cryptography and the storage
+# builds anywhere with no C toolchain. See src/http.rs.
+#
+# rustls rather than native-tls: no OpenSSL, which is what made SQLCipher
+# impossible to cross-compile to Android from Windows earlier in this project.
+reqwest = { version = "0.12", default-features = false, features = [
+    "blocking", "rustls-tls",
+] }
 serde_json = "1.0.151"
+serde = { version = "1.0.229", features = ["derive"] }
+jni = "0.21.1"
+getrandom = "0.4"
+zeroize = "1"
+
+# Android owns the synchronization-session encryption key. Rust calls the
+# small native token store directly, so access and refresh tokens never cross
+# the Dart heap. The JNI module remains target-gated. The pure-Rust dependency
+# is also available to the host-only type-check feature above.
 
 
 [lints.rust]

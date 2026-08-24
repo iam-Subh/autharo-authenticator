@@ -3,8 +3,10 @@
   The vault must never leave the device through a platform backup. Section 12.1
   calls for SQLCipher, which does not arrive until stage S3, so until then the
   local database is plaintext on disk and a cloud backup would copy it off the
-  device. Even after S3 the key lives in the Keystore and does not travel with
-  a backup, so a restored copy would be undecryptable anyway.
+  device. Even after S3 the vault and synchronization-session keys live in the
+  Keystore and do not travel with a backup, so restored ciphertext would be
+  undecryptable anyway. The synchronization-session file also lives in the
+  no-backup directory as a second control.
 -->
 <data-extraction-rules>
     <cloud-backup>

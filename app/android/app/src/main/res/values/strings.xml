@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="widget_name">Authenticator account</string>
+    <string name="widget_description">Open one account in Authenticator</string>
+    <string name="widget_account">Authenticator account</string>
+    <string name="widget_not_configured">Select an account in Authenticator</string>
+    <string name="widget_open_for_code">Tap to unlock and view the code</string>
+    <string name="widget_open_settings">Tap to configure</string>
+</resources>
