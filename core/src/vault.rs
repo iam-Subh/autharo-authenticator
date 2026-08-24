@@ -117,6 +117,59 @@ impl From<CipherError> for VaultError {
 
 type Result<T> = core::result::Result<T, VaultError>;
 
+/// What one call to [`Vault::sync`] did.
+///
+/// Two reports rather than one merged count, because they answer different
+/// questions: the cycle says what moved between this device and the server,
+/// and the reconcile says what section 10.4's counter rule had to correct
+/// afterwards. A caller watching for trouble wants the second on its own.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct SyncOutcome {
+    pub cycle: crate::sync::CycleReport,
+    pub reconcile: crate::reconcile::ReconcileReport,
+}
+
+/// What one call to [`Vault::full_resync`] did.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ResyncOutcome {
+    /// Records taken from the server.
+    pub applied: usize,
+    pub reconcile: crate::reconcile::ReconcileReport,
+}
+
+/// Why a [`Vault::sync`] stopped.
+///
+/// The two halves stay distinguishable: a cycle failure is usually the network
+/// and worth retrying, while a reconcile failure is local and is not.
+#[derive(Debug)]
+pub enum SyncFailure {
+    Cycle(crate::sync::SyncError),
+    Reconcile(crate::reconcile::ReconcileError),
+}
+
+impl fmt::Display for SyncFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Cycle(inner) => write!(f, "{inner}"),
+            Self::Reconcile(inner) => write!(f, "{inner}"),
+        }
+    }
+}
+
+impl std::error::Error for SyncFailure {}
+
+impl From<crate::sync::SyncError> for SyncFailure {
+    fn from(value: crate::sync::SyncError) -> Self {
+        Self::Cycle(value)
+    }
+}
+
+impl From<crate::reconcile::ReconcileError> for SyncFailure {
+    fn from(value: crate::reconcile::ReconcileError) -> Self {
+        Self::Reconcile(value)
+    }
+}
+
 /// One entry, decrypted.
 #[derive(Debug, Clone, PartialEq)]
 pub struct VaultEntry {
@@ -216,7 +269,68 @@ impl<C: RecordCipher> Vault<C> {
         Ok(id)
     }
 
-    /// Replaces the payload of an existing entry (FR-17).
+    /// Runs one sync cycle against this vault's store, and then the reconcile
+    /// the cycle may have left work for (PRD sections 10.3, 10.4, OFF-09).
+    ///
+    /// # Why the cycle uses this vault's clock
+    ///
+    /// Because it has to be the same one. The cycle folds every timestamp it
+    /// sees into the clock, so that a later local write sorts after what this
+    /// device has already observed. A cycle run against a *separate* clock
+    /// would leave the vault's clock behind, and the next local edit could
+    /// then be issued below a remote record it is meant to supersede — losing
+    /// a conflict it should win, silently.
+    ///
+    /// A locked device has no `Vault`, so it calls [`crate::sync::run_cycle`]
+    /// directly with a clock resumed from its stored records. Reopening the
+    /// vault resumes from the highest stored timestamp, so the two paths meet.
+    ///
+    /// # Why the reconcile runs here and not only at unlock
+    ///
+    /// Section 10.4 defers the counter rule because the cycle may have no key.
+    /// This one does. A conflict settled during a cycle on an *unlocked* device
+    /// leaves a candidate that only the unlock path applies — and a device that
+    /// is already unlocked has no unlock coming. Until one does, section 10.4
+    /// step 5 refuses to produce a code for that entry, so an ordinary sync
+    /// would quietly stop an entry working for as long as the app stayed open.
+    ///
+    /// Applying it here closes that: the deferral lasts exactly as long as the
+    /// absence of a key, which is what it was for.
+    ///
+    /// Note the direction: `Vault` calls into `sync` and `reconcile`, never the
+    /// reverse. That is what keeps `sync` free of any way to read a payload.
+    pub fn sync<T: crate::sync::SyncTransport>(
+        &mut self,
+        transport: &mut T,
+        now_ms: u64,
+    ) -> core::result::Result<SyncOutcome, SyncFailure> {
+        let cycle = crate::sync::run_cycle(&mut self.store, &mut self.clock, transport, now_ms)?;
+        let reconcile = crate::reconcile::run(self)?;
+        Ok(SyncOutcome { cycle, reconcile })
+    }
+
+    /// Section 10.6's full re-sync, against this vault's store and clock.
+    ///
+    /// Here for the same two reasons as [`Self::sync`]: the re-sync folds every
+    /// timestamp it takes from the server into the clock, and it can leave
+    /// reconcile records that this device has the key to apply now.
+    pub fn full_resync<T: crate::sync::SyncTransport>(
+        &mut self,
+        transport: &mut T,
+        now_ms: u64,
+    ) -> core::result::Result<ResyncOutcome, SyncFailure> {
+        let applied =
+            crate::sync::full_resync(&mut self.store, &mut self.clock, transport, now_ms)?;
+        let reconcile = crate::reconcile::run(self)?;
+        Ok(ResyncOutcome { applied, reconcile })
+    }
+
+    /// The clock this vault issues timestamps from, for a caller that has to
+    /// hand the same one to a locked cycle after this vault is dropped.
+    pub fn clock(&self) -> HlcClock {
+        self.clock.clone()
+    }
+
     /// Writes a payload under a timestamp the caller chose.
     ///
     /// Used only by [`crate::reconcile`], which derives the corrected
@@ -286,6 +400,7 @@ impl<C: RecordCipher> Vault<C> {
         Ok(Payload::from_json(&plaintext)?)
     }
 
+    /// Replaces the payload of an existing entry (FR-17).
     pub fn update(&mut self, id: &str, payload: &Payload, now_ms: i64) -> Result<()> {
         let existing = self
             .store

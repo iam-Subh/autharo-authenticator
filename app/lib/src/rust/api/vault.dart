@@ -6,7 +6,7 @@
 import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `added`, `build_payload`, `duplicate`, `lock_poisoned`, `now_ms_for_reconcile`, `open_vault_with_key`, `take_meta`, `with_meta`, `with_vault`
+// These functions are ignored because they are not marked as `pub`: `added`, `build_payload`, `duplicate`, `lock_poisoned`, `open_vault_with_key`, `take_meta`, `with_meta_pub`, `with_meta`, `with_vault_pub`, `with_vault`
 
 /// Deletes an unencrypted vault file if one is present (section 12.1 rule 4).
 ///

@@ -106,6 +106,14 @@ pub enum StoreError {
     CorruptDeviceSlot {
         detail: String,
     },
+    /// A caller asked to store a setting outside the range it permits.
+    ///
+    /// Refused rather than clamped. The one setting that uses this destroys
+    /// the vault, and quietly storing the nearest legal value would arm
+    /// something the caller did not ask for.
+    InvalidValue {
+        detail: String,
+    },
 }
 
 impl fmt::Display for StoreError {
@@ -119,6 +127,7 @@ impl fmt::Display for StoreError {
                 f,
                 "This device's key record is damaged, so the vault cannot be opened: {detail}"
             ),
+            Self::InvalidValue { detail } => write!(f, "That setting was refused: {detail}"),
         }
     }
 }
@@ -157,6 +166,10 @@ impl MetaStore {
     }
 
     fn from_connection(connection: Connection) -> Result<Self> {
+        // Overwrite deleted or replaced cells inside SQLite pages. This does
+        // not replace encryption, but it prevents old metadata values from
+        // remaining readable in the database freelist.
+        connection.pragma_update(None, "secure_delete", true)?;
         let store = Self { connection };
         store.migrate()?;
         Ok(store)
@@ -409,6 +422,7 @@ impl Store {
         // Foreign keys are off by default in SQLite, and the outbox references
         // the entry table.
         vault.pragma_update(None, "foreign_keys", true)?;
+        vault.pragma_update(None, "secure_delete", true)?;
 
         let store = Self { vault, meta };
         store.migrate()?;
@@ -516,6 +530,29 @@ impl Store {
             .collect()
     }
 
+    /// Every entry's identifier and timestamp, tombstones included.
+    ///
+    /// [`Self::list`] carries the ciphertext with every row, which is most of
+    /// the bytes and none of the answer when the caller only wants to know
+    /// which version of what it holds. The convergence harness compares these
+    /// across three devices before every cycle, and with the full rows the
+    /// hundred-thousand-operation run went from seconds to not finishing.
+    pub fn timestamps(&self) -> Result<Vec<(String, Hlc)>> {
+        let mut statement = self.vault.prepare("SELECT id, hlc FROM entry")?;
+        let rows = statement.query_map([], |row| {
+            let id: String = row.get(0)?;
+            let hlc: String = row.get(1)?;
+            Ok((id, hlc))
+        })?;
+
+        let mut out = Vec::new();
+        for row in rows {
+            let (id, hlc) = row?;
+            out.push((id, hlc.parse::<Hlc>()?));
+        }
+        Ok(out)
+    }
+
     /// Marks a record deleted and drops its ciphertext (section 10.4).
     ///
     /// The row stays as a tombstone so that the delete can reach the other
@@ -588,10 +625,31 @@ impl Store {
         Ok(())
     }
 
-    /// Replaces every record in one transaction (section 10.6, full re-sync).
+    /// Removes entries outright, with their outbox rows — no tombstone.
     ///
-    /// The outbox is cleared with them, because a re-sync replaces the local
-    /// state wholesale.
+    /// Only for the full re-sync in section 10.6, and only for entries the
+    /// server does not have and this device is not waiting to push. A row
+    /// removed here leaves nothing behind, which is right for a record that
+    /// exists only because this device's cursor went stale, and wrong for
+    /// anything else: an entry the user deleted needs a tombstone, or the
+    /// delete would not propagate.
+    pub fn forget_entries(&mut self, ids: &[String]) -> Result<()> {
+        let transaction = self.vault.transaction()?;
+        for id in ids {
+            transaction.execute("DELETE FROM outbox WHERE entry_id = ?1", params![id])?;
+            transaction.execute("DELETE FROM entry WHERE id = ?1", params![id])?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Replaces every record in one transaction, outbox included.
+    ///
+    /// This throws away local work that has not reached the server. That is
+    /// correct for **Wipe and re-download**, where the user has asked for the
+    /// server's copy and nothing else, and wrong for the automatic re-sync in
+    /// section 10.6 — see [`crate::sync::full_resync`], which keeps what is
+    /// still waiting to be pushed.
     pub fn replace_all(&mut self, records: &[Record], cursor: i64) -> Result<()> {
         let transaction = self.vault.transaction()?;
         transaction.execute("DELETE FROM outbox", [])?;
@@ -926,6 +984,15 @@ impl MetaStore {
         Ok(())
     }
 
+    fn count_candidates(&self) -> Result<usize> {
+        let count: i64 =
+            self.connection
+                .query_row("SELECT count(*) FROM reconcile_candidate", [], |row| {
+                    row.get(0)
+                })?;
+        Ok(count as usize)
+    }
+
     fn has_candidates(&self, entry_id: &str) -> Result<bool> {
         let count: i64 = self.connection.query_row(
             "SELECT count(*) FROM reconcile_candidate WHERE entry_id = ?1",
@@ -968,6 +1035,14 @@ impl Store {
     /// Every pending candidate, grouped by entry and oldest first within each.
     pub fn reconcile_pending(&self) -> Result<Vec<ReconcileCandidate>> {
         self.meta.list_candidates()
+    }
+
+    /// How many candidates are waiting, without reading any of them.
+    ///
+    /// [`Self::reconcile_pending`] loads every discarded ciphertext, which the
+    /// reconcile needs and a caller asking "is there anything to do" does not.
+    pub fn reconcile_pending_count(&self) -> Result<usize> {
+        self.meta.count_candidates()
     }
 
     /// Section 10.4 step 5: whether this entry may produce a code yet.

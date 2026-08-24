@@ -6,6 +6,7 @@
 // Static analysis wrongly picks the IO variant, thus ignore this
 // ignore_for_file: argument_type_not_assignable
 
+import 'api/sync.dart';
 import 'api/vault.dart';
 import 'dart:async';
 import 'dart:convert';
@@ -76,6 +77,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   RecoveryPhraseView dco_decode_recovery_phrase_view(dynamic raw);
+
+  @protected
+  SyncRunView dco_decode_sync_run_view(dynamic raw);
+
+  @protected
+  SyncStatusView dco_decode_sync_status_view(dynamic raw);
 
   @protected
   int dco_decode_u_32(dynamic raw);
@@ -150,6 +157,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   RecoveryPhraseView sse_decode_recovery_phrase_view(
     SseDeserializer deserializer,
   );
+
+  @protected
+  SyncRunView sse_decode_sync_run_view(SseDeserializer deserializer);
+
+  @protected
+  SyncStatusView sse_decode_sync_status_view(SseDeserializer deserializer);
 
   @protected
   int sse_decode_u_32(SseDeserializer deserializer);
@@ -241,6 +254,15 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_recovery_phrase_view(
     RecoveryPhraseView self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_sync_run_view(SyncRunView self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_sync_status_view(
+    SyncStatusView self,
     SseSerializer serializer,
   );
 

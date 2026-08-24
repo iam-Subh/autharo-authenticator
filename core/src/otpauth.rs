@@ -127,6 +127,9 @@ impl OtpAuthUri {
         let kind = match type_segment.to_ascii_lowercase().as_str() {
             "totp" => OtpKind::Totp,
             "hotp" => OtpKind::Hotp,
+            // Aegis's interchange form for FR-06, and what a Steam QR code
+            // scanned out of another authenticator carries.
+            "steam" => OtpKind::Steam,
             other => {
                 return Err(OtpAuthError::UnknownType {
                     found: other.to_string(),
@@ -169,17 +172,27 @@ impl OtpAuthUri {
             None => Algorithm::default(),
         };
 
-        let digits = number(&parameters, "digits")?.unwrap_or(u64::from(DEFAULT_DIGITS));
-        let digits =
-            u8::try_from(digits).map_err(|_| OtpError::UnsupportedDigits { digits: 255 })?;
-        check_digits(digits)?;
+        // A Steam code is five characters, which is out of range for every
+        // other kind. The count is not a parameter of that format — it is
+        // fixed — so it is set here rather than read, and the range check is
+        // skipped rather than widened. Widening it would let a genuine TOTP
+        // entry claim five digits and produce codes nothing accepts.
+        let digits = if kind == OtpKind::Steam {
+            crate::otp::STEAM_DIGITS
+        } else {
+            let digits = number(&parameters, "digits")?.unwrap_or(u64::from(DEFAULT_DIGITS));
+            let digits =
+                u8::try_from(digits).map_err(|_| OtpError::UnsupportedDigits { digits: 255 })?;
+            check_digits(digits)?;
+            digits
+        };
 
         let period = number(&parameters, "period")?.unwrap_or(u64::from(DEFAULT_PERIOD));
         let period = u32::try_from(period).unwrap_or(u32::MAX);
         check_period(period)?;
 
         let counter = match kind {
-            OtpKind::Totp => None,
+            OtpKind::Totp | OtpKind::Steam => None,
             OtpKind::Hotp => {
                 Some(number(&parameters, "counter")?.ok_or(OtpAuthError::MissingCounter)?)
             }
@@ -207,6 +220,10 @@ impl OtpAuthUri {
     pub fn code_at(&self, unix_seconds: i64) -> Result<String, OtpAuthError> {
         let secret = self.secret_bytes().map_err(OtpAuthError::InvalidSecret)?;
         let code = match self.kind {
+            // The stored digits and period are not passed: both are fixed by
+            // the format, and an entry that arrived carrying a wrong value must
+            // still produce a code Steam accepts.
+            OtpKind::Steam => crate::otp::steam_at(&secret, unix_seconds),
             OtpKind::Totp => totp_at(
                 &secret,
                 unix_seconds,
@@ -246,7 +263,7 @@ impl OtpAuthUri {
         uri.push_str(self.algorithm.as_str());
         uri.push_str(&format!("&digits={}", self.digits));
         match self.kind {
-            OtpKind::Totp => uri.push_str(&format!("&period={}", self.period)),
+            OtpKind::Totp | OtpKind::Steam => uri.push_str(&format!("&period={}", self.period)),
             OtpKind::Hotp => uri.push_str(&format!("&counter={}", self.counter.unwrap_or(0))),
         }
         Zeroizing::new(uri)

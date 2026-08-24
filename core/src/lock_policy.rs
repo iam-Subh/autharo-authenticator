@@ -31,6 +31,18 @@ use crate::store::{MetaStore, StoreError};
 /// `meta` keys holding the lock policy.
 const META_LOCK_TIMEOUT: &str = "lock.timeout_seconds";
 const META_LOCK_ON_BACKGROUND: &str = "lock.on_background";
+const META_WIPE_AFTER_FAILURES: &str = "lock.wipe_after_failures";
+
+/// The fewest failed attempts FR-35's wipe may be armed with.
+///
+/// Below this the feature stops protecting the vault and starts destroying it.
+/// A pocket, a curious child, or a user misremembering which of two PINs they
+/// set will produce three wrong entries without any attacker involved — and
+/// unlike a password there is no reset: §16.4 says the server cannot decrypt
+/// anything, so a wrongly triggered wipe is permanent.
+pub const MIN_WIPE_THRESHOLD: u32 = 5;
+/// The most, so the setting cannot be armed at a number nothing ever reaches.
+pub const MAX_WIPE_THRESHOLD: u32 = 20;
 
 /// The sentinel for FR-33's "never". Stored rather than deleting the key, so
 /// that "the user chose never" is distinguishable from "never set".
@@ -51,6 +63,14 @@ pub struct LockPolicy {
     pub timeout_seconds: Option<u32>,
     /// FR-34: lock as soon as the application leaves the foreground.
     pub lock_on_background: bool,
+    /// FR-35: destroy the vault after this many consecutive failed unlocks.
+    ///
+    /// `None` — the default — is off, and that is a deliberate default rather
+    /// than an unfinished one. The threat it defends against is an attacker
+    /// holding the unlocked-adjacent device and guessing a PIN, which is real
+    /// but rare; the failure it causes is permanent, unrecoverable loss of
+    /// every account, which is neither. A user who wants it can say so.
+    pub wipe_after_failures: Option<u32>,
 }
 
 impl Default for LockPolicy {
@@ -58,6 +78,7 @@ impl Default for LockPolicy {
         Self {
             timeout_seconds: Some(DEFAULT_TIMEOUT_SECONDS),
             lock_on_background: false,
+            wipe_after_failures: None,
         }
     }
 }
@@ -80,11 +101,22 @@ impl LockPolicy {
             Some(_) => default.timeout_seconds,
         };
 
+        // Anything outside the permitted band reads as *off*, not as the
+        // nearest legal value. This setting destroys data, and a damaged or
+        // tampered byte must never arm it — clamping a stored `1` up to five
+        // would turn corruption into a wipe on the fifth mistyped PIN.
+        let wipe = read_i64(meta, META_WIPE_AFTER_FAILURES)?.and_then(|value| {
+            u32::try_from(value)
+                .ok()
+                .filter(|count| (MIN_WIPE_THRESHOLD..=MAX_WIPE_THRESHOLD).contains(count))
+        });
+
         Ok(Self {
             timeout_seconds: timeout,
             lock_on_background: read_i64(meta, META_LOCK_ON_BACKGROUND)?
                 .map(|value| value != 0)
                 .unwrap_or(default.lock_on_background),
+            wipe_after_failures: wipe,
         })
     }
 
@@ -98,6 +130,21 @@ impl LockPolicy {
             META_LOCK_ON_BACKGROUND,
             if self.lock_on_background { b"1" } else { b"0" },
         )?;
+
+        // Refused rather than clamped, for the same reason the read refuses:
+        // a caller asking to wipe after two failures has made a mistake, and
+        // quietly storing five would arm something they did not ask for.
+        match self.wipe_after_failures {
+            Some(count) if !(MIN_WIPE_THRESHOLD..=MAX_WIPE_THRESHOLD).contains(&count) => {
+                return Err(StoreError::InvalidValue {
+                    detail: format!(
+                        "a wipe threshold must be between {MIN_WIPE_THRESHOLD} and                          {MAX_WIPE_THRESHOLD} attempts, not {count}"
+                    ),
+                });
+            }
+            Some(count) => meta.set(META_WIPE_AFTER_FAILURES, count.to_string().as_bytes())?,
+            None => meta.set(META_WIPE_AFTER_FAILURES, b"0")?,
+        }
         Ok(())
     }
 }
@@ -135,6 +182,7 @@ mod tests {
                 let policy = LockPolicy {
                     timeout_seconds: timeout,
                     lock_on_background: background,
+                    ..LockPolicy::default()
                 };
                 policy.save(&meta).unwrap();
 
@@ -155,6 +203,7 @@ mod tests {
         LockPolicy {
             timeout_seconds: None,
             lock_on_background: false,
+            ..LockPolicy::default()
         }
         .save(&meta)
         .unwrap();
@@ -174,6 +223,7 @@ mod tests {
         LockPolicy {
             timeout_seconds: Some(0),
             lock_on_background: false,
+            ..LockPolicy::default()
         }
         .save(&meta)
         .unwrap();
@@ -205,6 +255,7 @@ mod tests {
         LockPolicy {
             timeout_seconds: Some(15),
             lock_on_background: true,
+            ..LockPolicy::default()
         }
         .save(&meta)
         .unwrap();

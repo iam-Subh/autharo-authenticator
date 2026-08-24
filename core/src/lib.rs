@@ -1,19 +1,26 @@
 //! authcore — shared core for the authenticator app (PRD stage S1).
 
 pub mod account;
+pub mod backoff;
+pub mod backup;
 pub mod base32;
 pub mod crypto;
 pub mod device_slot;
 pub mod entry;
 pub mod hlc;
+pub mod import;
 pub mod lock_policy;
 pub mod otp;
 pub mod otpauth;
 pub mod pin;
 pub mod reconcile;
 pub mod secret;
+pub mod session;
+pub mod share;
 pub mod store;
 pub mod sync;
+pub mod time_offset;
+pub mod transport;
 pub mod vault;
 
 pub use base32::Base32Error;

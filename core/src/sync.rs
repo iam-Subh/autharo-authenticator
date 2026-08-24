@@ -35,6 +35,7 @@
 //! here. This module stays free of `Vault`.
 
 use core::fmt;
+use std::collections::BTreeSet;
 
 use crate::hlc::{DriftOutcome, Hlc, HlcClock, clamp_drift};
 use crate::store::{Record, Store, StoreError};
@@ -85,6 +86,13 @@ pub enum SyncError {
     /// device may have missed a delete that has since been pruned. Only a full
     /// re-sync is correct.
     CursorTooOld,
+    /// The session is over. Retrying with the same token loops forever — the
+    /// caller has to sign in again.
+    ///
+    /// Its own variant for the same reason [`Self::CursorTooOld`] has one: the
+    /// action it calls for is different from a retry, and a client that cannot
+    /// tell them apart does the wrong one indefinitely.
+    Unauthorized,
     /// The network, or the server. Retried with backoff by the caller (OFF-06).
     Transport {
         detail: String,
@@ -99,6 +107,9 @@ impl fmt::Display for SyncError {
                 "This device is too far behind to catch up incrementally and \
                  needs a full re-sync.",
             ),
+            Self::Unauthorized => {
+                f.write_str("This device has been signed out. Sign in again to keep syncing.")
+            }
             Self::Transport { detail } => {
                 write!(f, "The sync server could not be reached: {detail}")
             }
@@ -123,8 +134,42 @@ type Result<T> = core::result::Result<T, SyncError>;
 /// server with partitions and dropped responses. A harness that exercised a
 /// second, similar engine would prove something about the harness.
 pub trait SyncTransport {
-    fn pull(&mut self, since: i64, limit: i64) -> Result<PullResponse>;
+    fn pull(&mut self, since: i64, limit: i64, mode: PullMode) -> Result<PullResponse>;
     fn push(&mut self, records: &[PushRecord]) -> Result<PushResponse>;
+}
+
+/// Why the client is asking for changes.
+///
+/// # Why the server has to be told
+///
+/// Section 10.6's watermark check exists to tell a *lagging* client that it may
+/// have missed a delete which has since been pruned. It compares the cursor the
+/// client saved against the watermark.
+///
+/// A full re-sync walks up from zero, so every cursor after the first page is
+/// below the watermark by construction — not because the client is behind, but
+/// because it is halfway through reading everything. Applying the check to those
+/// refuses page two of every re-sync on any vault larger than one page, and the
+/// re-sync then cannot complete: it fails before it stores a cursor, so the next
+/// attempt starts from the same place and fails identically. The device never
+/// syncs again, and nothing says so.
+///
+/// A missed delete cannot matter to a re-sync in any case. It is rebuilding from
+/// nothing, and drops whatever the server does not have.
+///
+/// The property harness found this at forty thousand operations, once the vault
+/// crossed five hundred records — one more than a page. Below that, a re-sync is
+/// a single request from zero, never trips the check, and works.
+///
+/// A parameter rather than a second method, so that no transport can be written
+/// that forgets to distinguish them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PullMode {
+    /// Resuming from the cursor this device saved. The watermark check applies.
+    Incremental,
+    /// Rebuilding local state from nothing (section 10.6). The watermark check
+    /// does not apply, and must not.
+    FullResync,
 }
 
 /// What one cycle did. Returned rather than logged, so a test can assert on it.
@@ -162,7 +207,7 @@ pub fn run_cycle<T: SyncTransport>(
     // Steps 1 to 3: pull, apply, store the cursor.
     let mut cursor = store.cursor()?;
     loop {
-        let response = transport.pull(cursor, PULL_LIMIT)?;
+        let response = transport.pull(cursor, PULL_LIMIT, PullMode::Incremental)?;
         report.pulled += response.records.len();
 
         for incoming in &response.records {
@@ -205,7 +250,23 @@ pub fn run_cycle<T: SyncTransport>(
         }
 
         if !batch.is_empty() {
-            let response = transport.push(&batch)?;
+            // A push that never reached the server counts against every record
+            // it carried (OFF-06). The count is what makes a record that keeps
+            // failing distinguishable from a device that is merely offline:
+            // the second clears on the next success, the first does not, and
+            // only the first is a defect.
+            //
+            // Recorded before the error propagates, because `?` on the line
+            // below leaves the cycle immediately.
+            let response = match transport.push(&batch) {
+                Ok(response) => response,
+                Err(error) => {
+                    for item in &batch {
+                        store.outbox_record_attempt(&item.entry_id, now_ms as i64)?;
+                    }
+                    return Err(error);
+                }
+            };
             report.pushed += response.accepted.len();
             report.conflicts += response.conflicts.len();
 
@@ -290,11 +351,27 @@ fn apply_remote(
         }
     };
 
+    // An incoming record carrying the timestamp the local one already has is
+    // not a rival version of the entry: it *is* the local version, coming back.
+    // That happens on every ordinary cycle, because a push does not move the
+    // cursor, so the next pull returns what this device just sent.
+    //
+    // Recording it as a discarded candidate would be quietly destructive. A
+    // pending candidate stops the entry producing a code (section 10.4 step 5),
+    // so every HOTP entry this device had pushed would refuse to produce one
+    // until the next unlock — and on a device that is never locked, refuse
+    // permanently. Nothing about it would look wrong: the records agree, the
+    // counters agree, and the codes simply stop.
+    let same_version = local
+        .as_ref()
+        .is_some_and(|current| current.hlc == hlc && current.deleted == incoming.deleted);
+
     if !take {
         // The local record won. The remote is discarded — and may hold the
         // larger counter, which the HLC comparison above cannot see.
         if let Some(ciphertext) = &incoming.ciphertext
             && !incoming.deleted
+            && !same_version
         {
             store.record_reconcile(
                 &incoming.entry_id,
@@ -338,37 +415,73 @@ fn apply_remote(
     Ok(Applied::Took { clamped })
 }
 
-/// Section 10.6: replace every local record with the server's.
+/// Section 10.6: rebuild the local state from the server after the cursor has
+/// become unusable.
 ///
-/// Used after [`SyncError::CursorTooOld`], on a new device, and when the user
-/// asks. The replacement is one transaction, so a failure part way leaves the
-/// previous state rather than half of each.
-pub fn full_resync<T: SyncTransport>(store: &mut Store, transport: &mut T) -> Result<usize> {
+/// Used after [`SyncError::CursorTooOld`] and on a device joining an existing
+/// vault.
+///
+/// # Why this is not a wholesale replacement
+///
+/// It was one, and it lost data. A cursor goes stale because the device has
+/// been away, and a device that has been away is exactly the one with local
+/// changes still waiting in the outbox. Replacing every record with the
+/// server's threw those away — and for a delete that meant the tombstone
+/// vanished and the server's live copy came back, which section 10.4 forbids
+/// outright: "the delete wins". Nothing announced it. The entry the user
+/// deleted was simply there again the next time they looked.
+///
+/// So the server's records go through the same rules a normal cycle uses,
+/// including the reconcile bookkeeping, and a local record is dropped only if
+/// the server does not have it *and* this device is not waiting to push it.
+///
+/// The user-facing **Wipe and re-download** is the wholesale one, and calls
+/// [`Store::replace_all`] directly. There the user has asked for the server's
+/// copy and nothing else.
+pub fn full_resync<T: SyncTransport>(
+    store: &mut Store,
+    clock: &mut HlcClock,
+    transport: &mut T,
+    now_ms: u64,
+) -> Result<usize> {
     let mut all = Vec::new();
     let mut cursor = 0;
 
     loop {
-        let response = transport.pull(cursor, PULL_LIMIT)?;
+        let response = transport.pull(cursor, PULL_LIMIT, PullMode::FullResync)?;
         cursor = response.cursor;
         let has_more = response.has_more;
-
-        all.extend(response.records.into_iter().map(|incoming| Record {
-            id: incoming.entry_id,
-            ciphertext: incoming.ciphertext.unwrap_or_default(),
-            nonce: incoming.nonce.unwrap_or_default(),
-            hlc: incoming.hlc,
-            deleted: incoming.deleted,
-            server_seq: Some(incoming.server_seq),
-            updated_at: 0,
-        }));
+        all.extend(response.records);
 
         if !has_more {
             break;
         }
     }
 
+    let held_by_server: BTreeSet<&str> = all.iter().map(|r| r.entry_id.as_str()).collect();
+    let pending: BTreeSet<String> = store
+        .outbox()?
+        .into_iter()
+        .map(|item| item.entry_id)
+        .collect();
+
+    // Anything the server has never heard of that this device is not about to
+    // tell it about is a leftover of the gap in the cursor, and goes.
+    let stale: Vec<String> = store
+        .list(true)?
+        .into_iter()
+        .filter(|record| {
+            !held_by_server.contains(record.id.as_str()) && !pending.contains(&record.id)
+        })
+        .map(|record| record.id)
+        .collect();
+    store.forget_entries(&stale)?;
+
     let count = all.len();
-    store.replace_all(&all, cursor)?;
+    for incoming in &all {
+        apply_remote(store, clock, incoming, now_ms)?;
+    }
+    store.set_cursor(cursor)?;
     Ok(count)
 }
 

@@ -14,7 +14,7 @@ use authcore::reconcile;
 use authcore::secret::SecretString;
 use authcore::store::{MetaStore, Record, Store};
 use authcore::sync::{
-    self, PullResponse, PushRecord, PushResponse, SyncError, SyncTransport, WireRecord,
+    self, PullMode, PullResponse, PushRecord, PushResponse, SyncError, SyncTransport, WireRecord,
 };
 use authcore::vault::Vault;
 
@@ -51,6 +51,8 @@ fn hotp(counter: u64) -> Payload {
         order: String::new(),
         created_at: NOW as i64,
         note: String::new(),
+        tags: Vec::new(),
+        trashed_at: None,
         extra: Default::default(),
     })
 }
@@ -97,7 +99,12 @@ impl FakeServer {
 }
 
 impl SyncTransport for FakeServer {
-    fn pull(&mut self, since: i64, _limit: i64) -> Result<PullResponse, SyncError> {
+    fn pull(
+        &mut self,
+        since: i64,
+        _limit: i64,
+        _mode: PullMode,
+    ) -> Result<PullResponse, SyncError> {
         let records: Vec<WireRecord> = self
             .records
             .iter()
@@ -172,6 +179,52 @@ fn the_larger_counter_wins_even_though_the_smaller_one_was_newer() {
         "the larger counter must survive, whichever HLC was higher"
     );
     assert!(!reconcile::is_blocked(&vault, "e1").unwrap());
+}
+
+/// The same conflict, on a device that is *unlocked* when it syncs.
+///
+/// Found by the property harness. Section 10.4 defers the counter rule because
+/// the cycle may have no key — but a cycle on an unlocked device has one, and
+/// deferring there was quietly destructive. The candidate waited for an unlock
+/// that was never going to come, because the device was already unlocked, and
+/// step 5 refuses to produce a code for an entry with a candidate outstanding.
+/// So an ordinary sync stopped the entry working for as long as the app stayed
+/// open, with the records and the counters agreeing the whole time.
+#[test]
+fn a_conflict_resolved_while_unlocked_is_reconciled_by_the_same_cycle() {
+    let mut vault = vault();
+    let mut server = FakeServer::default();
+
+    put(
+        &mut vault,
+        "e1",
+        &hotp(9),
+        Hlc::new(NOW + 10_000, 0, DEVICE_A),
+    );
+
+    let (ciphertext, nonce) = sealed_elsewhere("e1", &hotp(42));
+    server.hold(WireRecord {
+        entry_id: "e1".to_string(),
+        ciphertext: Some(ciphertext),
+        nonce: Some(nonce),
+        hlc: Hlc::new(NOW, 0, DEVICE_B),
+        deleted: false,
+        server_seq: 0,
+    });
+
+    // Through the vault, which is what an unlocked device does.
+    let outcome = vault.sync(&mut server, NOW + 20_000).unwrap();
+
+    assert_eq!(outcome.reconcile.counters_raised, 1);
+    assert_eq!(
+        vault.get("e1").unwrap().payload.as_otp().unwrap().counter,
+        Some(42),
+        "the larger counter, without waiting for a lock the user may never use"
+    );
+    assert!(
+        !reconcile::is_blocked(&vault, "e1").unwrap(),
+        "and the entry produces codes again immediately"
+    );
 }
 
 /// The other direction: the remote wins on HLC and the *local* record holds
@@ -373,6 +426,8 @@ fn a_totp_conflict_clears_without_a_change() {
         order: String::new(),
         created_at: NOW as i64,
         note: String::new(),
+        tags: Vec::new(),
+        trashed_at: None,
         extra: Default::default(),
     });
 

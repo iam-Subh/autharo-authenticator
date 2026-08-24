@@ -346,10 +346,28 @@ fn the_recovery_phrase_does_not_print() {
 
     let rendered = format!("{phrase:?}");
     assert!(rendered.contains("redacted"));
+
+    // Whole words, not substrings.
+    //
+    // The substring form flaked at about one run in a hundred, and on its own
+    // redaction marker: `act` is word twenty of the BIP-39 English list, and it
+    // sits inside "red-act-ed". Twenty-four words drawn from 2048 hit it 1.2%
+    // of the time.
+    //
+    // A test that fails for the wrong reason is the mirror of one that passes
+    // for the wrong reason, and it does more damage: the first gets rerun until
+    // it goes green, and everyone learns to ignore it. Tokenising says exactly
+    // what the property is — no rendering emits a word of the phrase — and says
+    // nothing about letters that happen to sit next to each other.
+    let tokens: Vec<&str> = rendered
+        .split(|c: char| !c.is_ascii_alphabetic())
+        .filter(|token| !token.is_empty())
+        .collect();
+
     for word in phrase.words() {
         assert!(
-            !rendered.contains(word),
-            "Debug leaked a word of the phrase"
+            !tokens.contains(&word),
+            "Debug leaked {word:?}, a word of the phrase"
         );
     }
 }
@@ -407,4 +425,92 @@ fn the_kdf_parameters_are_stored_with_the_slot() {
     assert_eq!(slot.params.memory_kib, 64 * 1024, "64 MiB on mobile");
     assert_eq!(slot.params.iterations, 3);
     assert_eq!(slot.params.lanes, 4);
+}
+
+// ---------------------------------------------------------------------------
+// FR-29's second half: the recovery phrase, again
+// ---------------------------------------------------------------------------
+
+/// The property that makes rotation acceptable at all.
+///
+/// A user asking for their phrase again has usually lost the copy they made, so
+/// the new phrase must open the vault they already have. Handing back 24 valid
+/// words that unwrap a *different* key would look like success and lose every
+/// entry — the same failure `recovery_returns_the_identical_vault_key` guards
+/// on the original path.
+#[test]
+fn a_rotated_phrase_opens_the_same_vault() {
+    let meta = meta();
+    let original = existing_vault_key();
+    account::create_account(&meta, EMAIL, PASSWORD, &original).unwrap();
+
+    let fresh = account::rotate_recovery_phrase(&meta, &original).unwrap();
+
+    assert_eq!(
+        account::unlock_with_recovery(&meta, fresh.as_str())
+            .unwrap()
+            .expose(),
+        original.expose(),
+        "the new phrase opened a different vault, so every entry would be lost"
+    );
+}
+
+/// The other half, and the reason a user asks: the copy that leaked must die.
+///
+/// If the old phrase kept working, rotation would be theatre — someone who saw
+/// the written-down words would still hold the vault, and the user would
+/// believe they had fixed it.
+#[test]
+fn the_old_phrase_stops_working_after_rotation() {
+    let meta = meta();
+    let original = existing_vault_key();
+    let (_, old) = account::create_account(&meta, EMAIL, PASSWORD, &original).unwrap();
+
+    let old_words = old.as_str().to_string();
+    account::rotate_recovery_phrase(&meta, &original).unwrap();
+
+    assert!(
+        matches!(
+            account::unlock_with_recovery(&meta, &old_words),
+            Err(AccountError::WrongRecoveryKey)
+        ),
+        "the superseded phrase still opens the vault"
+    );
+}
+
+/// Rotation replaces the recovery slot and touches nothing else.
+#[test]
+fn rotation_leaves_the_password_slot_alone() {
+    let meta = meta();
+    let original = existing_vault_key();
+    account::create_account(&meta, EMAIL, PASSWORD, &original).unwrap();
+
+    account::rotate_recovery_phrase(&meta, &original).unwrap();
+
+    assert_eq!(
+        account::unlock_with_password(&meta, PASSWORD)
+            .unwrap()
+            .expose(),
+        original.expose(),
+        "rotating the recovery phrase locked the user out of their password"
+    );
+}
+
+/// Two rotations produce two different phrases.
+///
+/// Cheap to assert and it catches the one implementation mistake that would
+/// otherwise pass every test above: deriving the recovery key from something
+/// fixed rather than generating it.
+#[test]
+fn each_rotation_produces_a_new_phrase() {
+    let meta = meta();
+    let original = existing_vault_key();
+    let (_, first) = account::create_account(&meta, EMAIL, PASSWORD, &original).unwrap();
+
+    let second = account::rotate_recovery_phrase(&meta, &original).unwrap();
+    let third = account::rotate_recovery_phrase(&meta, &original).unwrap();
+
+    assert_ne!(first.as_str(), second.as_str());
+    assert_ne!(second.as_str(), third.as_str());
+    assert_eq!(second.words().len(), RECOVERY_WORDS);
 }

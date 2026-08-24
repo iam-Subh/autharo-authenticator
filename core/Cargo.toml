@@ -5,8 +5,27 @@ edition = "2024"
 
 [dependencies]
 argon2 = "0.5.3"
+base64 = "0.22"
 bip39 = "2.2.2"
 chacha20poly1305 = "0.11.0"
+# Ente Authenticator exports use libsodium's XChaCha20-Poly1305 secret-stream
+# wire format. The high-level AEAD above is not wire-compatible with that
+# format, so the stream cipher and authenticator are used directly.
+chacha20 = "0.10.1"
+poly1305 = "0.9.1"
+
+# For reading other applications' encrypted exports (FR-15, FR-15a). Aegis uses
+# scrypt and AES-256-GCM; 2FAS uses PBKDF2-HMAC-SHA256 and AES-256-GCM. Neither
+# is a choice this project made — they are the formats as shipped, and reading
+# them means implementing them exactly.
+#
+# Crates rather than written out, unlike the base64 and date parsers elsewhere
+# here. Those are encodings, where a mistake is visible immediately. These are
+# cryptographic primitives, where a mistake is invisible and catastrophic, and
+# hand-rolling AES-GCM to save a dependency would be indefensible.
+aes-gcm = "0.11.0"
+pbkdf2 = "0.13.0"
+scrypt = "0.12.0"
 getrandom = "0.4.3"
 hkdf = "0.13.0"
 hmac = "0.13.0"
@@ -32,3 +51,12 @@ sha2 = "0.11.0"
 subtle = "2.6.1"
 uuid = { version = "1.24.1", features = ["v4"] }
 zeroize = "1.9.0"
+
+[dev-dependencies]
+# For the convergence harness run over real HTTP (tests/convergence_http.rs).
+# Blocking, because SyncTransport is synchronous: the client the app ships
+# calls it from a worker thread, and an async transport here would be testing
+# a shape nothing uses.
+reqwest = { version = "0.12", default-features = false, features = [
+    "blocking", "json", "rustls-tls",
+] }

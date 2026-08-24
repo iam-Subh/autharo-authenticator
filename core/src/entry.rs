@@ -19,7 +19,7 @@ use crate::otpauth::OtpAuthUri;
 use crate::secret::SecretString;
 
 /// The schema version this build writes.
-pub const CURRENT_VERSION: u32 = 1;
+pub const CURRENT_VERSION: u32 = 2;
 /// Longest note the user interface accepts (section 12.2).
 pub const MAX_NOTE_CHARS: usize = 512;
 /// Largest payload before encryption (section 12.2). The server quota in
@@ -59,6 +59,15 @@ impl std::error::Error for PayloadError {}
 pub enum Payload {
     Totp(OtpEntry),
     Hotp(OtpEntry),
+    /// A Steam Guard code (FR-06).
+    ///
+    /// Carries an `OtpEntry` like the others rather than a type of its own,
+    /// because everything except the final encoding is shared — the same
+    /// secret, the same thirty-second step, the same truncation. Its `digits`
+    /// and `period` are fixed by the format and are not read when the code is
+    /// produced; they are stored so that an entry round-trips through export
+    /// and back unchanged.
+    Steam(OtpEntry),
     Folder(Folder),
 }
 
@@ -95,6 +104,13 @@ pub struct OtpEntry {
     pub created_at: i64,
     #[serde(default)]
     pub note: String,
+    /// User-defined labels. One entry can have more than one label.
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// Epoch milliseconds when the user moved this entry to trash.
+    /// A live entry has no value.
+    #[serde(default)]
+    pub trashed_at: Option<i64>,
     /// Fields written by a newer client, preserved on write.
     #[serde(flatten)]
     pub extra: Map<String, Value>,
@@ -129,7 +145,7 @@ impl Payload {
     /// size limits so the user sees a message from the client rather than a
     /// quota error from the server.
     pub fn to_json(&self) -> Result<Zeroizing<Vec<u8>>, PayloadError> {
-        if let Payload::Totp(entry) | Payload::Hotp(entry) = self {
+        if let Payload::Totp(entry) | Payload::Hotp(entry) | Payload::Steam(entry) = self {
             let chars = entry.note.chars().count();
             if chars > MAX_NOTE_CHARS {
                 return Err(PayloadError::NoteTooLong { chars });
@@ -156,16 +172,22 @@ impl Payload {
         match self {
             Self::Totp(_) => "totp",
             Self::Hotp(_) => "hotp",
+            Self::Steam(_) => "steam",
             Self::Folder(_) => "folder",
         }
     }
 
-    /// The account inside, for the two OTP variants.
+    /// The account inside, for every variant that holds one.
     pub fn as_otp(&self) -> Option<&OtpEntry> {
         match self {
-            Self::Totp(entry) | Self::Hotp(entry) => Some(entry),
+            Self::Totp(entry) | Self::Hotp(entry) | Self::Steam(entry) => Some(entry),
             Self::Folder(_) => None,
         }
+    }
+
+    /// True for an entry whose code is produced by [`crate::otp::steam`].
+    pub fn is_steam(&self) -> bool {
+        matches!(self, Self::Steam(_))
     }
 }
 
@@ -187,11 +209,14 @@ impl OtpEntry {
             order: String::new(),
             created_at,
             note: String::new(),
+            tags: Vec::new(),
+            trashed_at: None,
             extra: Map::new(),
         };
         match uri.kind {
             OtpKind::Totp => Payload::Totp(entry),
             OtpKind::Hotp => Payload::Hotp(entry),
+            OtpKind::Steam => Payload::Steam(entry),
         }
     }
 }
@@ -225,7 +250,7 @@ mod tests {
         let object = value.as_object().unwrap();
 
         assert_eq!(object["type"], "totp");
-        assert_eq!(object["v"], 1);
+        assert_eq!(object["v"], CURRENT_VERSION);
         assert_eq!(object["issuer"], "GitHub");
         assert_eq!(object["account"], "rupsa@example.com");
         assert_eq!(object["algorithm"], "SHA1");
@@ -242,6 +267,8 @@ mod tests {
             "order",
             "created_at",
             "note",
+            "tags",
+            "trashed_at",
         ] {
             assert!(object.contains_key(field), "missing field {field}");
         }
@@ -274,11 +301,41 @@ mod tests {
         let payload = Payload::from_json(from_v2).unwrap();
         let entry = payload.as_otp().unwrap();
         assert_eq!(entry.v, 2);
-        assert_eq!(entry.extra["tags"][0], "work");
+        assert_eq!(entry.tags, ["work", "finance"]);
 
         let value: Value = serde_json::from_slice(&payload.to_json().unwrap()).unwrap();
         assert_eq!(value["tags"][1], "finance");
         assert_eq!(value["pinned_at"], 1_755_734_400_000i64);
+    }
+
+    #[test]
+    fn an_old_entry_defaults_to_live_with_no_tags() {
+        let old = br#"{
+            "v": 1,
+            "type": "totp",
+            "account": "acct",
+            "secret": "MZXW6YQ"
+        }"#;
+
+        let payload = Payload::from_json(old).unwrap();
+        let entry = payload.as_otp().unwrap();
+        assert!(entry.tags.is_empty());
+        assert_eq!(entry.trashed_at, None);
+    }
+
+    #[test]
+    fn trash_time_and_tags_round_trip_inside_the_encrypted_payload() {
+        let Payload::Totp(mut entry) = sample() else {
+            unreachable!()
+        };
+        entry.tags = vec!["work".to_string(), "finance".to_string()];
+        entry.trashed_at = Some(1_755_734_400_000);
+
+        let payload = Payload::Totp(entry);
+        let reopened = Payload::from_json(&payload.to_json().unwrap()).unwrap();
+        let reopened = reopened.as_otp().unwrap();
+        assert_eq!(reopened.tags, ["work", "finance"]);
+        assert_eq!(reopened.trashed_at, Some(1_755_734_400_000));
     }
 
     #[test]

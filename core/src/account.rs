@@ -245,6 +245,42 @@ pub fn create_account(
     Ok((account, phrase))
 }
 
+/// FR-29's second half: a recovery phrase the user can write down again.
+///
+/// # Why this rotates rather than reprints
+///
+/// The phrase *is* the recovery key — 256 bits of entropy encoded as 24 BIP-39
+/// words — and the key is never stored. What is stored is the vault key sealed
+/// under it, which is exactly the direction that cannot be run backwards. So
+/// there is no old phrase to fetch, and a function that claimed to reprint one
+/// would have to have kept it, which is the thing section 9.2.3 forbids.
+///
+/// Rotating is the honest version of the same feature, and the better one: a
+/// user who wants their phrase again usually wants it because the copy they
+/// made is lost, destroyed, or was seen by someone. In every one of those cases
+/// the right answer is a new phrase and the old one dead — not the old one
+/// handed back.
+///
+/// The caller must have re-authenticated: this takes the vault key, which only
+/// an unlocked device holds, and the interface above it asks for the account
+/// password again before calling.
+///
+/// **The old phrase stops working the moment this returns.** The new slot is
+/// saved before the phrase is handed back, so there is no window in which the
+/// user has been shown a phrase that was not stored.
+pub fn rotate_recovery_phrase(meta: &MetaStore, vault_key: &VaultKey) -> Result<RecoveryPhrase> {
+    let mut account = load(meta)?.ok_or(AccountError::EmailRequired)?;
+    let (recovery_slot, phrase) = build_recovery_slot(vault_key)?;
+
+    // Saved first. Returning the phrase and then failing to store the slot
+    // would leave the user holding 24 words that open nothing, with every
+    // reason to believe they work.
+    account.recovery_slot = recovery_slot;
+    save(meta, &account)?;
+
+    Ok(phrase)
+}
+
 /// Derives the password slot's KEK and wraps the vault key (section 9.2.1).
 fn build_password_slot(password: &str, vault_key: &VaultKey) -> Result<PasswordSlot> {
     let salt = pin::generate_salt()?;
@@ -458,9 +494,13 @@ fn decode_params(bytes: &[u8]) -> Result<KdfParams> {
             detail: format!("the KDF parameters are unreadable: {text:?}"),
         })
     };
-    Ok(KdfParams {
+    let params = KdfParams {
         memory_kib: parse(parts[0])?,
         iterations: parse(parts[1])?,
         lanes: parse(parts[2])?,
-    })
+    };
+    params.validate().map_err(|_| AccountError::CorruptSlot {
+        detail: "the KDF parameters are outside the supported range".to_string(),
+    })?;
+    Ok(params)
 }

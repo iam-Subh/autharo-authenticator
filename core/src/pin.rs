@@ -58,6 +58,13 @@ pub const MEMORY_KIB: u32 = 64 * 1024;
 pub const ITERATIONS: u32 = 3;
 pub const LANES: u32 = 4;
 
+/// Upper bounds for parameters read from a server, backup, or metadata file.
+/// These bounds prevent an untrusted value from requesting unbounded memory
+/// or CPU work before Argon2 can reject it.
+pub const MAX_MEMORY_KIB: u32 = 256 * 1024;
+pub const MAX_ITERATIONS: u32 = 10;
+pub const MAX_LANES: u32 = 8;
+
 /// The cost parameters a particular slot was created with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct KdfParams {
@@ -76,6 +83,21 @@ impl Default for KdfParams {
     }
 }
 
+impl KdfParams {
+    pub fn validate(self) -> Result<(), PinError> {
+        if self.memory_kib == 0
+            || self.memory_kib > MAX_MEMORY_KIB
+            || self.iterations == 0
+            || self.iterations > MAX_ITERATIONS
+            || self.lanes == 0
+            || self.lanes > MAX_LANES
+        {
+            return Err(PinError::KdfParametersOutOfRange);
+        }
+        Ok(())
+    }
+}
+
 /// Why a PIN could not be accepted or used.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PinError {
@@ -85,6 +107,9 @@ pub enum PinError {
     /// A PIN that is all one digit, or a straight run. Refused because these
     /// are the first guesses anyone makes.
     TooPredictable,
+    /// Parameters from external data exceed the application's resource
+    /// limits or contain zero.
+    KdfParametersOutOfRange,
     /// The KDF could not run, which on a phone means it could not get its
     /// 64 MiB.
     KdfFailed { reason: String },
@@ -101,6 +126,9 @@ impl fmt::Display for PinError {
                 "Choose a less predictable PIN. Repeated digits and runs like \
                  123456 are the first ones an attacker tries.",
             ),
+            Self::KdfParametersOutOfRange => {
+                f.write_str("The key derivation parameters are outside the supported range.")
+            }
             Self::KdfFailed { reason } => {
                 write!(f, "This device could not prepare the PIN for use: {reason}")
             }
@@ -163,6 +191,7 @@ pub fn derive_kek(
     salt: &[u8],
     params: KdfParams,
 ) -> Result<Zeroizing<[u8; KEY_LEN]>, PinError> {
+    params.validate()?;
     let argon = Argon2::new(
         Algorithm::Argon2id,
         Version::V0x13,
@@ -297,6 +326,34 @@ mod tests {
         assert_eq!(params.memory_kib, 64 * 1024, "64 MiB");
         assert_eq!(params.iterations, 3);
         assert_eq!(params.lanes, 4);
+    }
+
+    #[test]
+    fn untrusted_parameters_cannot_request_unbounded_resources() {
+        for params in [
+            KdfParams {
+                memory_kib: MAX_MEMORY_KIB + 1,
+                iterations: 1,
+                lanes: 1,
+            },
+            KdfParams {
+                memory_kib: 8,
+                iterations: MAX_ITERATIONS + 1,
+                lanes: 1,
+            },
+            KdfParams {
+                memory_kib: 8,
+                iterations: 1,
+                lanes: MAX_LANES + 1,
+            },
+            KdfParams {
+                memory_kib: 0,
+                iterations: 1,
+                lanes: 1,
+            },
+        ] {
+            assert_eq!(params.validate(), Err(PinError::KdfParametersOutOfRange));
+        }
     }
 
     /// The end-to-end property the module exists for: the PIN layer wraps and

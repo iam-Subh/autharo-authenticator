@@ -8,7 +8,7 @@
 use authcore::hlc::{Hlc, HlcClock};
 use authcore::store::{MetaStore, Record, Store};
 use authcore::sync::{
-    self, PullResponse, PushRecord, PushResponse, SyncError, SyncTransport, WireRecord,
+    self, PullMode, PullResponse, PushRecord, PushResponse, SyncError, SyncTransport, WireRecord,
 };
 
 const DEVICE_A: u64 = 0xaaaa_0000_0000_0001;
@@ -58,8 +58,11 @@ impl FakeServer {
 }
 
 impl SyncTransport for FakeServer {
-    fn pull(&mut self, since: i64, limit: i64) -> Result<PullResponse, SyncError> {
-        if since > 0 && since <= self.prune_watermark {
+    fn pull(&mut self, since: i64, limit: i64, mode: PullMode) -> Result<PullResponse, SyncError> {
+        // The server's rule, `full` flag and all: a re-sync walks up from
+        // zero, so its later pages ask from below the watermark by
+        // construction and must not be refused.
+        if mode == PullMode::Incremental && since > 0 && since <= self.prune_watermark {
             return Err(SyncError::CursorTooOld);
         }
 
@@ -88,20 +91,33 @@ impl SyncTransport for FakeServer {
         let mut conflicts = Vec::new();
 
         for record in records {
-            let held = self.held(&record.entry_id).cloned();
-            let agrees = match (&held, record.base_hlc) {
-                (None, None) => true,
-                (Some(current), Some(base)) => current.hlc == base,
-                _ => false,
-            };
-
-            if agrees {
-                self.store(record);
-                accepted.push(record.entry_id.clone());
-            } else if let Some(current) = held {
-                conflicts.push(current);
+            // The base-revision check and nothing more, exactly as
+            // `server/src/vault.rs` reads it: a conflict needs a record to
+            // conflict *with*. A base the server cannot check because it holds
+            // nothing for the entry is accepted as a create.
+            //
+            // The earlier version treated that as neither accepted nor
+            // conflicted, and the record then existed nowhere: the client
+            // never cleared it from the outbox and had nothing to resolve, so
+            // it retried the same push forever. The property harness found it
+            // at forty thousand operations, as three devices each holding only
+            // their own creations.
+            match self.held(&record.entry_id).cloned() {
+                Some(current) if record.base_hlc != Some(current.hlc) => {
+                    conflicts.push(current);
+                }
+                _ => {
+                    self.store(record);
+                    accepted.push(record.entry_id.clone());
+                }
             }
         }
+
+        assert_eq!(
+            accepted.len() + conflicts.len(),
+            records.len(),
+            "every pushed record must be answered for, one way or the other"
+        );
 
         if self.drop_next_push_response {
             self.drop_next_push_response = false;
@@ -457,15 +473,18 @@ fn a_cursor_at_the_watermark_is_refused() {
     assert!(matches!(error, SyncError::CursorTooOld));
 }
 
+/// A record the server has never heard of and this device is not waiting to
+/// push is a leftover of the gap the stale cursor left. It goes.
 #[test]
-fn a_full_resync_replaces_local_state() {
+fn a_full_resync_drops_local_state_the_server_does_not_have() {
     let mut store = store();
     let mut clock = HlcClock::new(DEVICE_A);
     let mut server = FakeServer::default();
 
-    // Local state the server has never heard of, as a device left behind by a
-    // prune would hold.
     local_write(&mut store, &mut clock, "stale", b"old", NOW);
+    // Pushed and accepted, so nothing is waiting: this is state the device
+    // holds only because it has been away.
+    store.outbox_clear(&["stale".to_string()]).unwrap();
 
     server.store(&PushRecord {
         entry_id: "fresh".to_string(),
@@ -476,17 +495,265 @@ fn a_full_resync_replaces_local_state() {
         base_hlc: None,
     });
 
-    let count = sync::full_resync(&mut store, &mut server).unwrap();
+    let count = sync::full_resync(&mut store, &mut clock, &mut server, NOW).unwrap();
 
     assert_eq!(count, 1);
-    assert!(
-        store.get("stale").unwrap().is_none(),
-        "a re-sync replaces local state rather than merging into it"
-    );
+    assert!(store.get("stale").unwrap().is_none());
     assert!(store.get("fresh").unwrap().is_some());
+}
+
+/// A cycle that resolved nothing must leave nothing behind.
+///
+/// A push does not move the cursor, so the next pull returns the records this
+/// device just sent. Treating a record whose timestamp equals the one already
+/// held as a discarded rival made every entry a device had pushed refuse to
+/// produce a code (section 10.4 step 5) — for one cycle on a device that locks,
+/// and permanently on one that does not. Nothing about it looked wrong: the
+/// records agreed and the counters agreed, and the codes simply stopped.
+///
+/// The two report assertions are the point of the test, not decoration. An
+/// earlier version of this seeded the record through `apply_remote`, which is
+/// the server-originated path and touches no outbox — so the first cycle
+/// pushed nothing, the second pulled nothing back, and the test passed whatever
+/// `apply_remote` did. It passed with the fix reverted, which is how that was
+/// found.
+#[test]
+fn a_record_coming_back_unchanged_is_not_a_conflict() {
+    let mut store = store();
+    let mut clock = HlcClock::new(DEVICE_A);
+    let mut server = FakeServer::default();
+
+    local_write(&mut store, &mut clock, "e1", b"body", NOW);
+
+    let first = sync::run_cycle(&mut store, &mut clock, &mut server, NOW + 1).unwrap();
+    assert_eq!(
+        first.pushed, 1,
+        "the first cycle has to push, or the rest of this proves nothing"
+    );
+
+    let second = sync::run_cycle(&mut store, &mut clock, &mut server, NOW + 2).unwrap();
+    assert_eq!(
+        second.pulled, 1,
+        "the second cycle has to pull that record back, or the rest proves nothing"
+    );
+
     assert!(
-        store.outbox().unwrap().is_empty(),
-        "the outbox belongs to state that no longer exists"
+        !store.reconcile_pending_for("e1").unwrap(),
+        "an entry stopped producing codes because its own record came back"
+    );
+    assert_eq!(
+        store.reconcile_pending().unwrap().len(),
+        0,
+        "a record identical to the one already held is not a discarded candidate"
+    );
+}
+
+/// OFF-06: a push that never reached the server counts against what it carried.
+///
+/// The count is the only thing separating "this device is offline" from "this
+/// record keeps being rejected". The first clears on the next success and needs
+/// no attention; the second is a defect that would otherwise sit in the outbox
+/// forever, retried every cycle, reported nowhere.
+///
+/// `outbox_record_attempt` existed for a stage with no caller at all, which is
+/// its own lesson: a column nothing writes reads exactly like a column nothing
+/// needed.
+#[test]
+fn a_push_that_fails_is_counted_against_the_records_it_carried() {
+    let mut store = store();
+    let mut clock = HlcClock::new(DEVICE_A);
+    let mut server = FakeServer::default();
+
+    local_write(&mut store, &mut clock, "e1", b"one", NOW);
+    local_write(&mut store, &mut clock, "e2", b"two", NOW);
+
+    assert!(
+        store
+            .outbox()
+            .unwrap()
+            .iter()
+            .all(|item| item.attempts == 0),
+        "nothing has been attempted yet"
+    );
+
+    server.drop_next_push_response = true;
+    let error = sync::run_cycle(&mut store, &mut clock, &mut server, NOW + 1).unwrap_err();
+    assert!(matches!(error, SyncError::Transport { .. }));
+
+    for item in store.outbox().unwrap() {
+        assert_eq!(
+            item.attempts, 1,
+            "{} was carried by the failed push and must count it",
+            item.entry_id
+        );
+        assert_eq!(item.last_attempt, Some((NOW + 1) as i64));
+    }
+
+    // And the records are still queued. A failed push must not look like a
+    // delivered one.
+    assert_eq!(store.outbox().unwrap().len(), 2);
+}
+
+/// A re-sync of a vault larger than one page, on a device whose cursor is
+/// already stale.
+///
+/// The bug this pins was total and permanent, and took forty thousand random
+/// operations to reach because it needs more than five hundred records:
+///
+/// 1. The device falls behind the prune watermark, so its incremental pull is
+///    refused and it starts a full re-sync.
+/// 2. Page one asks from zero, which the watermark check skips, and returns
+///    five hundred records.
+/// 3. Page two asks from the sequence page one ended on — which is below the
+///    watermark, because everything is. The old check refused it.
+/// 4. `full_resync` fails before it stores a cursor, so the next attempt
+///    starts from exactly the same place and fails identically.
+///
+/// The device never syncs again. It keeps making local changes, never sees
+/// anyone else's, and nothing reports an error the user would see. Under five
+/// hundred records the re-sync is a single request and none of this happens,
+/// which is why every smaller test passed.
+#[test]
+fn a_full_resync_pages_past_the_prune_watermark() {
+    let mut store = store();
+    let mut clock = HlcClock::new(DEVICE_A);
+    let mut server = FakeServer::default();
+
+    // More than one page, so the re-sync has to ask for a second one.
+    const RECORDS: usize = 600;
+    for i in 0..RECORDS {
+        server.store(&PushRecord {
+            entry_id: format!("entry-{i:04}"),
+            ciphertext: Some(b"body".to_vec()),
+            nonce: Some(vec![3; 24]),
+            hlc: Hlc::new(NOW + i as u64, 0, DEVICE_B),
+            deleted: false,
+            base_hlc: None,
+        });
+    }
+
+    // Everything this device could ask for is behind the watermark.
+    server.prune_watermark = server.next_seq;
+
+    let count = sync::full_resync(&mut store, &mut clock, &mut server, NOW).unwrap();
+
+    assert_eq!(
+        count, RECORDS,
+        "the re-sync must read every page, not the first"
+    );
+    assert_eq!(store.list(true).unwrap().len(), RECORDS);
+    assert!(
+        store.cursor().unwrap() > 0,
+        "a re-sync that stores no cursor repeats itself forever"
+    );
+}
+
+/// The control: the watermark check still refuses a stale *incremental* pull.
+///
+/// Without this, making the re-sync work by removing the check altogether would
+/// pass the test above and quietly delete the rule it exists to enforce.
+#[test]
+fn an_incremental_pull_is_still_refused_below_the_watermark() {
+    let mut store = store();
+    let mut clock = HlcClock::new(DEVICE_A);
+    let mut server = FakeServer::default();
+
+    server.store(&PushRecord {
+        entry_id: "e1".to_string(),
+        ciphertext: Some(b"body".to_vec()),
+        nonce: Some(vec![3; 24]),
+        hlc: Hlc::new(NOW, 0, DEVICE_B),
+        deleted: false,
+        base_hlc: None,
+    });
+    server.prune_watermark = server.next_seq;
+    store.set_cursor(server.next_seq).unwrap();
+
+    let error = sync::run_cycle(&mut store, &mut clock, &mut server, NOW).unwrap_err();
+    assert!(matches!(error, SyncError::CursorTooOld));
+}
+
+/// The case the property harness found, in six operations.
+///
+/// A cursor goes stale because the device has been away, and a device that has
+/// been away is the one most likely to have local changes still waiting. The
+/// re-sync used to replace every record with the server's — so the tombstone
+/// for a delete that had not been pushed vanished, and the server's live copy
+/// came back. Section 10.4 is unambiguous that this must not happen, and
+/// nothing announced it: the entry the user deleted was simply there again.
+#[test]
+fn a_full_resync_does_not_resurrect_a_delete_that_has_not_been_pushed() {
+    let mut store = store();
+    let mut clock = HlcClock::new(DEVICE_A);
+    let mut server = FakeServer::default();
+
+    local_write(&mut store, &mut clock, "doomed", b"body", NOW);
+    let live = store.get("doomed").unwrap().unwrap().hlc;
+
+    // The server still holds the live version: the delete never reached it.
+    server.store(&PushRecord {
+        entry_id: "doomed".to_string(),
+        ciphertext: Some(b"body".to_vec()),
+        nonce: Some(vec![7; 24]),
+        hlc: live,
+        deleted: false,
+        base_hlc: None,
+    });
+    store.outbox_clear(&["doomed".to_string()]).unwrap();
+
+    store
+        .tombstone("doomed", clock.tick(NOW + 1), (NOW + 1) as i64)
+        .unwrap();
+
+    sync::full_resync(&mut store, &mut clock, &mut server, NOW + 2).unwrap();
+
+    let record = store
+        .get("doomed")
+        .unwrap()
+        .expect("the record is still there");
+    assert!(
+        record.deleted,
+        "a stale cursor brought back an entry the user had deleted"
+    );
+    assert!(
+        store
+            .outbox()
+            .unwrap()
+            .iter()
+            .any(|item| item.entry_id == "doomed"),
+        "the delete is still waiting to be pushed, so it must stay in the outbox"
+    );
+}
+
+/// The same rule for an ordinary edit: unpushed local work survives the
+/// re-sync and is still queued afterwards.
+#[test]
+fn a_full_resync_keeps_local_work_that_is_still_waiting_to_be_pushed() {
+    let mut store = store();
+    let mut clock = HlcClock::new(DEVICE_A);
+    let mut server = FakeServer::default();
+
+    local_write(&mut store, &mut clock, "mine", b"local", NOW);
+
+    server.store(&PushRecord {
+        entry_id: "theirs".to_string(),
+        ciphertext: Some(b"remote".to_vec()),
+        nonce: Some(vec![1; 24]),
+        hlc: Hlc::new(NOW, 0, DEVICE_B),
+        deleted: false,
+        base_hlc: None,
+    });
+
+    sync::full_resync(&mut store, &mut clock, &mut server, NOW + 1).unwrap();
+
+    assert!(
+        store.get("mine").unwrap().is_some(),
+        "a re-sync must not discard a write the server has not seen"
+    );
+    assert!(store.get("theirs").unwrap().is_some());
+    assert!(
+        store.outbox().unwrap().iter().any(|i| i.entry_id == "mine"),
+        "and it must still be queued, or it would never reach the server"
     );
 }
 
