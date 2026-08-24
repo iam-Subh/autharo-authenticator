@@ -5,6 +5,8 @@ import 'package:authenticator/src/services/vault_session.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'localized_test_app.dart';
+
 /// The form rules from section 17, applied to **every** form rather than to
 /// the two where the defect was first found.
 ///
@@ -58,10 +60,11 @@ void main() {
     final form = entry.value;
 
     group(name, () {
-      testWidgets('the action is reachable with the keyboard up',
-          (tester) async {
+      testWidgets('the action is reachable with the keyboard up', (
+        tester,
+      ) async {
         useSmallPhoneWithKeyboard(tester);
-        await tester.pumpWidget(MaterialApp(home: form.page));
+        await tester.pumpWidget(localizedTestApp(home: form.page));
         await tester.pumpAndSettle();
 
         // No scrolling. The action is pinned outside the scroll view, so it is
@@ -82,7 +85,7 @@ void main() {
       testWidgets('no field autofocuses, so the keyboard does not open '
           'over the action', (tester) async {
         useSmallPhoneWithKeyboard(tester);
-        await tester.pumpWidget(MaterialApp(home: form.page));
+        await tester.pumpWidget(localizedTestApp(home: form.page));
         await tester.pumpAndSettle();
 
         // Not `primaryFocus`: some node always holds it, usually the root
@@ -95,15 +98,17 @@ void main() {
         expect(
           aFieldHasFocus,
           isFalse,
-          reason: 'a focused field opens the keyboard before the user has read '
+          reason:
+              'a focused field opens the keyboard before the user has read '
               'the screen, and on a short screen that hides the explanation',
         );
       });
 
-      testWidgets('validation runs even when the fields are scrolled away',
-          (tester) async {
+      testWidgets('validation runs even when the fields are scrolled away', (
+        tester,
+      ) async {
         useSmallPhoneWithKeyboard(tester);
-        await tester.pumpWidget(MaterialApp(home: form.page));
+        await tester.pumpWidget(localizedTestApp(home: form.page));
         await tester.pumpAndSettle();
 
         // Scroll the fields out of the ListView, which disposes them. This is

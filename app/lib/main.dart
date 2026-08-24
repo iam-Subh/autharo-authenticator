@@ -1,38 +1,176 @@
-import 'package:flutter/material.dart';
+import 'dart:async';
 
+import 'package:flutter/material.dart';
+import 'package:flutter_localizations/flutter_localizations.dart';
+
+import 'l10n/generated/app_localizations.dart';
 import 'src/pages/entry_list_page.dart';
 import 'src/rust/frb_generated.dart';
 import 'src/pages/unlock_page.dart';
+import 'src/pages/welcome_page.dart';
+import 'src/rust/api/vault.dart' as rust;
 import 'src/services/lock_controller.dart';
+import 'src/services/automatic_backup_service.dart';
+import 'src/services/appearance_preference.dart';
+import 'src/services/brand_icon_preference.dart';
+import 'src/services/code_visibility_preference.dart';
 import 'src/services/monotonic_clock.dart';
 import 'src/services/reference_time.dart';
+import 'src/services/recovery_status_preference.dart';
+import 'src/services/sync_controller.dart';
+import 'src/services/sync_scheduler.dart';
 import 'src/services/vault_session.dart';
 import 'src/vault_controller.dart';
 
-Future<void> main() async {
+void main() {
   WidgetsFlutterBinding.ensureInitialized();
-  await RustLib.init();
   runApp(const AuthenticatorApp());
 }
 
+Future<void> _initializeServices() async {
+  await RustLib.init();
+  try {
+    BrandIconPreference.load();
+  } catch (_) {
+    // Keep the privacy-safe default if metadata cannot be read.
+  }
+  try {
+    await Future.wait([
+      AppearancePreference.load(),
+      CodeVisibilityPreference.load(),
+      RecoveryStatusPreference.load(),
+    ]);
+    await AppearancePreference.loadDynamicColour();
+  } catch (_) {
+    // Keep the local defaults if the preference store cannot be read.
+  }
+}
+
 class AuthenticatorApp extends StatelessWidget {
-  const AuthenticatorApp({super.key});
+  const AuthenticatorApp({super.key, this.initialize = _initializeServices});
+
+  final Future<void> Function() initialize;
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'Authenticator',
-      debugShowCheckedModeBanner: false,
-      theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF3B6EA5)),
+    return AnimatedBuilder(
+      animation: Listenable.merge([
+        AppearancePreference.theme,
+        AppearancePreference.useDynamicColour,
+        AppearancePreference.dynamicSeed,
+        AppearancePreference.language,
+      ]),
+      builder: (context, _) {
+        final themeChoice = AppearancePreference.theme.value;
+        final seed = AppearancePreference.activeSeed;
+        return MaterialApp(
+          onGenerateTitle: (context) => AppLocalizations.of(context).appTitle,
+          debugShowCheckedModeBanner: false,
+          localizationsDelegates: const [
+            AppLocalizations.delegate,
+            GlobalMaterialLocalizations.delegate,
+            GlobalWidgetsLocalizations.delegate,
+            GlobalCupertinoLocalizations.delegate,
+          ],
+          supportedLocales: AppLocalizations.supportedLocales,
+          locale: AppearancePreference.language.value.locale,
+          themeMode: themeChoice.themeMode,
+          theme: ThemeData(colorScheme: ColorScheme.fromSeed(seedColor: seed)),
+          darkTheme: _darkTheme(
+            seed: seed,
+            amoled: themeChoice == AppThemeChoice.amoled,
+          ),
+          home: _InitializationGate(initialize: initialize),
+        );
+      },
+    );
+  }
+
+  ThemeData _darkTheme({required Color seed, required bool amoled}) {
+    final scheme = ColorScheme.fromSeed(
+      seedColor: seed,
+      brightness: Brightness.dark,
+    );
+    if (!amoled) return ThemeData(colorScheme: scheme);
+    return ThemeData(
+      colorScheme: scheme.copyWith(
+        surface: Colors.black,
+        surfaceContainer: const Color(0xFF090909),
+        surfaceContainerHigh: const Color(0xFF111111),
+        surfaceContainerHighest: const Color(0xFF181818),
       ),
-      darkTheme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: const Color(0xFF3B6EA5),
-          brightness: Brightness.dark,
+      scaffoldBackgroundColor: Colors.black,
+      canvasColor: Colors.black,
+    );
+  }
+}
+
+/// Draws one Flutter frame before native library and vault initialization.
+///
+/// Android keeps the launch screen visible until Flutter submits its first
+/// frame. Starting Rust before [runApp] therefore leaves the application logo
+/// on screen during dynamic-library loading. This gate replaces the launch
+/// screen immediately, then starts initialization after that frame.
+class _InitializationGate extends StatefulWidget {
+  const _InitializationGate({required this.initialize});
+
+  final Future<void> Function() initialize;
+
+  @override
+  State<_InitializationGate> createState() => _InitializationGateState();
+}
+
+class _InitializationGateState extends State<_InitializationGate> {
+  Future<void>? _initializing;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final initializing = widget.initialize();
+      setState(() {
+        _initializing = initializing;
+      });
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final initializing = _initializing;
+    if (initializing == null) return const _StartupProgress();
+
+    return FutureBuilder<void>(
+      future: initializing,
+      builder: (context, snapshot) {
+        if (snapshot.hasError) {
+          return _StartupFailure(error: snapshot.error!);
+        }
+        if (snapshot.connectionState != ConnectionState.done) {
+          return const _StartupProgress();
+        }
+        return const _Bootstrap();
+      },
+    );
+  }
+}
+
+class _StartupProgress extends StatelessWidget {
+  const _StartupProgress();
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const CircularProgressIndicator(),
+            const SizedBox(height: 16),
+            Text(AppLocalizations.of(context).openingAuthenticator),
+          ],
         ),
       ),
-      home: const _Bootstrap(),
     );
   }
 }
@@ -59,7 +197,30 @@ class _Bootstrap extends StatefulWidget {
 class _BootstrapState extends State<_Bootstrap> {
   late final Future<VaultController> _opening = _open();
 
+  /// FR-47: shown once, on a device that has not been past it.
+  ///
+  /// Read from the core rather than kept in Flutter's preferences, so that
+  /// "Wipe this device" genuinely returns the app to its first-run state
+  /// instead of one that looks used and holds nothing.
+  bool _needsWelcome = false;
+
   final _session = VaultSession();
+
+  // One scheduler and one controller for the whole application. Per-screen
+  // instances would each arm their own fifteen-minute timer, so the number of
+  // cycles would depend on how many screens happened to be alive.
+  // FR-37: a cycle measures the clock, so the list has to re-read the offset
+  // afterwards or the correction waits for the next application start.
+  late final _sync = SyncController(
+    onCycleComplete: () async {
+      final controller = _controller;
+      if (controller == null) return;
+      await controller.time.refresh();
+      await controller.refresh();
+    },
+  );
+  late final _scheduler = SyncScheduler(runner: _sync);
+  final _automaticBackup = AutomaticBackupService();
   late final _lock = LockController(
     session: _session,
     // FR-33 requires a clock that counts across device sleep; see
@@ -80,9 +241,36 @@ class _BootstrapState extends State<_Bootstrap> {
     _lock.start();
   }
 
+  /// Section 10.3's start-of-application trigger, once the vault is actually
+  /// open. Starting the scheduler any earlier would have it firing at a core
+  /// that has no vault to sync.
+  Future<void> _startSync() async {
+    await _sync.refresh();
+    _scheduler.start();
+  }
+
+  Future<void> _runAutomaticBackupIfDue() async {
+    try {
+      await _automaticBackup.runIfDue();
+    } catch (_) {
+      // The Backup screen reports configuration errors. Startup must still
+      // open the vault if a directory grant or secure-storage read fails.
+    }
+  }
+
   /// FR-33a: the stored policy, read before the vault opens. Without this the
   /// setting would reset at every start, which the requirement calls out as
   /// doing nothing at all.
+  /// Never fails startup. A metadata read that goes wrong should cost the
+  /// user one extra sight of the welcome screen, not an app that will not open.
+  bool _welcomeSeen() {
+    try {
+      return rust.welcomeSeen();
+    } catch (_) {
+      return true;
+    }
+  }
+
   Future<void> _loadLockPolicy() async {
     try {
       await _lock.loadPolicy();
@@ -94,6 +282,9 @@ class _BootstrapState extends State<_Bootstrap> {
 
   @override
   void dispose() {
+    _scheduler.dispose();
+    _automaticBackup.dispose();
+    _sync.dispose();
     _lock.dispose();
     _controller?.dispose();
     super.dispose();
@@ -120,16 +311,42 @@ class _BootstrapState extends State<_Bootstrap> {
 
   Future<VaultController> _startController() async {
     await _loadLockPolicy();
+    // After the vault exists, so the welcome screen's three choices all lead
+    // somewhere that works. Asking before setup would mean a user who picks
+    // "import" lands on a picker with nowhere to put the entries.
+    _needsWelcome = !_welcomeSeen();
     final time = await ReferenceTime.load();
-    final controller = VaultController(time);
+    final controller = VaultController(
+      time,
+      // Section 10.3's "on a change" trigger, debounced by the scheduler so an
+      // import of fifty entries produces one cycle rather than fifty.
+      onLocalChange: () {
+        _scheduler.onLocalChange();
+        _automaticBackup.scheduleAfterChange();
+      },
+    );
     _controller = controller;
-    if (!_needsUnlock) await controller.start();
+    // FR-22: read before the first list is built, so the first frame is already
+    // in the user's order rather than jumping a moment later.
+    controller.loadSortMode();
+    if (!_needsUnlock) {
+      await controller.start();
+      await _startSync();
+      unawaited(_runAutomaticBackupIfDue());
+    }
     return controller;
   }
 
   Future<void> _afterUnlock(VaultController controller) async {
     setState(() => _needsUnlock = false);
     await controller.start();
+
+    // Section 10.3's unlock trigger. The vault reopens many times in a
+    // session, and each reopen is when a user is most likely to be looking at
+    // the list and least likely to forgive it being stale.
+    await _startSync();
+    _scheduler.onUnlocked();
+    unawaited(_runAutomaticBackupIfDue());
   }
 
   @override
@@ -146,10 +363,20 @@ class _BootstrapState extends State<_Bootstrap> {
           );
         }
         final controller = snapshot.data!;
+        // Ordered deliberately: an unlock is never skipped for a welcome. On a
+        // device with a PIN slot the vault is shut, and a first-run screen in
+        // front of it would offer three actions that all fail.
         if (_needsUnlock) {
           return UnlockPage(
             session: _session,
             onUnlocked: () => _afterUnlock(controller),
+          );
+        }
+        if (_needsWelcome) {
+          return WelcomePage(
+            session: _session,
+            controller: controller,
+            onDone: () => setState(() => _needsWelcome = false),
           );
         }
         return EntryListPage(
@@ -185,19 +412,13 @@ class _StartupFailure extends StatelessWidget {
             ),
             const SizedBox(height: 16),
             Text(
-              'The vault could not be opened',
+              AppLocalizations.of(context).vaultOpenFailed,
               style: Theme.of(context).textTheme.titleLarge,
             ),
             const SizedBox(height: 8),
-            Text(
-              '$error',
-              style: Theme.of(context).textTheme.bodyMedium,
-            ),
+            Text('$error', style: Theme.of(context).textTheme.bodyMedium),
             const SizedBox(height: 16),
-            const Text(
-              'Your entries have not been deleted. Closing and reopening the '
-              'application is safe to try.',
-            ),
+            Text(AppLocalizations.of(context).vaultDataSafeAfterOpenFailure),
           ],
         ),
       ),

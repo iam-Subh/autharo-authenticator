@@ -1,6 +1,9 @@
 import 'package:authenticator/src/pages/recovery_key_page.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
+
+import 'localized_test_app.dart';
 
 /// A phrase with distinct, recognisable words, so a test failure names the
 /// position that went wrong rather than one of 24 identical strings.
@@ -35,9 +38,13 @@ Future<void> tapAfterScrolling(WidgetTester tester, Finder target) async {
 void main() {
   late int confirmed;
 
+  setUp(() {
+    FlutterSecureStorage.setMockInitialValues({});
+  });
+
   Widget page({List<int> indices = const [2, 7, 19]}) {
     confirmed = 0;
-    return MaterialApp(
+    return localizedTestApp(
       home: RecoveryKeyPage(
         phrase: _phrase,
         confirmIndices: indices,
@@ -91,8 +98,9 @@ void main() {
       );
     }
 
-    testWidgets('asks for the positions the core chose, one-based',
-        (tester) async {
+    testWidgets('asks for the positions the core chose, one-based', (
+      tester,
+    ) async {
       await tester.pumpWidget(page(indices: [2, 7, 19]));
       await reachConfirmation(tester);
 
@@ -106,23 +114,42 @@ void main() {
       await tester.pumpWidget(page(indices: [2, 7, 19]));
       await reachConfirmation(tester);
 
-      await tester.enterText(find.widgetWithText(TextField, 'Word 3'), 'charlie');
+      await tester.enterText(
+        find.widgetWithText(TextField, 'Word 3'),
+        'charlie',
+      );
       await tester.enterText(find.widgetWithText(TextField, 'Word 8'), 'hotel');
-      await tester.enterText(find.widgetWithText(TextField, 'Word 20'), 'tango');
-      await tapAfterScrolling(tester, find.widgetWithText(FilledButton, 'Confirm'));
+      await tester.enterText(
+        find.widgetWithText(TextField, 'Word 20'),
+        'tango',
+      );
+      await tapAfterScrolling(
+        tester,
+        find.widgetWithText(FilledButton, 'Confirm'),
+      );
 
       expect(confirmed, 1);
     });
 
-    testWidgets('a wrong word names the position and does not continue',
-        (tester) async {
+    testWidgets('a wrong word names the position and does not continue', (
+      tester,
+    ) async {
       await tester.pumpWidget(page(indices: [2, 7, 19]));
       await reachConfirmation(tester);
 
-      await tester.enterText(find.widgetWithText(TextField, 'Word 3'), 'charlie');
+      await tester.enterText(
+        find.widgetWithText(TextField, 'Word 3'),
+        'charlie',
+      );
       await tester.enterText(find.widgetWithText(TextField, 'Word 8'), 'wrong');
-      await tester.enterText(find.widgetWithText(TextField, 'Word 20'), 'tango');
-      await tapAfterScrolling(tester, find.widgetWithText(FilledButton, 'Confirm'));
+      await tester.enterText(
+        find.widgetWithText(TextField, 'Word 20'),
+        'tango',
+      );
+      await tapAfterScrolling(
+        tester,
+        find.widgetWithText(FilledButton, 'Confirm'),
+      );
 
       expect(confirmed, 0, reason: 'sign-up must not complete');
       expect(find.textContaining('word at position 8'), findsOneWidget);
@@ -135,16 +162,26 @@ void main() {
       await tester.pumpWidget(page(indices: [2, 7, 19]));
       await reachConfirmation(tester);
 
-      await tester.enterText(find.widgetWithText(TextField, 'Word 3'), ' Charlie ');
+      await tester.enterText(
+        find.widgetWithText(TextField, 'Word 3'),
+        ' Charlie ',
+      );
       await tester.enterText(find.widgetWithText(TextField, 'Word 8'), 'HOTEL');
-      await tester.enterText(find.widgetWithText(TextField, 'Word 20'), 'Tango');
-      await tapAfterScrolling(tester, find.widgetWithText(FilledButton, 'Confirm'));
+      await tester.enterText(
+        find.widgetWithText(TextField, 'Word 20'),
+        'Tango',
+      );
+      await tapAfterScrolling(
+        tester,
+        find.widgetWithText(FilledButton, 'Confirm'),
+      );
 
       expect(confirmed, 1);
     });
 
-    testWidgets('the words can be shown again before confirming',
-        (tester) async {
+    testWidgets('the words can be shown again before confirming', (
+      tester,
+    ) async {
       await tester.pumpWidget(page());
       await reachConfirmation(tester);
 

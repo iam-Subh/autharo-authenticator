@@ -1,5 +1,8 @@
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
+
+import '../../l10n/generated/app_localizations.dart';
 
 /// FR-10: "Scan a QR code with the camera and parse the `otpauth://` URI."
 ///
@@ -8,7 +11,9 @@ import 'package:mobile_scanner/mobile_scanner.dart';
 /// so that pointing the camera at an unrelated QR code gives an immediate
 /// explanation rather than a failure two screens later.
 class ScanPage extends StatefulWidget {
-  const ScanPage({super.key});
+  const ScanPage({super.key, this.allowShareLink = false});
+
+  final bool allowShareLink;
 
   @override
   State<ScanPage> createState() => _ScanPageState();
@@ -23,6 +28,7 @@ class _ScanPageState extends State<ScanPage> {
   /// The camera keeps firing after the first hit, and a second detection while
   /// the route is popping throws. One-shot guard.
   bool _handled = false;
+  bool _pickingImage = false;
   String? _rejected;
 
   @override
@@ -32,7 +38,11 @@ class _ScanPageState extends State<ScanPage> {
   }
 
   void _onDetect(BarcodeCapture capture) {
-    if (_handled) return;
+    _acceptCapture(capture);
+  }
+
+  bool _acceptCapture(BarcodeCapture capture) {
+    if (_handled) return false;
 
     for (final barcode in capture.barcodes) {
       final value = barcode.rawValue?.trim();
@@ -42,23 +52,89 @@ class _ScanPageState extends State<ScanPage> {
       if (lower.startsWith('otpauth://')) {
         _handled = true;
         Navigator.of(context).pop(value);
-        return;
+        return true;
       }
 
-      // Google Authenticator's bulk export. The core cannot read it yet
-      // (FR-14, stage S8), so say so precisely rather than "invalid code".
+      // FR-14: Google Authenticator's bulk export. Handed back like any other
+      // code; the caller routes it, because a multi-code export needs a screen
+      // that keeps the camera open and this one closes on the first hit.
       if (lower.startsWith('otpauth-migration://')) {
+        _handled = true;
+        Navigator.of(context).pop(value);
+        return true;
+      }
+
+      if (widget.allowShareLink &&
+          (lower.startsWith('https://') || lower.startsWith('http://'))) {
+        _handled = true;
+        Navigator.of(context).pop(value);
+        return true;
+      }
+
+      if (mounted) {
         setState(() {
-          _rejected = 'That is a Google Authenticator export code. Importing '
-              'those is not supported yet — for now, add each account from its '
-              'own QR code.';
+          _rejected = widget.allowShareLink
+              ? AppLocalizations.of(context).notSharedAccountQr
+              : AppLocalizations.of(context).notOtpSetupQr;
+        });
+      }
+    }
+
+    return false;
+  }
+
+  Future<void> _pickImage() async {
+    if (_handled || _pickingImage) return;
+    final dialogTitle = AppLocalizations.of(context).chooseQrImage;
+
+    setState(() {
+      _pickingImage = true;
+      _rejected = null;
+    });
+
+    try {
+      await _scanner.stop();
+      final picked = await FilePicker.pickFile(
+        dialogTitle: dialogTitle,
+        type: FileType.image,
+      );
+      if (picked == null || !mounted) return;
+
+      final path = picked.path;
+      if (path == null) {
+        setState(() {
+          _rejected = AppLocalizations.of(context).selectedImageUnavailable;
         });
         return;
       }
 
-      setState(() {
-        _rejected = 'That QR code is not a two-factor setup code.';
-      });
+      final capture = await _scanner.analyzeImage(path);
+      if (!mounted || _handled) return;
+
+      if (capture == null || !_acceptCapture(capture)) {
+        if (mounted && _rejected == null) {
+          setState(() {
+            _rejected = widget.allowShareLink
+                ? AppLocalizations.of(context).noSharedQrInImage
+                : AppLocalizations.of(context).noOtpQrInImage;
+          });
+        }
+      }
+    } catch (_) {
+      if (mounted && !_handled) {
+        setState(() {
+          _rejected = AppLocalizations.of(context).imageScanFailed;
+        });
+      }
+    } finally {
+      if (mounted && !_handled) {
+        try {
+          await _scanner.start();
+        } catch (_) {
+          // The camera error widget reports camera start failures.
+        }
+        if (mounted) setState(() => _pickingImage = false);
+      }
     }
   }
 
@@ -66,10 +142,20 @@ class _ScanPageState extends State<ScanPage> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Scan QR code'),
+        title: Text(AppLocalizations.of(context).scanQrCodeTitle),
         actions: [
           IconButton(
-            tooltip: 'Torch',
+            tooltip: AppLocalizations.of(context).chooseImage,
+            icon: _pickingImage
+                ? const SizedBox.square(
+                    dimension: 20,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Icon(Icons.photo_library_outlined),
+            onPressed: _pickingImage ? null : _pickImage,
+          ),
+          IconButton(
+            tooltip: AppLocalizations.of(context).torch,
             icon: const Icon(Icons.flashlight_on),
             onPressed: () => _scanner.toggleTorch(),
           ),
@@ -118,8 +204,7 @@ class _CameraUnavailable extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final denied =
-        error.errorCode == MobileScannerErrorCode.permissionDenied;
+    final denied = error.errorCode == MobileScannerErrorCode.permissionDenied;
 
     return Center(
       child: Padding(
@@ -131,21 +216,20 @@ class _CameraUnavailable extends StatelessWidget {
             const SizedBox(height: 16),
             Text(
               denied
-                  ? 'This application does not have permission to use the '
-                      'camera.'
-                  : 'The camera could not be started.',
+                  ? AppLocalizations.of(context).cameraPermissionRequired
+                  : AppLocalizations.of(context).cameraStartFailed,
               textAlign: TextAlign.center,
               style: Theme.of(context).textTheme.titleMedium,
             ),
             const SizedBox(height: 8),
-            const Text(
-              'You can add the account by entering its setup key instead.',
+            Text(
+              AppLocalizations.of(context).manualEntryAlternative,
               textAlign: TextAlign.center,
             ),
             const SizedBox(height: 16),
             FilledButton(
               onPressed: () => Navigator.of(context).pop(),
-              child: const Text('Go back'),
+              child: Text(AppLocalizations.of(context).goBack),
             ),
           ],
         ),

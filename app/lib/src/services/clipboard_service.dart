@@ -29,7 +29,7 @@ class ClipboardService {
 
   /// Copies [code] and schedules the clear.
   Future<void> copyCode(String code) async {
-    await Clipboard.setData(ClipboardData(text: code));
+    await SensitiveClipboard.copy(code);
 
     _pendingClear?.cancel();
     _lastCopied = code;
@@ -40,14 +40,7 @@ class ClipboardService {
     final expected = _lastCopied;
     if (expected == null) return;
 
-    final current = await Clipboard.getData(Clipboard.kTextPlain);
-    if (current?.text != expected) {
-      // The user copied something else. Clearing now would destroy their data.
-      _lastCopied = null;
-      return;
-    }
-
-    await Clipboard.setData(const ClipboardData(text: ''));
+    await SensitiveClipboard.clearIfEquals(expected);
     _lastCopied = null;
   }
 
@@ -63,4 +56,18 @@ class ClipboardService {
     _pendingClear?.cancel();
     _pendingClear = null;
   }
+}
+
+/// Marks copied secrets as sensitive in the Android clipboard service.
+/// Android can then suppress the clipboard preview and reduce history exposure.
+class SensitiveClipboard {
+  static const MethodChannel _channel = MethodChannel(
+    'dev.authcore.authenticator/clipboard',
+  );
+
+  static Future<void> copy(String text) =>
+      _channel.invokeMethod<void>('copySensitive', {'text': text});
+
+  static Future<void> clearIfEquals(String expected) =>
+      _channel.invokeMethod<void>('clearIfEquals', {'expected': expected});
 }

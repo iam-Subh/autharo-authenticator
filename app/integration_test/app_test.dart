@@ -2,6 +2,7 @@ import 'package:authenticator/main.dart';
 import 'package:authenticator/src/pages/create_account_page.dart';
 import 'package:authenticator/src/pages/entry_list_page.dart';
 import 'package:authenticator/src/pages/recovery_key_page.dart';
+import 'package:authenticator/src/pages/welcome_page.dart';
 import 'package:authenticator/src/rust/api/vault.dart' as rust;
 import 'package:authenticator/src/rust/frb_generated.dart';
 import 'package:authenticator/src/services/reference_time.dart';
@@ -32,14 +33,26 @@ void main() {
       case VaultState.locked:
         await session.unlock();
       case VaultState.lockedNeedsPin:
-        fail('the test device should not have a PIN-protected slot');
+        // Not a defect in the app — the phone has been used by hand and a
+        // PIN was set. The tests cannot open a vault whose PIN they do not
+        // know, and guessing would burn FR-35's failed-attempt counter.
+        fail(
+          'This device has a PIN on its vault, so the tests cannot open it. '
+          'Either remove the PIN in Settings, or reinstall the app with '
+          '"adb uninstall dev.authcore.authenticator". Reinstalling destroys '
+          'the codes on the device, so export a backup first if any of them '
+          'matter.',
+        );
     }
     controller = VaultController(await ReferenceTime.load());
   });
 
   tearDown(() async {
     for (final id in added) {
-      await rust.deleteEntry(id: id, nowMs: DateTime.now().millisecondsSinceEpoch);
+      await rust.deleteEntry(
+        id: id,
+        nowMs: DateTime.now().millisecondsSinceEpoch,
+      );
     }
     added.clear();
   });
@@ -88,7 +101,9 @@ void main() {
     expect(codeText, isNotEmpty, reason: 'a 6-digit code should be on screen');
   });
 
-  testWidgets('search filters by issuer and by account (FR-21)', (tester) async {
+  testWidgets('search filters by issuer and by account (FR-21)', (
+    tester,
+  ) async {
     await seed('GitHub', 'rupsa', 'GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ');
     await seed('GitLab', 'someone', 'MZXW6YTBOIZQ');
     await pumpList(tester);
@@ -114,8 +129,9 @@ void main() {
     expect(find.text('No entry matches that search.'), findsOneWidget);
   });
 
-  testWidgets('deleting asks first and warns about other devices (FR-18)',
-      (tester) async {
+  testWidgets('deleting asks first and warns about other devices (FR-18)', (
+    tester,
+  ) async {
     await seed('GitHub', 'rupsa', 'GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ');
     await pumpList(tester);
 
@@ -150,9 +166,58 @@ void main() {
   /// vault at that path, loading the time offset, and starting the ticker. A
   /// failure in any of those shows up only as an application that never leaves
   /// the splash screen, so it is worth a test of its own.
-  testWidgets('the real application starts and reaches the code list',
-      (tester) async {
-    await tester.pumpWidget(const AuthenticatorApp());
+  ///
+  /// FR-47's welcome screen is dismissed first, because this asserts the
+  /// *bootstrap*, not the onboarding — on a genuinely fresh device the handoff
+  /// correctly goes to the welcome screen instead, which is what
+  /// `the first run offers the three choices` covers.
+  /// FR-47, on a device that has genuinely never been used.
+  ///
+  /// The regression this exists for: the welcome flag alone decided the screen,
+  /// so on the release that introduced it every existing user would have been
+  /// shown a first-run screen offering to import accounts they had been using
+  /// for months. `welcome_seen` now also asks the vault, and an entry counts as
+  /// having been past first run whatever the flag says.
+  testWidgets(
+    'the first run offers the three choices, and only on a first run',
+    (tester) async {
+      // A vault with something in it has been past first run by definition.
+      await seed('WelcomeCheck', 'someone', 'GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ');
+      expect(
+        rust.welcomeSeen(),
+        isTrue,
+        reason: 'a vault holding codes must never show a first-run screen',
+      );
+
+      // And the screen itself still works when it is genuinely warranted. The
+      // widget is built directly rather than by wiping the device: a test that
+      // destroyed the vault to reach this state would take every other test in
+      // the file with it.
+      await tester.pumpWidget(
+        MaterialApp(
+          home: WelcomePage(
+            session: VaultSession(),
+            controller: controller,
+            onDone: () {},
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('Bring my accounts across'), findsOneWidget);
+      expect(find.textContaining('Set up sync'), findsOneWidget);
+      expect(find.textContaining('Just use it on this phone'), findsOneWidget);
+    },
+  );
+
+  testWidgets('the real application starts and reaches the code list', (
+    tester,
+  ) async {
+    await rust.markWelcomeSeen();
+    // setUpAll already initialized the real Rust library. Inject a completed
+    // initializer so this test covers the post-frame startup gate without
+    // initializing the same library twice.
+    await tester.pumpWidget(AuthenticatorApp(initialize: () async {}));
 
     // Not `pumpAndSettle`: the controller runs a one second `Timer.periodic`
     // for the FR-07 countdown, so the tree never settles and that call would
@@ -182,8 +247,9 @@ void main() {
   /// A screen that works on a fabricated 24 words and fails on real ones would
   /// pass every host test.
   group('sign-up screens', () {
-    testWidgets('the create-account screen refuses an address it cannot use',
-        (tester) async {
+    testWidgets('the create-account screen refuses an address it cannot use', (
+      tester,
+    ) async {
       await tester.pumpWidget(
         MaterialApp(home: CreateAccountPage(session: VaultSession())),
       );
@@ -217,7 +283,8 @@ void main() {
       expect(
         find.text('An email address is required.'),
         findsWidgets,
-        reason: 'the message must reach the user even with the field off screen',
+        reason:
+            'the message must reach the user even with the field off screen',
       );
 
       // Scroll back up to type, then submit again.
@@ -235,10 +302,12 @@ void main() {
       expect(find.textContaining('does not look like'), findsWidgets);
     });
 
-    testWidgets('the real phrase renders and its real positions confirm',
-        (tester) async {
+    testWidgets('the real phrase renders and its real positions confirm', (
+      tester,
+    ) async {
       // A real account, so the words are BIP-39 over real entropy.
-      final email = 'screens-${DateTime.now().microsecondsSinceEpoch}@example.com';
+      final email =
+          'screens-${DateTime.now().microsecondsSinceEpoch}@example.com';
       final recovery = await rust.createAccount(
         email: email,
         password: 'correct horse battery staple',
@@ -276,7 +345,11 @@ void main() {
       await tester.pumpAndSettle();
 
       final continueButton = find.widgetWithText(FilledButton, 'Continue');
-      await tester.scrollUntilVisible(continueButton, 200, scrollable: scroller);
+      await tester.scrollUntilVisible(
+        continueButton,
+        200,
+        scrollable: scroller,
+      );
       await tester.pumpAndSettle();
       await tester.tap(continueButton);
       await tester.pumpAndSettle();

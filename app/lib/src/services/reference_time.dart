@@ -41,6 +41,16 @@ class ReferenceTime {
   /// neither wants a value that jumps when the offset is re-measured.
   int get nowMillis => DateTime.now().millisecondsSinceEpoch;
 
+  /// Re-reads the offset a sync cycle measured (FR-37).
+  ///
+  /// The offset is measured in Rust, from the `Date` header of requests the
+  /// cycle was making anyway, and written to the store. Without this the
+  /// correction would not reach the code list until the next application
+  /// start — which is a long time to keep showing codes a service rejects.
+  Future<void> refresh() async {
+    _offsetSeconds = await rust.timeOffsetSeconds();
+  }
+
   Future<void> setOffsetSeconds(int offset) async {
     await rust.setTimeOffsetSeconds(offset: offset);
     _offsetSeconds = offset;

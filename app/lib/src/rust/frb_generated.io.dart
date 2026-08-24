@@ -3,6 +3,7 @@
 
 // ignore_for_file: unused_import, unused_element, unnecessary_import, duplicate_ignore, invalid_use_of_internal_member, annotate_overrides, non_constant_identifier_names, curly_braces_in_flow_control_structures, prefer_const_literals_to_create_immutables, unused_field
 
+import 'api/share.dart';
 import 'api/sync.dart';
 import 'api/vault.dart';
 import 'dart:async';
@@ -29,7 +30,19 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   AddOutcome dco_decode_add_outcome(dynamic raw);
 
   @protected
+  BackupVerificationView dco_decode_backup_verification_view(dynamic raw);
+
+  @protected
+  BiometricKeyBlob dco_decode_biometric_key_blob(dynamic raw);
+
+  @protected
   bool dco_decode_bool(dynamic raw);
+
+  @protected
+  BiometricKeyBlob dco_decode_box_autoadd_biometric_key_blob(dynamic raw);
+
+  @protected
+  PlatformInt64 dco_decode_box_autoadd_i_64(dynamic raw);
 
   @protected
   int dco_decode_box_autoadd_u_32(dynamic raw);
@@ -41,16 +54,43 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   BuildInfo dco_decode_build_info(dynamic raw);
 
   @protected
+  DetectedFileView dco_decode_detected_file_view(dynamic raw);
+
+  @protected
+  DeviceView dco_decode_device_view(dynamic raw);
+
+  @protected
   EntryPreview dco_decode_entry_preview(dynamic raw);
 
   @protected
   EntryView dco_decode_entry_view(dynamic raw);
 
   @protected
+  FolderView dco_decode_folder_view(dynamic raw);
+
+  @protected
   PlatformInt64 dco_decode_i_64(dynamic raw);
 
   @protected
+  ImportReportView dco_decode_import_report_view(dynamic raw);
+
+  @protected
+  List<String> dco_decode_list_String(dynamic raw);
+
+  @protected
+  List<DeviceView> dco_decode_list_device_view(dynamic raw);
+
+  @protected
   List<EntryView> dco_decode_list_entry_view(dynamic raw);
+
+  @protected
+  List<FolderView> dco_decode_list_folder_view(dynamic raw);
+
+  @protected
+  List<List<String>> dco_decode_list_list_String(dynamic raw);
+
+  @protected
+  List<Uint8List> dco_decode_list_list_prim_u_8_strict(dynamic raw);
 
   @protected
   Uint32List dco_decode_list_prim_u_32_strict(dynamic raw);
@@ -62,10 +102,25 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   Uint8List dco_decode_list_prim_u_8_strict(dynamic raw);
 
   @protected
+  List<RefusedView> dco_decode_list_refused_view(dynamic raw);
+
+  @protected
+  List<TrashEntryView> dco_decode_list_trash_entry_view(dynamic raw);
+
+  @protected
   LockPolicyView dco_decode_lock_policy_view(dynamic raw);
 
   @protected
+  MigrationScanView dco_decode_migration_scan_view(dynamic raw);
+
+  @protected
   String? dco_decode_opt_String(dynamic raw);
+
+  @protected
+  BiometricKeyBlob? dco_decode_opt_box_autoadd_biometric_key_blob(dynamic raw);
+
+  @protected
+  PlatformInt64? dco_decode_opt_box_autoadd_i_64(dynamic raw);
 
   @protected
   int? dco_decode_opt_box_autoadd_u_32(dynamic raw);
@@ -74,13 +129,28 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   BigInt? dco_decode_opt_box_autoadd_u_64(dynamic raw);
 
   @protected
+  List<String>? dco_decode_opt_list_String(dynamic raw);
+
+  @protected
+  (int, int) dco_decode_record_u_32_u_32(dynamic raw);
+
+  @protected
   RecoveryPhraseView dco_decode_recovery_phrase_view(dynamic raw);
+
+  @protected
+  RefusedView dco_decode_refused_view(dynamic raw);
+
+  @protected
+  ShareLinkView dco_decode_share_link_view(dynamic raw);
 
   @protected
   SyncRunView dco_decode_sync_run_view(dynamic raw);
 
   @protected
   SyncStatusView dco_decode_sync_status_view(dynamic raw);
+
+  @protected
+  TrashEntryView dco_decode_trash_entry_view(dynamic raw);
 
   @protected
   int dco_decode_u_32(dynamic raw);
@@ -107,7 +177,23 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   AddOutcome sse_decode_add_outcome(SseDeserializer deserializer);
 
   @protected
+  BackupVerificationView sse_decode_backup_verification_view(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  BiometricKeyBlob sse_decode_biometric_key_blob(SseDeserializer deserializer);
+
+  @protected
   bool sse_decode_bool(SseDeserializer deserializer);
+
+  @protected
+  BiometricKeyBlob sse_decode_box_autoadd_biometric_key_blob(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  PlatformInt64 sse_decode_box_autoadd_i_64(SseDeserializer deserializer);
 
   @protected
   int sse_decode_box_autoadd_u_32(SseDeserializer deserializer);
@@ -119,16 +205,45 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   BuildInfo sse_decode_build_info(SseDeserializer deserializer);
 
   @protected
+  DetectedFileView sse_decode_detected_file_view(SseDeserializer deserializer);
+
+  @protected
+  DeviceView sse_decode_device_view(SseDeserializer deserializer);
+
+  @protected
   EntryPreview sse_decode_entry_preview(SseDeserializer deserializer);
 
   @protected
   EntryView sse_decode_entry_view(SseDeserializer deserializer);
 
   @protected
+  FolderView sse_decode_folder_view(SseDeserializer deserializer);
+
+  @protected
   PlatformInt64 sse_decode_i_64(SseDeserializer deserializer);
 
   @protected
+  ImportReportView sse_decode_import_report_view(SseDeserializer deserializer);
+
+  @protected
+  List<String> sse_decode_list_String(SseDeserializer deserializer);
+
+  @protected
+  List<DeviceView> sse_decode_list_device_view(SseDeserializer deserializer);
+
+  @protected
   List<EntryView> sse_decode_list_entry_view(SseDeserializer deserializer);
+
+  @protected
+  List<FolderView> sse_decode_list_folder_view(SseDeserializer deserializer);
+
+  @protected
+  List<List<String>> sse_decode_list_list_String(SseDeserializer deserializer);
+
+  @protected
+  List<Uint8List> sse_decode_list_list_prim_u_8_strict(
+    SseDeserializer deserializer,
+  );
 
   @protected
   Uint32List sse_decode_list_prim_u_32_strict(SseDeserializer deserializer);
@@ -140,10 +255,31 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   Uint8List sse_decode_list_prim_u_8_strict(SseDeserializer deserializer);
 
   @protected
+  List<RefusedView> sse_decode_list_refused_view(SseDeserializer deserializer);
+
+  @protected
+  List<TrashEntryView> sse_decode_list_trash_entry_view(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   LockPolicyView sse_decode_lock_policy_view(SseDeserializer deserializer);
 
   @protected
+  MigrationScanView sse_decode_migration_scan_view(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   String? sse_decode_opt_String(SseDeserializer deserializer);
+
+  @protected
+  BiometricKeyBlob? sse_decode_opt_box_autoadd_biometric_key_blob(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  PlatformInt64? sse_decode_opt_box_autoadd_i_64(SseDeserializer deserializer);
 
   @protected
   int? sse_decode_opt_box_autoadd_u_32(SseDeserializer deserializer);
@@ -152,15 +288,30 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   BigInt? sse_decode_opt_box_autoadd_u_64(SseDeserializer deserializer);
 
   @protected
+  List<String>? sse_decode_opt_list_String(SseDeserializer deserializer);
+
+  @protected
+  (int, int) sse_decode_record_u_32_u_32(SseDeserializer deserializer);
+
+  @protected
   RecoveryPhraseView sse_decode_recovery_phrase_view(
     SseDeserializer deserializer,
   );
+
+  @protected
+  RefusedView sse_decode_refused_view(SseDeserializer deserializer);
+
+  @protected
+  ShareLinkView sse_decode_share_link_view(SseDeserializer deserializer);
 
   @protected
   SyncRunView sse_decode_sync_run_view(SseDeserializer deserializer);
 
   @protected
   SyncStatusView sse_decode_sync_status_view(SseDeserializer deserializer);
+
+  @protected
+  TrashEntryView sse_decode_trash_entry_view(SseDeserializer deserializer);
 
   @protected
   int sse_decode_u_32(SseDeserializer deserializer);
@@ -193,7 +344,31 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_add_outcome(AddOutcome self, SseSerializer serializer);
 
   @protected
+  void sse_encode_backup_verification_view(
+    BackupVerificationView self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_biometric_key_blob(
+    BiometricKeyBlob self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_bool(bool self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_box_autoadd_biometric_key_blob(
+    BiometricKeyBlob self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_box_autoadd_i_64(
+    PlatformInt64 self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_box_autoadd_u_32(int self, SseSerializer serializer);
@@ -205,17 +380,62 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_build_info(BuildInfo self, SseSerializer serializer);
 
   @protected
+  void sse_encode_detected_file_view(
+    DetectedFileView self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_device_view(DeviceView self, SseSerializer serializer);
+
+  @protected
   void sse_encode_entry_preview(EntryPreview self, SseSerializer serializer);
 
   @protected
   void sse_encode_entry_view(EntryView self, SseSerializer serializer);
 
   @protected
+  void sse_encode_folder_view(FolderView self, SseSerializer serializer);
+
+  @protected
   void sse_encode_i_64(PlatformInt64 self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_import_report_view(
+    ImportReportView self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_String(List<String> self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_list_device_view(
+    List<DeviceView> self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_list_entry_view(
     List<EntryView> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_folder_view(
+    List<FolderView> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_list_String(
+    List<List<String>> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_list_prim_u_8_strict(
+    List<Uint8List> self,
     SseSerializer serializer,
   );
 
@@ -235,13 +455,43 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_list_refused_view(
+    List<RefusedView> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_trash_entry_view(
+    List<TrashEntryView> self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_lock_policy_view(
     LockPolicyView self,
     SseSerializer serializer,
   );
 
   @protected
+  void sse_encode_migration_scan_view(
+    MigrationScanView self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_opt_String(String? self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_opt_box_autoadd_biometric_key_blob(
+    BiometricKeyBlob? self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_opt_box_autoadd_i_64(
+    PlatformInt64? self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_opt_box_autoadd_u_32(int? self, SseSerializer serializer);
@@ -250,10 +500,22 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_opt_box_autoadd_u_64(BigInt? self, SseSerializer serializer);
 
   @protected
+  void sse_encode_opt_list_String(List<String>? self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_record_u_32_u_32((int, int) self, SseSerializer serializer);
+
+  @protected
   void sse_encode_recovery_phrase_view(
     RecoveryPhraseView self,
     SseSerializer serializer,
   );
+
+  @protected
+  void sse_encode_refused_view(RefusedView self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_share_link_view(ShareLinkView self, SseSerializer serializer);
 
   @protected
   void sse_encode_sync_run_view(SyncRunView self, SseSerializer serializer);
@@ -261,6 +523,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_sync_status_view(
     SyncStatusView self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_trash_entry_view(
+    TrashEntryView self,
     SseSerializer serializer,
   );
 

@@ -2,6 +2,8 @@ import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 
+import '../../l10n/generated/app_localizations.dart';
+
 /// FR-07: "Show a countdown indicator for each TOTP entry. Change the indicator
 /// colour when 5 seconds remain."
 ///
@@ -39,7 +41,9 @@ class CountdownRing extends StatelessWidget {
 
     return Semantics(
       // NFR-08: a ring conveys nothing to a screen reader on its own.
-      label: 'Code expires in $remainingSeconds seconds',
+      label: AppLocalizations.of(
+        context,
+      ).codeExpiresInSeconds(remainingSeconds),
       excludeSemantics: true,
       child: SizedBox(
         width: size,

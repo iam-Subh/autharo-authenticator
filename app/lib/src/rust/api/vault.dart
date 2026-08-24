@@ -6,7 +6,8 @@
 import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `added`, `build_payload`, `duplicate`, `lock_poisoned`, `open_vault_with_key`, `take_meta`, `with_meta_pub`, `with_meta`, `with_vault_pub`, `with_vault`
+// These functions are ignored because they are not marked as `pub`: `absorb`, `added`, `build_payload`, `cancel_pending_keystore_operations`, `duplicate`, `lock_poisoned`, `open_vault_with_key`, `outbox_len`, `record_failed_unlock`, `secret_for_platform`, `secret_from_platform`, `take_meta`, `with_meta_pub`, `with_meta`, `with_vault_pub`, `with_vault`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `fmt`
 
 /// Deletes an unencrypted vault file if one is present (section 12.1 rule 4).
 ///
@@ -33,28 +34,18 @@ bool discardLegacyVault({
 String openMeta({required String metaPath}) =>
     RustLib.instance.api.crateApiVaultOpenMeta(metaPath: metaPath);
 
-/// First run: generates the vault key and hands it out to be wrapped.
+/// First run: generates the vault key and prepares it for platform wrapping.
 ///
-/// # What this exposes
-///
-/// The returned bytes are the vault key in the clear. They exist in Dart for
-/// as long as it takes to pass them to the keystore, and Dart cannot wipe
-/// memory the way `Zeroizing` does — the garbage collector may keep copies.
-/// This is the unavoidable cost of a non-exportable keystore key: the wrap has
-/// to happen in platform code, and platform code cannot be reached from Rust
-/// without an out-of-band handle to the JVM.
-///
-/// The caller must pass these straight to the wrap call, overwrite the buffer,
-/// and never store or log them. Section 9.4's "do not log key material" covers
-/// the Dart side as much as this one.
+/// On Android the returned bytes are a random one-time handle. Kotlin consumes
+/// that handle through JNI, so the raw vault key does not enter Dart memory.
 Future<Uint8List> beginDeviceSetup() =>
     RustLib.instance.api.crateApiVaultBeginDeviceSetup();
 
 /// First run with a PIN: seals the vault key under it, then hands the sealed
 /// blob out to be wrapped by the keystore (section 9.2.4 step 4).
 ///
-/// What crosses the boundary here is already ciphertext, so this call does not
-/// carry the exposure that [`begin_device_setup`] does.
+/// Android returns a one-time handle for the PIN-sealed blob. This keeps all
+/// device-slot material out of Dart, including values that are already sealed.
 Future<Uint8List> beginDeviceSetupWithPin({required String pin}) =>
     RustLib.instance.api.crateApiVaultBeginDeviceSetupWithPin(pin: pin);
 
@@ -81,9 +72,9 @@ Future<void> finishDeviceSetup({
 Future<WrappedKeyBlob> beginDeviceOpen() =>
     RustLib.instance.api.crateApiVaultBeginDeviceOpen();
 
-/// Adopts the unwrapped key and opens the vault.
+/// Consumes the platform result and opens the vault.
 ///
-/// The same exposure note as [`begin_device_setup`] applies to `unwrapped`.
+/// On Android `unwrapped` is a one-time handle, not the vault key.
 Future<void> finishDeviceOpen({
   required String vaultPath,
   required List<int> unwrapped,
@@ -106,6 +97,46 @@ Future<void> finishDeviceOpenWithPin({
   pin: pin,
 );
 
+/// Prepares the current vault key for a biometric-only Android slot.
+///
+/// Android receives a random one-time handle. Kotlin consumes the handle
+/// through JNI and wraps the key without exposing it to Dart.
+Future<Uint8List> beginBiometricSetup() =>
+    RustLib.instance.api.crateApiVaultBeginBiometricSetup();
+
+/// Stores the biometric-only slot after Android Keystore wraps it.
+Future<void> finishBiometricSetup({
+  required List<int> wrapped,
+  required List<int> nonce,
+}) => RustLib.instance.api.crateApiVaultFinishBiometricSetup(
+  wrapped: wrapped,
+  nonce: nonce,
+);
+
+/// Reads the biometric-only slot for the locked screen.
+BiometricKeyBlob? biometricKeyBlob() =>
+    RustLib.instance.api.crateApiVaultBiometricKeyBlob();
+
+/// Returns every ciphertext that still references an Android Keystore alias.
+/// Android uses this list after a metadata commit to delete superseded keys.
+List<Uint8List> activeKeystoreCiphertexts() =>
+    RustLib.instance.api.crateApiVaultActiveKeystoreCiphertexts();
+
+/// Removes biometric unlock without changing the PIN slot.
+Future<void> clearBiometricKey() =>
+    RustLib.instance.api.crateApiVaultClearBiometricKey();
+
+/// Opens the vault with the biometric Keystore result.
+///
+/// On Android `unwrapped` is a one-time handle, not the vault key.
+Future<void> finishBiometricOpen({
+  required String vaultPath,
+  required List<int> unwrapped,
+}) => RustLib.instance.api.crateApiVaultFinishBiometricOpen(
+  vaultPath: vaultPath,
+  unwrapped: unwrapped,
+);
+
 /// Creates the password and recovery slots around the vault key this device
 /// already holds.
 ///
@@ -123,6 +154,26 @@ Future<RecoveryPhraseView> createAccount({
   email: email,
   password: password,
 );
+
+/// FR-29's second half: give the user a recovery phrase they can write down.
+///
+/// # This rotates, and the interface must say so
+///
+/// The phrase cannot be reprinted. It *is* the recovery key, 256 bits of it,
+/// and section 9.2.3 stores only the vault key sealed under that key — the
+/// direction that does not run backwards. So this generates a new phrase and
+/// retires the old one, which is what a user in this situation actually needs:
+/// they are asking because their copy is lost, destroyed, or was seen.
+///
+/// **The old phrase stops working.** Anyone who wrote it down — including the
+/// user, on a card in a drawer — must replace it. A screen that offers this
+/// without saying that has set up a lockout.
+///
+/// Re-authentication is the account password, per FR-29. Checked by actually
+/// unwrapping the password slot rather than by comparing a stored value, so a
+/// wrong password cannot get past it.
+Future<RecoveryPhraseView> rotateRecoveryPhrase({required String password}) =>
+    RustLib.instance.api.crateApiVaultRotateRecoveryPhrase(password: password);
 
 /// The email address of the sync account, or `None` on a local-only device.
 String? accountEmail() => RustLib.instance.api.crateApiVaultAccountEmail();
@@ -169,10 +220,19 @@ LockPolicyView lockPolicy() => RustLib.instance.api.crateApiVaultLockPolicy();
 Future<void> setLockPolicy({
   int? timeoutSeconds,
   required bool lockOnBackground,
+  int? wipeAfterFailures,
 }) => RustLib.instance.api.crateApiVaultSetLockPolicy(
   timeoutSeconds: timeoutSeconds,
   lockOnBackground: lockOnBackground,
+  wipeAfterFailures: wipeAfterFailures,
 );
+
+/// The band FR-35's threshold may be set within, for the screen that offers it.
+///
+/// Read from the core rather than restated in Dart, so the range the interface
+/// shows and the range the core enforces cannot drift into disagreeing.
+(int, int) wipeThresholdRange() =>
+    RustLib.instance.api.crateApiVaultWipeThresholdRange();
 
 /// FR-35: how many unlock attempts have failed in a row.
 int failedUnlockAttempts() =>
@@ -239,15 +299,99 @@ Future<void> renameEntry({
   required String id,
   String? issuer,
   required String account,
+  String? icon,
+  String? note,
+  List<String>? tags,
   required PlatformInt64 nowMs,
 }) => RustLib.instance.api.crateApiVaultRenameEntry(
   id: id,
   issuer: issuer,
   account: account,
+  icon: icon,
+  note: note,
+  tags: tags,
   nowMs: nowMs,
 );
 
-/// FR-18: delete an entry, leaving a tombstone.
+/// Every folder, with the number of entries in each.
+///
+/// Sorted by name rather than by creation order: a filter row is scanned, and
+/// a list that reorders itself as folders are added is one the user has to
+/// re-read every time.
+Future<List<FolderView>> listFolders() =>
+    RustLib.instance.api.crateApiVaultListFolders();
+
+/// Creates a folder and returns its identifier.
+Future<String> createFolder({
+  required String name,
+  required PlatformInt64 nowMs,
+}) => RustLib.instance.api.crateApiVaultCreateFolder(name: name, nowMs: nowMs);
+
+/// Renames a folder. Reuses the entry path, which already handles folders.
+Future<void> renameFolder({
+  required String id,
+  required String name,
+  required PlatformInt64 nowMs,
+}) => RustLib.instance.api.crateApiVaultRenameFolder(
+  id: id,
+  name: name,
+  nowMs: nowMs,
+);
+
+/// Deletes a folder and unfiles everything in it.
+///
+/// # Why the entries are updated rather than left dangling
+///
+/// [`list_folders`] already treats an unknown folder identifier as unfiled, so
+/// this would work without touching a single entry — and that is the right
+/// behaviour for the concurrent case, which cannot be prevented.
+///
+/// It is the wrong behaviour to *rely* on. An entry still carrying the
+/// identifier of a folder that was deliberately deleted would silently re-file
+/// itself if that identifier ever came back, and it exports and syncs a
+/// reference to something that no longer exists. Clearing them makes the state
+/// on disk mean what it says.
+///
+/// Never destroys an entry. Deleting a folder is a filing decision, and a user
+/// who lost forty codes to one would be entitled to be furious.
+Future<void> deleteFolder({required String id, required PlatformInt64 nowMs}) =>
+    RustLib.instance.api.crateApiVaultDeleteFolder(id: id, nowMs: nowMs);
+
+/// Files an entry into a folder, or takes it out of one with `None`.
+Future<void> setEntryFolder({
+  required String id,
+  String? folderId,
+  required PlatformInt64 nowMs,
+}) => RustLib.instance.api.crateApiVaultSetEntryFolder(
+  id: id,
+  folderId: folderId,
+  nowMs: nowMs,
+);
+
+/// Moves one entry to encrypted trash.
+Future<void> moveEntryToTrash({
+  required String id,
+  required PlatformInt64 nowMs,
+}) => RustLib.instance.api.crateApiVaultMoveEntryToTrash(id: id, nowMs: nowMs);
+
+/// Restores one entry from encrypted trash.
+Future<void> restoreEntry({required String id, required PlatformInt64 nowMs}) =>
+    RustLib.instance.api.crateApiVaultRestoreEntry(id: id, nowMs: nowMs);
+
+/// Lists encrypted trash without returning an OTP code or secret.
+Future<List<TrashEntryView>> listTrashedEntries() =>
+    RustLib.instance.api.crateApiVaultListTrashedEntries();
+
+/// Permanently deletes trash entries that reached the 30-day limit.
+Future<int> purgeExpiredTrash({required PlatformInt64 nowMs}) =>
+    RustLib.instance.api.crateApiVaultPurgeExpiredTrash(nowMs: nowMs);
+
+/// Returns groups of live entry identifiers that contain the same secret.
+/// Secret comparison stays inside Rust.
+Future<List<List<String>>> findDuplicateGroups() =>
+    RustLib.instance.api.crateApiVaultFindDuplicateGroups();
+
+/// Permanently deletes an entry and leaves a synchronization tombstone.
 Future<void> deleteEntry({required String id, required PlatformInt64 nowMs}) =>
     RustLib.instance.api.crateApiVaultDeleteEntry(id: id, nowMs: nowMs);
 
@@ -290,6 +434,180 @@ Future<void> setTimeOffsetSeconds({required PlatformInt64 offset}) =>
 Future<String> revealSecretForExport({required String id}) =>
     RustLib.instance.api.crateApiVaultRevealSecretForExport(id: id);
 
+/// FR-30: one entry as an `otpauth://` URI, for display as a QR code.
+///
+/// # Why this exists next to the backup file
+///
+/// A backup moves everything and needs a file the other application can read.
+/// This moves *one* account to something standing in front of you — a second
+/// phone, a desktop client, a friend's app — with no file, no cloud, and no
+/// account in common. It is the oldest transfer path in this ecosystem and
+/// still the one that always works.
+///
+/// FR-36 is `with_vault`: locked means no. The name of the caller is deliberate
+/// too — this returns a live secret, and a call site should be obvious in
+/// review.
+///
+/// A Steam entry comes back as `otpauth://steam/…`, which is Aegis's form and
+/// what 2FAS reads. Not an RFC, but an entry this app can import and cannot
+/// hand back is one the user cannot take anywhere else.
+Future<String> exportEntryUri({required String id}) =>
+    RustLib.instance.api.crateApiVaultExportEntryUri(id: id);
+
+/// True once the user has been past the first-run choice — or has plainly never
+/// needed it.
+///
+/// # Why an entry counts as having seen it
+///
+/// The flag alone is wrong for everybody who already had the app. It does not
+/// exist in their metadata, so on the release that introduces it every existing
+/// user would be shown a first-run screen offering to import the accounts they
+/// have been using for months.
+///
+/// A vault with anything in it has been past first run by definition, whatever
+/// the flag says. Asking the vault is the honest test; the flag only has to
+/// answer for the genuinely empty case.
+///
+/// This was found by a test, not by thinking about it: `app_test.dart` starts
+/// the real application and expects the code list, and it got the welcome
+/// screen instead.
+///
+/// Kept in `meta` rather than in Flutter's preferences, for the same reason as
+/// the sort order: this project has one place for settings that outlive a run,
+/// and a second would be a second thing to wipe and reason about. It also means
+/// "Wipe this device" genuinely returns the app to first-run state rather than
+/// to one that looks used and holds nothing.
+bool welcomeSeen() => RustLib.instance.api.crateApiVaultWelcomeSeen();
+
+Future<void> markWelcomeSeen() =>
+    RustLib.instance.api.crateApiVaultMarkWelcomeSeen();
+
+String? listSort() => RustLib.instance.api.crateApiVaultListSort();
+
+Future<void> setListSort({required String mode}) =>
+    RustLib.instance.api.crateApiVaultSetListSort(mode: mode);
+
+bool brandIconsEnabled() =>
+    RustLib.instance.api.crateApiVaultBrandIconsEnabled();
+
+Future<void> setBrandIconsEnabled({required bool enabled}) =>
+    RustLib.instance.api.crateApiVaultSetBrandIconsEnabled(enabled: enabled);
+
+/// FR-22's manual order: places an entry between two others.
+///
+/// `order` is a fractional index — a string that sorts between its neighbours —
+/// so two devices can insert between the same pair without a conflict
+/// (section 10.4). Computing it is the caller's job; this writes it.
+///
+/// The secret is untouched. FR-17 is explicit that it cannot be edited, and a
+/// reorder is the last place anyone would look for a change to one.
+Future<void> setEntryOrder({
+  required String id,
+  required String order,
+  required PlatformInt64 nowMs,
+}) => RustLib.instance.api.crateApiVaultSetEntryOrder(
+  id: id,
+  order: order,
+  nowMs: nowMs,
+);
+
+/// Reads one `otpauth-migration://` code and adds it to the batch in progress.
+///
+/// Nothing is written to the vault here. FR-14 requires every part before the
+/// import runs, and an import that happened per-code would leave a user who
+/// scanned two of three believing they were finished.
+Future<MigrationScanView> migrationScan({required String uri}) =>
+    RustLib.instance.api.crateApiVaultMigrationScan(uri: uri);
+
+/// Writes the completed batch into the vault.
+///
+/// Refuses while parts are missing — the whole point of collecting them.
+///
+/// FR-15d: one bad entry never fails the rest. Anything that cannot be written
+/// joins the report rather than aborting the import, so a user moving forty
+/// accounts with one malformed entry ends up with thirty-nine and a list.
+Future<ImportReportView> migrationFinish({required PlatformInt64 nowMs}) =>
+    RustLib.instance.api.crateApiVaultMigrationFinish(nowMs: nowMs);
+
+/// Identifies an export file without reading its contents.
+///
+/// Lets the screen ask for a password before the user waits through scrypt,
+/// and — the half that matters more — lets it not ask when the file is plain.
+DetectedFileView detectImportFile({required String text}) =>
+    RustLib.instance.api.crateApiVaultDetectImportFile(text: text);
+
+/// Imports an Aegis export, a 2FAS backup, or a backup this app wrote.
+///
+/// The format is detected rather than chosen. Making the user pick the
+/// application first adds a step whose only outcomes are "correct, so it was
+/// not needed" and "wrong, so a good file is reported as unreadable" — and the
+/// person doing this has just installed the app and is deciding whether to keep
+/// it.
+///
+/// Goes through the same [`absorb`] as every other import, so FR-16's duplicate
+/// rule and FR-15d's partial report hold here without being restated.
+Future<ImportReportView> importFile({
+  required String text,
+  String? password,
+  required PlatformInt64 nowMs,
+}) => RustLib.instance.api.crateApiVaultImportFile(
+  text: text,
+  password: password,
+  nowMs: nowMs,
+);
+
+/// FR-26 and FR-27: every entry, written to a file the user keeps.
+///
+/// `passphrase` present means FR-26's encrypted backup; absent means FR-27's
+/// plain one, which is every secret in clear text and must not be reachable
+/// without the double confirmation the interface puts in front of it.
+///
+/// FR-36 is `with_vault`: it fails while locked, so neither kind can be
+/// produced from a locked app. That is the same gate `reveal_secret_for_export`
+/// sits behind, and for the same reason.
+///
+/// Returns the file contents rather than writing a file. Where a backup is
+/// allowed to land is a platform question — the share sheet, the documents
+/// picker, a directory the app may not touch on Android 13 — and the core has
+/// no business guessing at it.
+Future<String> exportBackup({String? passphrase}) =>
+    RustLib.instance.api.crateApiVaultExportBackup(passphrase: passphrase);
+
+/// Whether a chosen file needs a passphrase, before the user waits on Argon2id.
+///
+/// Also the answer to "is this even one of ours", which is why it can fail.
+bool backupNeedsPassphrase({required String text}) =>
+    RustLib.instance.api.crateApiVaultBackupNeedsPassphrase(text: text);
+
+/// Opens and validates a backup without writing to the vault.
+Future<BackupVerificationView> verifyBackup({
+  required String text,
+  String? passphrase,
+}) => RustLib.instance.api.crateApiVaultVerifyBackup(
+  text: text,
+  passphrase: passphrase,
+);
+
+/// FR-28: reads a backup this app wrote, of either kind.
+///
+/// Goes through the same [`absorb`] as every other import, so FR-16's duplicate
+/// rule and FR-15d's partial report apply here without being restated. That
+/// matters most for the case people actually hit: restoring a backup onto a
+/// device that already has some of the accounts on it.
+Future<ImportReportView> importBackup({
+  required String text,
+  String? passphrase,
+  required PlatformInt64 nowMs,
+}) => RustLib.instance.api.crateApiVaultImportBackup(
+  text: text,
+  passphrase: passphrase,
+  nowMs: nowMs,
+);
+
+/// Abandons a partly scanned export.
+Future<void> migrationReset() =>
+    RustLib.instance.api.crateApiVaultMigrationReset();
+
 /// The result of adding an entry. Exactly one field is set.
 class AddOutcome {
   final String? addedId;
@@ -309,6 +627,50 @@ class AddOutcome {
           runtimeType == other.runtimeType &&
           addedId == other.addedId &&
           duplicateOf == other.duplicateOf;
+}
+
+class BackupVerificationView {
+  final int entryCount;
+  final int folderCount;
+  final bool wasEncrypted;
+
+  const BackupVerificationView({
+    required this.entryCount,
+    required this.folderCount,
+    required this.wasEncrypted,
+  });
+
+  @override
+  int get hashCode =>
+      entryCount.hashCode ^ folderCount.hashCode ^ wasEncrypted.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is BackupVerificationView &&
+          runtimeType == other.runtimeType &&
+          entryCount == other.entryCount &&
+          folderCount == other.folderCount &&
+          wasEncrypted == other.wasEncrypted;
+}
+
+/// The optional biometric-only route to the same vault key.
+class BiometricKeyBlob {
+  final Uint8List wrapped;
+  final Uint8List nonce;
+
+  const BiometricKeyBlob({required this.wrapped, required this.nonce});
+
+  @override
+  int get hashCode => wrapped.hashCode ^ nonce.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is BiometricKeyBlob &&
+          runtimeType == other.runtimeType &&
+          wrapped == other.wrapped &&
+          nonce == other.nonce;
 }
 
 /// What this native library was built from (NFR-13).
@@ -341,6 +703,27 @@ class BuildInfo {
           commit == other.commit &&
           dirty == other.dirty &&
           builtAt == other.builtAt;
+}
+
+/// What a chosen file turned out to be.
+class DetectedFileView {
+  /// `Aegis`, `2FAS`, or `backup`. For the screen's wording, not for
+  /// branching: the reader dispatches on the file itself.
+  final String source;
+  final bool encrypted;
+
+  const DetectedFileView({required this.source, required this.encrypted});
+
+  @override
+  int get hashCode => source.hashCode ^ encrypted.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is DetectedFileView &&
+          runtimeType == other.runtimeType &&
+          source == other.source &&
+          encrypted == other.encrypted;
 }
 
 /// What an `otpauth://` URI holds, shown before the user commits to adding it.
@@ -397,11 +780,14 @@ class EntryPreview {
 class EntryView {
   final String id;
 
-  /// `"totp"` or `"hotp"`.
+  /// `"totp"`, `"hotp"`, or `"steam"`.
   final String kind;
   final String? issuer;
   final String account;
   final String code;
+
+  /// The next time-based code. HOTP and blocked entries have no value.
+  final String? nextCode;
   final int digits;
   final int period;
 
@@ -410,6 +796,28 @@ class EntryView {
   final BigInt? counter;
   final bool favourite;
   final String? icon;
+  final String note;
+  final List<String> tags;
+
+  /// FR-19: the folder this entry is filed in, if any.
+  ///
+  /// May name a folder that no longer exists — device A can delete a folder
+  /// while device B files something into it. The list treats that as
+  /// unfiled, which is the only reading that does not hide the entry.
+  final String? folderId;
+
+  /// Epoch milliseconds, for FR-22's "date added".
+  ///
+  /// The payload's own value, not the record's `updated_at`: an edit changes
+  /// when a record was written and must not change where it sorts.
+  final PlatformInt64 createdAt;
+
+  /// FR-22's manual order, a fractional index.
+  ///
+  /// Empty on an entry that has never been placed by hand, which sorts after
+  /// everything that has — a new entry appearing in the middle of a list the
+  /// user arranged would look like the arrangement had been lost.
+  final String order;
 
   /// True when a conflict resolved while locked is still waiting for section
   /// 10.4's counter rule. `code` is empty and the interface must say why
@@ -422,12 +830,18 @@ class EntryView {
     this.issuer,
     required this.account,
     required this.code,
+    this.nextCode,
     required this.digits,
     required this.period,
     required this.remainingSeconds,
     this.counter,
     required this.favourite,
     this.icon,
+    required this.note,
+    required this.tags,
+    this.folderId,
+    required this.createdAt,
+    required this.order,
     required this.awaitingReconcile,
   });
 
@@ -438,12 +852,18 @@ class EntryView {
       issuer.hashCode ^
       account.hashCode ^
       code.hashCode ^
+      nextCode.hashCode ^
       digits.hashCode ^
       period.hashCode ^
       remainingSeconds.hashCode ^
       counter.hashCode ^
       favourite.hashCode ^
       icon.hashCode ^
+      note.hashCode ^
+      tags.hashCode ^
+      folderId.hashCode ^
+      createdAt.hashCode ^
+      order.hashCode ^
       awaitingReconcile.hashCode;
 
   @override
@@ -456,13 +876,73 @@ class EntryView {
           issuer == other.issuer &&
           account == other.account &&
           code == other.code &&
+          nextCode == other.nextCode &&
           digits == other.digits &&
           period == other.period &&
           remainingSeconds == other.remainingSeconds &&
           counter == other.counter &&
           favourite == other.favourite &&
           icon == other.icon &&
+          note == other.note &&
+          tags == other.tags &&
+          folderId == other.folderId &&
+          createdAt == other.createdAt &&
+          order == other.order &&
           awaitingReconcile == other.awaitingReconcile;
+}
+
+/// One folder, for the filter row above the code list.
+class FolderView {
+  final String id;
+  final String name;
+
+  /// How many live entries name this folder. Shown beside it, because a
+  /// folder whose count is zero is usually one the user thought they had
+  /// filled.
+  final int count;
+
+  const FolderView({required this.id, required this.name, required this.count});
+
+  @override
+  int get hashCode => id.hashCode ^ name.hashCode ^ count.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is FolderView &&
+          runtimeType == other.runtimeType &&
+          id == other.id &&
+          name == other.name &&
+          count == other.count;
+}
+
+/// What an import produced.
+class ImportReportView {
+  final int imported;
+
+  /// Entries already in the vault (FR-16). Not failures, and not imported
+  /// twice.
+  final int duplicates;
+  final List<RefusedView> refused;
+
+  const ImportReportView({
+    required this.imported,
+    required this.duplicates,
+    required this.refused,
+  });
+
+  @override
+  int get hashCode =>
+      imported.hashCode ^ duplicates.hashCode ^ refused.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is ImportReportView &&
+          runtimeType == other.runtimeType &&
+          imported == other.imported &&
+          duplicates == other.duplicates &&
+          refused == other.refused;
 }
 
 /// The lock policy (FR-33, FR-33a, FR-34).
@@ -475,10 +955,22 @@ class LockPolicyView {
   final int? timeoutSeconds;
   final bool lockOnBackground;
 
-  const LockPolicyView({this.timeoutSeconds, required this.lockOnBackground});
+  /// FR-35: wipe after this many consecutive failures. `None` is off, and
+  /// off is the default — the loss it causes is permanent and the threat it
+  /// answers is rare.
+  final int? wipeAfterFailures;
+
+  const LockPolicyView({
+    this.timeoutSeconds,
+    required this.lockOnBackground,
+    this.wipeAfterFailures,
+  });
 
   @override
-  int get hashCode => timeoutSeconds.hashCode ^ lockOnBackground.hashCode;
+  int get hashCode =>
+      timeoutSeconds.hashCode ^
+      lockOnBackground.hashCode ^
+      wipeAfterFailures.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -486,7 +978,54 @@ class LockPolicyView {
       other is LockPolicyView &&
           runtimeType == other.runtimeType &&
           timeoutSeconds == other.timeoutSeconds &&
-          lockOnBackground == other.lockOnBackground;
+          lockOnBackground == other.lockOnBackground &&
+          wipeAfterFailures == other.wipeAfterFailures;
+}
+
+/// What one scanned export code did.
+class MigrationScanView {
+  /// How many codes are still to scan. Zero means ready to import.
+  final int remaining;
+
+  /// Entries understood so far, across every part.
+  final int ready;
+
+  /// Entries that could not be read (FR-15d). Named in the report at the end.
+  final int refused;
+
+  /// True when this code had already been scanned. Not a failure: a camera
+  /// reads the same code many times a second.
+  final bool alreadySeen;
+
+  /// True when this code belongs to a different export.
+  final bool differentExport;
+
+  const MigrationScanView({
+    required this.remaining,
+    required this.ready,
+    required this.refused,
+    required this.alreadySeen,
+    required this.differentExport,
+  });
+
+  @override
+  int get hashCode =>
+      remaining.hashCode ^
+      ready.hashCode ^
+      refused.hashCode ^
+      alreadySeen.hashCode ^
+      differentExport.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is MigrationScanView &&
+          runtimeType == other.runtimeType &&
+          remaining == other.remaining &&
+          ready == other.ready &&
+          refused == other.refused &&
+          alreadySeen == other.alreadySeen &&
+          differentExport == other.differentExport;
 }
 
 /// The recovery phrase, returned once at sign-up and never stored (FR-55).
@@ -513,6 +1052,61 @@ class RecoveryPhraseView {
           runtimeType == other.runtimeType &&
           phrase == other.phrase &&
           confirmIndices == other.confirmIndices;
+}
+
+/// One entry that could not be imported, for the report FR-15d requires.
+class RefusedView {
+  final String label;
+  final String reason;
+
+  const RefusedView({required this.label, required this.reason});
+
+  @override
+  int get hashCode => label.hashCode ^ reason.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is RefusedView &&
+          runtimeType == other.runtimeType &&
+          label == other.label &&
+          reason == other.reason;
+}
+
+/// One entry in the trash. No code or secret leaves Rust for this view.
+class TrashEntryView {
+  final String id;
+  final String? issuer;
+  final String account;
+  final PlatformInt64 trashedAt;
+  final PlatformInt64 purgeAt;
+
+  const TrashEntryView({
+    required this.id,
+    this.issuer,
+    required this.account,
+    required this.trashedAt,
+    required this.purgeAt,
+  });
+
+  @override
+  int get hashCode =>
+      id.hashCode ^
+      issuer.hashCode ^
+      account.hashCode ^
+      trashedAt.hashCode ^
+      purgeAt.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is TrashEntryView &&
+          runtimeType == other.runtimeType &&
+          id == other.id &&
+          issuer == other.issuer &&
+          account == other.account &&
+          trashedAt == other.trashedAt &&
+          purgeAt == other.purgeAt;
 }
 
 /// The stored slot, on its way to the platform to be unwrapped.

@@ -14,6 +14,20 @@ import 'package:path_provider/path_provider.dart';
 /// compiled for Android and reached over the bridge, returns the same answer.
 /// That is what this file is for, and it is the evidence behind the stage S2
 /// exit criterion in section 18.
+/// The budget for a test that runs Argon2id at section 9.2.1's real cost.
+///
+/// 64 MiB and three iterations takes about fourteen seconds on a mid-range
+/// phone, and these tests derive two or three keys each. That is over
+/// `package:test`'s thirty-second default — and it was under it only while the
+/// handset was cool. The same test passed all session and then timed out at
+/// twenty-eight seconds once a warm device started throttling.
+///
+/// Lowering the cost would make the tests fast and stop them testing the thing
+/// that matters, because the cost *is* the security property. So the budget is
+/// raised and named instead. A flaky timeout on a security test is worse than a
+/// slow one: it teaches whoever sees it to re-run rather than look.
+const argon2idBudget = Timeout(Duration(minutes: 4));
+
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
 
@@ -32,7 +46,16 @@ void main() {
       case VaultState.locked:
         await session.unlock();
       case VaultState.lockedNeedsPin:
-        fail('the test device should not have a PIN-protected slot');
+        // Not a defect in the app — the phone has been used by hand and a
+        // PIN was set. The tests cannot open a vault whose PIN they do not
+        // know, and guessing would burn FR-35's failed-attempt counter.
+        fail(
+          'This device has a PIN on its vault, so the tests cannot open it. '
+          'Either remove the PIN in Settings, or reinstall the app with '
+          '"adb uninstall dev.authcore.authenticator". Reinstalling destroys '
+          'the codes on the device, so export a backup first if any of them '
+          'matter.',
+        );
     }
   });
 
@@ -64,7 +87,8 @@ void main() {
 
   test('an entry added over the bridge generates the RFC 6238 code', () async {
     final outcome = await rust.addFromUri(
-      uri: 'otpauth://totp/RFC6238:appendix-b'
+      uri:
+          'otpauth://totp/RFC6238:appendix-b'
           '?secret=$rfcSecret&issuer=RFC6238&digits=8&period=30',
       nowMs: DateTime.now().millisecondsSinceEpoch,
     );
@@ -81,29 +105,40 @@ void main() {
       reason: 'the Android build of the core must agree with RFC 6238',
     );
     expect(entry.digits, 8);
-    expect(entry.remainingSeconds, 1, reason: 'T=59 is one second from the step boundary');
+    expect(
+      entry.remainingSeconds,
+      1,
+      reason: 'T=59 is one second from the step boundary',
+    );
 
-    await rust.deleteEntry(id: id!, nowMs: DateTime.now().millisecondsSinceEpoch);
+    await rust.deleteEntry(
+      id: id!,
+      nowMs: DateTime.now().millisecondsSinceEpoch,
+    );
   });
 
-  test('a duplicate secret is reported rather than stored twice (FR-16)', () async {
-    const uri = 'otpauth://totp/Duplicate:test?secret=$rfcSecret';
-    final now = DateTime.now().millisecondsSinceEpoch;
+  test(
+    'a duplicate secret is reported rather than stored twice (FR-16)',
+    () async {
+      const uri = 'otpauth://totp/Duplicate:test?secret=$rfcSecret';
+      final now = DateTime.now().millisecondsSinceEpoch;
 
-    final first = await rust.addFromUri(uri: uri, nowMs: now);
-    expect(first.addedId, isNotNull);
+      final first = await rust.addFromUri(uri: uri, nowMs: now);
+      expect(first.addedId, isNotNull);
 
-    final second = await rust.addFromUri(uri: uri, nowMs: now);
-    expect(second.addedId, isNull);
-    expect(second.duplicateOf, first.addedId);
+      final second = await rust.addFromUri(uri: uri, nowMs: now);
+      expect(second.addedId, isNull);
+      expect(second.duplicateOf, first.addedId);
 
-    await rust.deleteEntry(id: first.addedId!, nowMs: now);
-  });
+      await rust.deleteEntry(id: first.addedId!, nowMs: now);
+    },
+  );
 
   test('an HOTP counter advances and never repeats a code', () async {
     final now = DateTime.now().millisecondsSinceEpoch;
     final added = await rust.addFromUri(
-      uri: 'otpauth://hotp/RFC4226:appendix-d'
+      uri:
+          'otpauth://hotp/RFC4226:appendix-d'
           '?secret=$rfcSecret&issuer=RFC4226&counter=0',
       nowMs: now,
     );
@@ -198,13 +233,18 @@ void main() {
     final now = DateTime.now().millisecondsSinceEpoch;
 
     final added = await rust.addFromUri(
-      uri: 'otpauth://totp/InspectMe:findthisaccount'
+      uri:
+          'otpauth://totp/InspectMe:findthisaccount'
           '?secret=$rfcSecret&issuer=InspectMe',
       nowMs: now,
     );
 
     final vaultFile = File('${directory.path}/vault.db');
-    expect(await vaultFile.exists(), isTrue, reason: 'the vault file should exist');
+    expect(
+      await vaultFile.exists(),
+      isTrue,
+      reason: 'the vault file should exist',
+    );
 
     final bytes = await vaultFile.readAsBytes();
 
@@ -224,11 +264,11 @@ void main() {
     final text = String.fromCharCodes(bytes.where((b) => b >= 32 && b < 127));
 
     for (final readable in [
-      rfcSecret,          // the secret
-      'InspectMe',        // the issuer
-      'findthisaccount',  // the account name
-      '"secret"',         // even a payload field name
-      'CREATE TABLE',     // and the schema, which the page layer covers
+      rfcSecret, // the secret
+      'InspectMe', // the issuer
+      'findthisaccount', // the account name
+      '"secret"', // even a payload field name
+      'CREATE TABLE', // and the schema, which the page layer covers
     ]) {
       expect(
         text.contains(readable),
@@ -283,42 +323,46 @@ void main() {
       }
     });
 
-    test('a PIN is required once set, and the wrong one is refused', () async {
-      await session.changePin(pin, requireUserAuthentication: false);
+    test(
+      'a PIN is required once set, and the wrong one is refused',
+      () async {
+        await session.changePin(pin, requireUserAuthentication: false);
 
-      // The slot now says so, and the keystore alone is not enough.
-      final blob = await rust.beginDeviceOpen();
-      expect(blob.scheme, 'keystore-pin-v1');
-      expect(blob.needsPin, isTrue);
+        // The slot now says so, and the keystore alone is not enough.
+        final blob = await rust.beginDeviceOpen();
+        expect(blob.scheme, 'keystore-pin-v1');
+        expect(blob.needsPin, isTrue);
 
-      session.lock();
-      expect(rust.isVaultOpen(), isFalse);
+        session.lock();
+        expect(rust.isVaultOpen(), isFalse);
 
-      await expectLater(
-        session.unlock(),
-        throwsA(predicate((e) => e.toString().contains('PIN'))),
-        reason: 'no PIN supplied',
-      );
-      expect(rust.isVaultOpen(), isFalse);
+        await expectLater(
+          session.unlock(),
+          throwsA(predicate((e) => e.toString().contains('PIN'))),
+          reason: 'no PIN supplied',
+        );
+        expect(rust.isVaultOpen(), isFalse);
 
-      final before = rust.failedUnlockAttempts();
-      await expectLater(
-        session.unlock(pin: '999888'),
-        throwsA(anything),
-        reason: 'the wrong PIN',
-      );
-      expect(
-        rust.failedUnlockAttempts(),
-        before + 1,
-        reason: 'FR-35 counts the failure',
-      );
-      expect(rust.isVaultOpen(), isFalse);
+        final before = rust.failedUnlockAttempts();
+        await expectLater(
+          session.unlock(pin: '999888'),
+          throwsA(anything),
+          reason: 'the wrong PIN',
+        );
+        expect(
+          rust.failedUnlockAttempts(),
+          before + 1,
+          reason: 'FR-35 counts the failure',
+        );
+        expect(rust.isVaultOpen(), isFalse);
 
-      // The right one opens it and clears the count.
-      await session.unlock(pin: pin);
-      expect(rust.isVaultOpen(), isTrue);
-      expect(rust.failedUnlockAttempts(), 0);
-    });
+        // The right one opens it and clears the count.
+        await session.unlock(pin: pin);
+        expect(rust.isVaultOpen(), isTrue);
+        expect(rust.failedUnlockAttempts(), 0);
+      },
+      timeout: argon2idBudget,
+    );
 
     test('adding a PIN keeps every existing entry readable', () async {
       final now = DateTime.now().millisecondsSinceEpoch;
@@ -340,22 +384,25 @@ void main() {
       );
 
       await rust.deleteEntry(id: added.addedId!, nowMs: now);
-    });
+    }, timeout: argon2idBudget);
 
-    test('a PIN that fails FR-31 is refused before anything is stored', () async {
-      for (final bad in ['12345', '123456', '000000']) {
-        await expectLater(
-          session.changePin(bad, requireUserAuthentication: false),
-          throwsA(anything),
-          reason: '$bad should be refused',
-        );
-      }
+    test(
+      'a PIN that fails FR-31 is refused before anything is stored',
+      () async {
+        for (final bad in ['12345', '123456', '000000']) {
+          await expectLater(
+            session.changePin(bad, requireUserAuthentication: false),
+            throwsA(anything),
+            reason: '$bad should be refused',
+          );
+        }
 
-      // And the slot is untouched.
-      final blob = await rust.beginDeviceOpen();
-      expect(blob.needsPin, isFalse);
-      await session.unlock();
-    });
+        // And the slot is untouched.
+        final blob = await rust.beginDeviceOpen();
+        expect(blob.needsPin, isFalse);
+        await session.unlock();
+      },
+    );
   });
 
   /// NFR-13: the library on the device must be the one built from this source.
@@ -397,7 +444,8 @@ void main() {
         expect(
           age.inDays,
           lessThan(7),
-          reason: 'EXPECTED_COMMIT was not passed, so only the age of the '
+          reason:
+              'EXPECTED_COMMIT was not passed, so only the age of the '
               'library could be checked, and it is $age old. Re-run with '
               '--dart-define=EXPECTED_COMMIT=\$(git rev-parse HEAD) for the '
               'real check.',
@@ -414,7 +462,8 @@ void main() {
         expect(
           age.inHours,
           lessThan(24),
-          reason: 'the library was built from a dirty tree $age ago, so it '
+          reason:
+              'the library was built from a dirty tree $age ago, so it '
               'cannot be matched to a commit and is too old to trust',
         );
         return;
@@ -423,7 +472,8 @@ void main() {
       expect(
         info.commit,
         expectedCommit,
-        reason: 'the library on this device was built from ${info.commit}, '
+        reason:
+            'the library on this device was built from ${info.commit}, '
             'but the source is at $expectedCommit. It is stale — the APK '
             'carries a library from an earlier build.',
       );
@@ -434,90 +484,123 @@ void main() {
   ///
   /// No server exists yet, so what is proved here is the derivation and the
   /// slot handling: that the account wraps the key the device already holds,
-  /// and that both ways back return exactly that key.
+  /// and that both ways back return exactly that key.  ///
+  /// # Why these carry an explicit timeout
+  ///
+  /// Argon2id at section 9.2.1's cost — 64 MiB, three iterations — takes about
+  /// fourteen seconds on a mid-range phone, and these tests derive two or three
+  /// keys each. That is over `package:test`'s thirty-second default, and it was
+  /// under it only while the handset was cool: the same test passed all session
+  /// and then timed out at twenty-eight seconds after a warm device throttled.
+  ///
+  /// Lowering the cost would make the tests fast and stop them testing the
+  /// thing that matters, since the cost *is* the security property. So the
+  /// budget is raised and named instead. A flaky timeout on a security test is
+  /// worse than a slow one: it teaches whoever sees it to re-run rather than
+  /// look.
   group('sync account slots', () {
     const email = 'rupsa@example.com';
     const password = 'correct horse battery staple';
 
-    test('an account wraps the existing vault key and recovery returns it',
-        () async {
-      final now = DateTime.now().millisecondsSinceEpoch;
+    test(
+      'an account wraps the existing vault key and recovery returns it',
+      () async {
+        final now = DateTime.now().millisecondsSinceEpoch;
 
-      // An entry that exists before the account does. If sign-up replaced the
-      // vault key, this is what would be lost.
-      final added = await rust.addFromUri(
-        uri: 'otpauth://totp/BeforeAccount:someone?secret=$rfcSecret',
-        nowMs: now,
-      );
+        // An entry that exists before the account does. If sign-up replaced the
+        // vault key, this is what would be lost.
+        final added = await rust.addFromUri(
+          uri: 'otpauth://totp/BeforeAccount:someone?secret=$rfcSecret',
+          nowMs: now,
+        );
 
-      final recovery = await rust.createAccount(email: email, password: password);
+        final recovery = await rust.createAccount(
+          email: email,
+          password: password,
+        );
 
-      expect(recovery.phrase.split(' ').length, 24, reason: 'BIP-39, 24 words');
-      expect(recovery.confirmIndices.length, 3, reason: 'section 9.2.3 step 4');
-      expect(recovery.confirmIndices.every((i) => i < 24), isTrue);
-      expect(rust.accountEmail(), email);
+        expect(
+          recovery.phrase.split(' ').length,
+          24,
+          reason: 'BIP-39, 24 words',
+        );
+        expect(
+          recovery.confirmIndices.length,
+          3,
+          reason: 'section 9.2.3 step 4',
+        );
+        expect(recovery.confirmIndices.every((i) => i < 24), isTrue);
+        expect(rust.accountEmail(), email);
 
-      // The entry added before sign-up is still readable, which is only true
-      // if the vault key did not change.
-      final entries = await rust.listEntries(nowUnixSeconds: 59);
-      expect(
-        entries.map((e) => e.id),
-        contains(added.addedId),
-        reason: 'creating an account must not re-key the vault',
-      );
+        // The entry added before sign-up is still readable, which is only true
+        // if the vault key did not change.
+        final entries = await rust.listEntries(nowUnixSeconds: 59);
+        expect(
+          entries.map((e) => e.id),
+          contains(added.addedId),
+          reason: 'creating an account must not re-key the vault',
+        );
 
-      // Lock, then come back in through the recovery phrase rather than the
-      // keystore. This is the path a new device would take.
-      session.lock();
-      expect(rust.isVaultOpen(), isFalse);
+        // Lock, then come back in through the recovery phrase rather than the
+        // keystore. This is the path a new device would take.
+        session.lock();
+        expect(rust.isVaultOpen(), isFalse);
 
-      await rust.unlockWithRecovery(
-        vaultPath: session.vaultPath,
-        phrase: recovery.phrase,
-      );
-      expect(rust.isVaultOpen(), isTrue);
-
-      final afterRecovery = await rust.listEntries(nowUnixSeconds: 59);
-      expect(
-        afterRecovery.map((e) => e.id),
-        contains(added.addedId),
-        reason: 'recovery returned a different key',
-      );
-
-      await rust.deleteEntry(id: added.addedId!, nowMs: now);
-    });
-
-    test('the password slot opens the vault and the wrong one does not',
-        () async {
-      session.lock();
-
-      await expectLater(
-        rust.unlockWithPassword(
+        await rust.unlockWithRecovery(
           vaultPath: session.vaultPath,
-          password: 'not the password',
-        ),
-        throwsA(anything),
-      );
-      expect(rust.isVaultOpen(), isFalse);
+          phrase: recovery.phrase,
+        );
+        expect(rust.isVaultOpen(), isTrue);
 
-      await rust.unlockWithPassword(
-        vaultPath: session.vaultPath,
-        password: password,
-      );
-      expect(rust.isVaultOpen(), isTrue);
-    });
+        final afterRecovery = await rust.listEntries(nowUnixSeconds: 59);
+        expect(
+          afterRecovery.map((e) => e.id),
+          contains(added.addedId),
+          reason: 'recovery returned a different key',
+        );
 
-    test('the authentication key is derived, deterministic, and unstored',
-        () async {
-      final first = await rust.deriveAuthKey(password: password);
-      final second = await rust.deriveAuthKey(password: password);
+        await rust.deleteEntry(id: added.addedId!, nowMs: now);
+      },
+      timeout: argon2idBudget,
+    );
 
-      expect(first, hasLength(64), reason: '32 bytes as hex');
-      expect(first, second, reason: 'S4 must be able to reproduce it');
-      expect(
-        await rust.deriveAuthKey(password: 'a different password'),
-        isNot(first),
-      );
-    });
+    test(
+      'the password slot opens the vault and the wrong one does not',
+      () async {
+        session.lock();
+
+        await expectLater(
+          rust.unlockWithPassword(
+            vaultPath: session.vaultPath,
+            password: 'not the password',
+          ),
+          throwsA(anything),
+        );
+        expect(rust.isVaultOpen(), isFalse);
+
+        await rust.unlockWithPassword(
+          vaultPath: session.vaultPath,
+          password: password,
+        );
+        expect(rust.isVaultOpen(), isTrue);
+      },
+      timeout: argon2idBudget,
+    );
+
+    test(
+      'the authentication key is derived, deterministic, and unstored',
+      () async {
+        final first = await rust.deriveAuthKey(password: password);
+        final second = await rust.deriveAuthKey(password: password);
+
+        expect(first, hasLength(64), reason: '32 bytes as hex');
+        expect(first, second, reason: 'S4 must be able to reproduce it');
+        expect(
+          await rust.deriveAuthKey(password: 'a different password'),
+          isNot(first),
+        );
+      },
+      timeout: argon2idBudget,
+    );
   });
 }

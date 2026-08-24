@@ -25,25 +25,45 @@ class LockPolicy {
   const LockPolicy({
     this.timeout = LockTimeout.after1Minute,
     this.lockOnBackground = false,
+    this.wipeAfterFailures,
   });
 
   final LockTimeout timeout;
   final bool lockOnBackground;
 
-  LockPolicy copyWith({LockTimeout? timeout, bool? lockOnBackground}) =>
-      LockPolicy(
-        timeout: timeout ?? this.timeout,
-        lockOnBackground: lockOnBackground ?? this.lockOnBackground,
-      );
+  /// FR-35: destroy the vault after this many consecutive failed unlocks.
+  ///
+  /// Null is off, and off is the default. The threat is an attacker holding
+  /// the device and guessing; the cost of a false trigger is every account,
+  /// permanently, with no reset — §16.4 is explicit that the server cannot
+  /// decrypt anything. A user who wants that trade can ask for it.
+  final int? wipeAfterFailures;
+
+  /// `clearWipe` exists because `wipeAfterFailures: null` cannot mean both
+  /// "leave it alone" and "turn it off" in a copy method. Turning a
+  /// data-destroying setting off must be expressible.
+  LockPolicy copyWith({
+    LockTimeout? timeout,
+    bool? lockOnBackground,
+    int? wipeAfterFailures,
+    bool clearWipe = false,
+  }) => LockPolicy(
+    timeout: timeout ?? this.timeout,
+    lockOnBackground: lockOnBackground ?? this.lockOnBackground,
+    wipeAfterFailures: clearWipe
+        ? null
+        : (wipeAfterFailures ?? this.wipeAfterFailures),
+  );
 
   @override
   bool operator ==(Object other) =>
       other is LockPolicy &&
       other.timeout == timeout &&
-      other.lockOnBackground == lockOnBackground;
+      other.lockOnBackground == lockOnBackground &&
+      other.wipeAfterFailures == wipeAfterFailures;
 
   @override
-  int get hashCode => Object.hash(timeout, lockOnBackground);
+  int get hashCode => Object.hash(timeout, lockOnBackground, wipeAfterFailures);
 }
 
 /// FR-33's list, exactly: immediate, 15 s, 1 min, 5 min, 15 min, and never.

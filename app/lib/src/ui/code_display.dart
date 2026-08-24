@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 
+import '../../l10n/generated/app_localizations.dart';
+
 /// Renders a one-time code.
 ///
 /// Two things matter here beyond looking tidy:
@@ -8,6 +10,9 @@ import 'package:flutter/material.dart';
 ///   changes, which reads as flicker on a row that updates once a second.
 /// - Grouping. A 6-digit code splits 3-3 and an 8-digit code splits 4-4, which
 ///   is how the issuing services print them. A 7-digit code splits 4-3.
+///   Steam codes are left whole: they are five characters of a confusable-free
+///   alphabet, Valve's own client shows them unbroken, and splitting five into
+///   3-2 invents a grouping nobody who types the code will recognise.
 ///
 /// FR-25 allows the digits to be hidden until the user taps the entry, so the
 /// hidden state is part of this widget rather than something the caller fakes
@@ -20,7 +25,7 @@ class CodeDisplay extends StatelessWidget {
     this.expiring = false,
   });
 
-  /// The code as the core generated it, digits only.
+  /// The code as the core generated it. Digits, or the Steam alphabet.
   final String code;
 
   /// FR-25: hide the digits until the user asks for them.
@@ -30,6 +35,11 @@ class CodeDisplay extends StatelessWidget {
   final bool expiring;
 
   static String group(String code) {
+    // Grouping is a convention for numeric codes. A code with letters in it is
+    // a Steam code, and it is read and typed as one block.
+    if (code.contains(RegExp(r'[^0-9]'))) {
+      return code;
+    }
     if (code.length <= 6) {
       final half = (code.length / 2).ceil();
       return '${code.substring(0, half)} ${code.substring(half)}';
@@ -51,7 +61,7 @@ class CodeDisplay extends StatelessWidget {
 
     if (hidden) {
       return Semantics(
-        label: 'Code hidden. Activate to show.',
+        label: AppLocalizations.of(context).codeHiddenAccessibility,
         excludeSemantics: true,
         child: Text('••• •••', style: style),
       );

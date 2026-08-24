@@ -4,18 +4,18 @@ import 'package:path_provider/path_provider.dart';
 
 import '../rust/api/vault.dart' as rust;
 import 'lock_controller.dart';
+import 'recovery_status_preference.dart';
 import 'vault_keystore.dart';
 
 /// Opens, locks, and wipes the vault (PRD section 9.2.4).
 ///
 /// Three parties are involved and none of them can do the job alone: Rust owns
 /// the vault key and the records, the Android Keystore owns the wrapping key
-/// and will not release it, and Dart is the only place that can talk to both.
-/// This class is that conversation, kept in one file so the handful of moments
-/// where raw key material exists are all visible together.
+/// and will not release it, and Dart coordinates both sides with non-secret
+/// handles. Rust and Kotlin exchange vault-key bytes directly through JNI.
 class VaultSession implements LockTarget, LockPolicyStore {
   VaultSession({VaultKeystore? keystore})
-      : _keystore = keystore ?? VaultKeystore();
+    : _keystore = keystore ?? VaultKeystore();
 
   final VaultKeystore _keystore;
 
@@ -49,6 +49,7 @@ class VaultSession implements LockTarget, LockPolicyStore {
     );
 
     final state = rust.openMeta(metaPath: metaPath);
+    await _retireObsoleteKeystoreKeys();
     return switch (state) {
       'absent' => VaultState.needsSetup,
       'present' => VaultState.locked,
@@ -63,25 +64,19 @@ class VaultSession implements LockTarget, LockPolicyStore {
   /// [requireUserAuthentication] makes the keystore key usable only after a
   /// biometric or device credential check.
   Future<void> setUp({required bool requireUserAuthentication}) async {
-    // The one moment a new vault key exists outside Rust.
-    final key = Uint8List.fromList(await rust.beginDeviceSetup());
-    try {
-      await _wrapAndFinish(key, requireUserAuthentication);
-    } finally {
-      VaultKeystore.wipe(key);
-    }
+    final handle = await rust.beginDeviceSetup();
+    await _wrapHandleAndFinish(handle, requireUserAuthentication);
   }
 
   /// First run behind a PIN (section 9.2.4 step 4).
   ///
-  /// Unlike [setUp], what crosses into Dart here is already sealed under the
-  /// PIN, so the raw vault key never leaves Rust on this path.
+  /// Dart receives a handle for the PIN-sealed value, not the value itself.
   Future<void> setUpWithPin(
     String pin, {
     required bool requireUserAuthentication,
   }) async {
-    final sealed = Uint8List.fromList(await rust.beginDeviceSetupWithPin(pin: pin));
-    await _wrapAndFinish(sealed, requireUserAuthentication);
+    final handle = await rust.beginDeviceSetupWithPin(pin: pin);
+    await _wrapHandleAndFinish(handle, requireUserAuthentication);
   }
 
   /// Turns the PIN on, changes it, or removes it. The vault must be unlocked.
@@ -92,18 +87,81 @@ class VaultSession implements LockTarget, LockPolicyStore {
     String? newPin, {
     required bool requireUserAuthentication,
   }) async {
-    final blob = Uint8List.fromList(await rust.beginChangePin(newPin: newPin));
-    try {
-      await _wrapAndFinish(blob, requireUserAuthentication);
-    } finally {
-      // Only key material when there is no PIN; wiped either way.
-      VaultKeystore.wipe(blob);
+    final handle = await rust.beginChangePin(newPin: newPin);
+    // The PIN slot stays independently usable. Biometric unlock has its own
+    // Keystore slot around the raw vault key, so either route can open the
+    // same vault without depending on the other.
+    if (requireUserAuthentication && !hasBiometricUnlock) {
+      await _enableBiometricUnlock();
+    }
+    await _wrapHandleAndFinish(handle, false);
+    if (!requireUserAuthentication) {
+      await rust.clearBiometricKey();
+      await _retireObsoleteKeystoreKeys();
     }
   }
 
-  Future<void> _wrapAndFinish(Uint8List toWrap, bool requireAuth) async {
-    final wrapped = await _keystore.wrap(
-      toWrap,
+  /// True when the locked screen can offer biometric unlock instead of a PIN.
+  bool get hasBiometricUnlock {
+    try {
+      return rust.biometricKeyBlob() != null;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<void> _enableBiometricUnlock() async {
+    final handle = await rust.beginBiometricSetup();
+    final wrapped = await _keystore.wrapHandle(
+      handle,
+      requireUserAuthentication: true,
+    );
+    await rust.finishBiometricSetup(
+      wrapped: wrapped.ciphertext,
+      nonce: wrapped.nonce,
+    );
+    await _retireObsoleteKeystoreKeys();
+  }
+
+  /// Opens the biometric slot. This path does not read or submit the PIN.
+  Future<void> unlockWithBiometrics() async {
+    final blob = rust.biometricKeyBlob();
+    if (blob == null) {
+      throw StateError('Biometric unlock is not enabled for this vault.');
+    }
+
+    final handle = await _keystore.unwrapToHandle(
+      WrappedKey(
+        ciphertext: Uint8List.fromList(blob.wrapped),
+        nonce: Uint8List.fromList(blob.nonce),
+      ),
+    );
+    await rust.finishBiometricOpen(
+      vaultPath: _requirePath(),
+      unwrapped: handle,
+    );
+  }
+
+  /// True when this device has password and recovery slots for an account.
+  bool get hasAccountRecovery {
+    try {
+      return rust.accountEmail() != null;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Opens the local vault through its account password slot.
+  Future<void> unlockWithAccountPassword(String password) =>
+      rust.unlockWithPassword(vaultPath: _requirePath(), password: password);
+
+  /// Opens the local vault through its 24-word recovery slot.
+  Future<void> unlockWithRecoveryPhrase(String phrase) =>
+      rust.unlockWithRecovery(vaultPath: _requirePath(), phrase: phrase);
+
+  Future<void> _wrapHandleAndFinish(Uint8List handle, bool requireAuth) async {
+    final wrapped = await _keystore.wrapHandle(
+      handle,
       requireUserAuthentication: requireAuth,
     );
     await rust.finishDeviceSetup(
@@ -111,37 +169,50 @@ class VaultSession implements LockTarget, LockPolicyStore {
       wrapped: wrapped.ciphertext,
       nonce: wrapped.nonce,
     );
+    await _retireObsoleteKeystoreKeys();
   }
 
-  /// Unlocks: has the keystore unwrap the stored key and hands it to Rust.
+  Future<void> _retireObsoleteKeystoreKeys() async {
+    final active = rust
+        .activeKeystoreCiphertexts()
+        .map(Uint8List.fromList)
+        .toList(growable: false);
+    await _keystore.retainOnly(active);
+  }
+
+  /// What this device's slot looks like, without attempting to open it.
+  ///
+  /// Lets the unlock screen decide what to offer before the user touches
+  /// anything — a PIN-sealed slot cannot be opened by a fingerprint, and
+  /// offering the button anyway spends FR-35 attempts on a route that could
+  /// never work.
+  Future<rust.WrappedKeyBlob> slotDescription() => rust.beginDeviceOpen();
+
+  /// Unlocks through a one-time handle. The vault key does not enter Dart.
   ///
   /// [pin] is required when the slot was written with one, and rejected when
   /// it was not — the core reports the mismatch rather than guessing.
   Future<void> unlock({String? pin}) async {
     final path = _requirePath();
     final blob = await rust.beginDeviceOpen();
+    if (blob.needsPin && (pin == null || pin.isEmpty)) {
+      throw StateError('This vault needs a PIN to open.');
+    }
 
-    final unwrapped = await _keystore.unwrap(
+    final handle = await _keystore.unwrapToHandle(
       WrappedKey(
         ciphertext: Uint8List.fromList(blob.wrapped),
         nonce: Uint8List.fromList(blob.nonce),
       ),
     );
-    try {
-      if (blob.needsPin) {
-        if (pin == null) {
-          throw StateError('This vault needs a PIN to open.');
-        }
-        await rust.finishDeviceOpenWithPin(
-          vaultPath: path,
-          unwrapped: unwrapped,
-          pin: pin,
-        );
-      } else {
-        await rust.finishDeviceOpen(vaultPath: path, unwrapped: unwrapped);
-      }
-    } finally {
-      VaultKeystore.wipe(unwrapped);
+    if (blob.needsPin) {
+      await rust.finishDeviceOpenWithPin(
+        vaultPath: path,
+        unwrapped: handle,
+        pin: pin!,
+      );
+    } else {
+      await rust.finishDeviceOpen(vaultPath: path, unwrapped: handle);
     }
   }
 
@@ -159,14 +230,16 @@ class VaultSession implements LockTarget, LockPolicyStore {
     return LockPolicy(
       timeout: LockTimeout.fromSeconds(stored.timeoutSeconds),
       lockOnBackground: stored.lockOnBackground,
+      wipeAfterFailures: stored.wipeAfterFailures,
     );
   }
 
   @override
   Future<void> savePolicy(LockPolicy policy) => rust.setLockPolicy(
-        timeoutSeconds: policy.timeout.seconds,
-        lockOnBackground: policy.lockOnBackground,
-      );
+    timeoutSeconds: policy.timeout.seconds,
+    lockOnBackground: policy.lockOnBackground,
+    wipeAfterFailures: policy.wipeAfterFailures,
+  );
 
   /// FR-31: locking zeroes the vault key. The records become unreadable until
   /// the keystore unwraps the slot again.
@@ -182,6 +255,7 @@ class VaultSession implements LockTarget, LockPolicyStore {
   Future<void> wipe() async {
     await rust.wipeDevice();
     await _keystore.deleteKey();
+    await RecoveryStatusPreference.clear();
   }
 
   String _requirePath() {

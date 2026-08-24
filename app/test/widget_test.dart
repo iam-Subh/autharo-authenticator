@@ -3,6 +3,8 @@ import 'package:authenticator/src/ui/countdown_ring.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'localized_test_app.dart';
+
 void main() {
   group('CodeDisplay', () {
     test('groups codes the way the issuing services print them', () {
@@ -13,8 +15,8 @@ void main() {
 
     testWidgets('hides the digits when asked (FR-25)', (tester) async {
       await tester.pumpWidget(
-        const MaterialApp(
-          home: Scaffold(body: CodeDisplay(code: '123456', hidden: true)),
+        localizedTestApp(
+          home: const Scaffold(body: CodeDisplay(code: '123456', hidden: true)),
         ),
       );
 
@@ -22,11 +24,13 @@ void main() {
       expect(find.text('••• •••'), findsOneWidget);
     });
 
-    testWidgets('reads the digits out singly for a screen reader', (tester) async {
+    testWidgets('reads the digits out singly for a screen reader', (
+      tester,
+    ) async {
       final handle = tester.ensureSemantics();
       await tester.pumpWidget(
-        const MaterialApp(
-          home: Scaffold(body: CodeDisplay(code: '123456')),
+        localizedTestApp(
+          home: const Scaffold(body: CodeDisplay(code: '123456')),
         ),
       );
 
@@ -36,17 +40,22 @@ void main() {
   });
 
   group('CountdownRing', () {
-    testWidgets('labels the remaining time for a screen reader', (tester) async {
+    testWidgets('labels the remaining time for a screen reader', (
+      tester,
+    ) async {
       final handle = tester.ensureSemantics();
       await tester.pumpWidget(
-        const MaterialApp(
-          home: Scaffold(
+        localizedTestApp(
+          home: const Scaffold(
             body: CountdownRing(remainingSeconds: 7, period: 30),
           ),
         ),
       );
 
-      expect(find.bySemanticsLabel('Code expires in 7 seconds'), findsOneWidget);
+      expect(
+        find.bySemanticsLabel('Code expires in 7 seconds'),
+        findsOneWidget,
+      );
       handle.dispose();
     });
 
@@ -55,7 +64,7 @@ void main() {
       // widget builds at and around the boundary rather than the exact hue.
       for (final remaining in [6, 5, 1]) {
         await tester.pumpWidget(
-          MaterialApp(
+          localizedTestApp(
             home: Scaffold(
               body: CountdownRing(remainingSeconds: remaining, period: 30),
             ),

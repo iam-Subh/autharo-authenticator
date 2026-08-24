@@ -1,5 +1,10 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
+
+import '../../l10n/generated/app_localizations.dart';
+import '../services/clipboard_service.dart';
+import '../services/recovery_status_preference.dart';
 
 /// Shows the 24-word recovery key once, then makes the user prove they wrote
 /// it down (FR-29, FR-55, and section 9.2.3 step 4).
@@ -36,6 +41,7 @@ class RecoveryKeyPage extends StatefulWidget {
 }
 
 class _RecoveryKeyPageState extends State<RecoveryKeyPage> {
+  final _clipboard = ClipboardService(clearAfter: const Duration(minutes: 2));
   bool _confirming = false;
   bool _acknowledged = false;
   late final List<TextEditingController> _answers = List.generate(
@@ -48,23 +54,30 @@ class _RecoveryKeyPageState extends State<RecoveryKeyPage> {
 
   @override
   void dispose() {
+    unawaited(_clipboard.clearNow());
+    _clipboard.dispose();
     for (final controller in _answers) {
       controller.dispose();
     }
     super.dispose();
   }
 
-  void _check() {
+  Future<void> _check() async {
     for (var i = 0; i < widget.confirmIndices.length; i++) {
       final expected = _words[widget.confirmIndices[i]];
       // Trimmed and lowercased: BIP-39 words are lowercase, and a trailing
       // space from a keyboard suggestion is not a wrong answer.
       if (_answers[i].text.trim().toLowerCase() != expected) {
-        setState(() => _error = 'That is not the word at position '
-            '${widget.confirmIndices[i] + 1}. Check your list and try again.');
+        setState(
+          () => _error = AppLocalizations.of(
+            context,
+          ).incorrectRecoveryWord(widget.confirmIndices[i] + 1),
+        );
         return;
       }
     }
+    await _clipboard.clearNow();
+    await RecoveryStatusPreference.markConfirmed();
     widget.onConfirmed();
   }
 
@@ -75,9 +88,32 @@ class _RecoveryKeyPageState extends State<RecoveryKeyPage> {
       // the user has not recorded, which is the state this screen exists to
       // prevent.
       canPop: false,
+
+      // The handler is not optional. `canPop: false` on its own tells the
+      // framework the route refuses to pop and then does nothing about the
+      // attempt — and under Android's predictive back the system finishes the
+      // activity instead, so the *application closes* on a screen whose whole
+      // purpose is to stop the user leaving.
+      //
+      // Losing the app here is the worst possible moment: the account exists
+      // on the server, the recovery key was displayed once, and it is now
+      // gone. Refusing the back gesture and saying why is the entire point.
+      onPopInvokedWithResult: (didPop, _) {
+        if (didPop) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(AppLocalizations.of(context).writeRecoveryFirst),
+            duration: const Duration(seconds: 5),
+          ),
+        );
+      },
       child: Scaffold(
         appBar: AppBar(
-          title: Text(_confirming ? 'Confirm your recovery key' : 'Your recovery key'),
+          title: Text(
+            _confirming
+                ? AppLocalizations.of(context).confirmRecoveryKey
+                : AppLocalizations.of(context).yourRecoveryKey,
+          ),
           automaticallyImplyLeading: false,
         ),
         body: _confirming ? _buildConfirm(context) : _buildShow(context),
@@ -103,10 +139,7 @@ class _RecoveryKeyPageState extends State<RecoveryKeyPage> {
                 const SizedBox(width: 12),
                 Expanded(
                   child: Text(
-                    'These 24 words are the only way back into your codes if '
-                    'you lose every device. They are shown once. We cannot '
-                    'show them again and we cannot recover them for you — your '
-                    'codes are encrypted with a key we never see.',
+                    AppLocalizations.of(context).recoveryKeyWarning,
                     style: TextStyle(
                       color: Theme.of(context).colorScheme.onErrorContainer,
                     ),
@@ -121,30 +154,29 @@ class _RecoveryKeyPageState extends State<RecoveryKeyPage> {
         const SizedBox(height: 16),
         OutlinedButton.icon(
           onPressed: () async {
-            await Clipboard.setData(ClipboardData(text: widget.phrase));
+            await _clipboard.copyCode(widget.phrase);
             if (!context.mounted) return;
             ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(
+              SnackBar(
                 content: Text(
-                  'Copied. Paste it somewhere safe, then clear your clipboard.',
+                  AppLocalizations.of(context).copiedClipboardTwoMinutes,
                 ),
               ),
             );
           },
           icon: const Icon(Icons.copy),
-          label: const Text('Copy to clipboard'),
+          label: Text(AppLocalizations.of(context).copyToClipboard),
         ),
         const SizedBox(height: 8),
         Text(
-          'Writing them on paper is safer than the clipboard. A clipboard is '
-          'readable by other applications and may sync to your other devices.',
+          AppLocalizations.of(context).paperSaferThanClipboard,
           style: Theme.of(context).textTheme.bodySmall,
         ),
         const SizedBox(height: 24),
         CheckboxListTile(
           value: _acknowledged,
           onChanged: (value) => setState(() => _acknowledged = value ?? false),
-          title: const Text('I have written these words down'),
+          title: Text(AppLocalizations.of(context).recoveryWrittenDown),
           contentPadding: EdgeInsets.zero,
         ),
         const SizedBox(height: 8),
@@ -152,7 +184,7 @@ class _RecoveryKeyPageState extends State<RecoveryKeyPage> {
           onPressed: _acknowledged
               ? () => setState(() => _confirming = true)
               : null,
-          child: const Text('Continue'),
+          child: Text(AppLocalizations.of(context).continueAction),
         ),
       ],
     );
@@ -162,10 +194,7 @@ class _RecoveryKeyPageState extends State<RecoveryKeyPage> {
     return ListView(
       padding: const EdgeInsets.all(24),
       children: [
-        const Text(
-          'Type these words from your list. This checks that you really wrote '
-          'them down, while there is still time to go back.',
-        ),
+        Text(AppLocalizations.of(context).confirmRecoveryInstructions),
         const SizedBox(height: 24),
         for (var i = 0; i < widget.confirmIndices.length; i++) ...[
           TextField(
@@ -174,7 +203,9 @@ class _RecoveryKeyPageState extends State<RecoveryKeyPage> {
             autocorrect: false,
             enableSuggestions: false,
             decoration: InputDecoration(
-              labelText: 'Word ${widget.confirmIndices[i] + 1}',
+              labelText: AppLocalizations.of(
+                context,
+              ).wordPosition(widget.confirmIndices[i] + 1),
               border: const OutlineInputBorder(),
             ),
           ),
@@ -189,7 +220,7 @@ class _RecoveryKeyPageState extends State<RecoveryKeyPage> {
         ],
         FilledButton(
           onPressed: _check,
-          child: const Text('Confirm'),
+          child: Text(AppLocalizations.of(context).confirm),
         ),
         const SizedBox(height: 8),
         TextButton(
@@ -197,7 +228,7 @@ class _RecoveryKeyPageState extends State<RecoveryKeyPage> {
             _confirming = false;
             _error = null;
           }),
-          child: const Text('Show the words again'),
+          child: Text(AppLocalizations.of(context).showWordsAgain),
         ),
       ],
     );
@@ -226,7 +257,9 @@ class _WordGrid extends StatelessWidget {
       itemBuilder: (context, index) => Container(
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
         decoration: BoxDecoration(
-          border: Border.all(color: Theme.of(context).colorScheme.outlineVariant),
+          border: Border.all(
+            color: Theme.of(context).colorScheme.outlineVariant,
+          ),
           borderRadius: BorderRadius.circular(8),
         ),
         child: Row(

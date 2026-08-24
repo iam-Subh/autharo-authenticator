@@ -3,6 +3,8 @@ import 'package:authenticator/src/services/vault_session.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'localized_test_app.dart';
+
 /// The bug this file exists for.
 ///
 /// `Form.validate()` only reaches fields that are currently built. These pages
@@ -18,30 +20,33 @@ import 'package:flutter_test/flutter_test.dart';
 void main() {
   /// Demonstrates the Flutter behaviour itself, so the reason for the fix
   /// stays visible even if the pages are rewritten.
-  testWidgets('a Form does not validate a field scrolled out of a ListView',
-      (tester) async {
+  testWidgets('a Form does not validate a field scrolled out of a ListView', (
+    tester,
+  ) async {
     final formKey = GlobalKey<FormState>();
     var validatorRan = false;
 
-    await tester.pumpWidget(MaterialApp(
-      home: Scaffold(
-        body: Form(
-          key: formKey,
-          child: ListView(
-            children: [
-              TextFormField(
-                validator: (_) {
-                  validatorRan = true;
-                  return 'always invalid';
-                },
-              ),
-              const SizedBox(height: 2000),
-              const Text('bottom'),
-            ],
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: Form(
+            key: formKey,
+            child: ListView(
+              children: [
+                TextFormField(
+                  validator: (_) {
+                    validatorRan = true;
+                    return 'always invalid';
+                  },
+                ),
+                const SizedBox(height: 2000),
+                const Text('bottom'),
+              ],
+            ),
           ),
         ),
       ),
-    ));
+    );
 
     expect(formKey.currentState!.validate(), isFalse);
     expect(validatorRan, isTrue, reason: 'visible: the validator runs');
@@ -64,15 +69,16 @@ void main() {
 
   /// And the fix: the page checks its controllers, so the result does not
   /// depend on what happens to be on screen.
-  testWidgets('create-account still refuses a bad address after scrolling',
-      (tester) async {
+  testWidgets('create-account still refuses a bad address after scrolling', (
+    tester,
+  ) async {
     // A small surface, so the button is below the fold as it is on a phone.
     tester.view.physicalSize = const Size(400, 700);
     tester.view.devicePixelRatio = 1.0;
     addTearDown(tester.view.reset);
 
     await tester.pumpWidget(
-      MaterialApp(home: CreateAccountPage(session: VaultSession())),
+      localizedTestApp(home: CreateAccountPage(session: VaultSession())),
     );
 
     final button = find.widgetWithText(FilledButton, 'Create account');

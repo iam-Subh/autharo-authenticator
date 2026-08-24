@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
+import '../../l10n/generated/app_localizations.dart';
 import '../services/vault_session.dart';
 import '../ui/form_page.dart';
 
@@ -49,15 +51,15 @@ class _SetPinPageState extends State<SetPinPage> {
 
     if (pin.length < 6) {
       return digitsOnly || pin.isEmpty
-          ? 'Use at least 6 digits.'
-          : 'Use at least 6 characters.';
+          ? AppLocalizations.of(context).useAtLeastSixDigits
+          : AppLocalizations.of(context).useAtLeastSixCharacters;
     }
     if (digitsOnly) {
       if (pin.split('').toSet().length == 1) {
-        return 'Avoid a PIN of one repeated digit.';
+        return AppLocalizations.of(context).avoidRepeatedPin;
       }
       if (_isRun(pin)) {
-        return 'Avoid a run like 123456.';
+        return AppLocalizations.of(context).avoidSequentialPin;
       }
     }
     return null;
@@ -80,7 +82,9 @@ class _SetPinPageState extends State<SetPinPage> {
   /// scrolled away and returns true having checked nothing.
   String? _firstProblem() {
     return _validate(_pin.text) ??
-        (_confirm.text == _pin.text ? null : 'The two entries do not match.');
+        (_confirm.text == _pin.text
+            ? null
+            : AppLocalizations.of(context).entriesDoNotMatch);
   }
 
   Future<void> _save() async {
@@ -103,6 +107,15 @@ class _SetPinPageState extends State<SetPinPage> {
       );
       if (!mounted) return;
       Navigator.pop(context, true);
+    } on PlatformException catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _error = error.code == 'authentication_cancelled'
+            ? null
+            : (error.message ??
+                  AppLocalizations.of(context).deviceKeyProtectionFailed);
+        _busy = false;
+      });
     } catch (error) {
       if (!mounted) return;
       setState(() {
@@ -116,19 +129,16 @@ class _SetPinPageState extends State<SetPinPage> {
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text('Remove the PIN?'),
-        content: const Text(
-          'Your codes stay encrypted, but anyone who can unlock this device '
-          'will be able to read them.',
-        ),
+        title: Text(AppLocalizations.of(context).removePinQuestion),
+        content: Text(AppLocalizations.of(context).removePinWarning),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context, false),
-            child: const Text('Keep it'),
+            child: Text(AppLocalizations.of(context).keepIt),
           ),
           FilledButton(
             onPressed: () => Navigator.pop(context, true),
-            child: const Text('Remove'),
+            child: Text(AppLocalizations.of(context).remove),
           ),
         ],
       ),
@@ -151,25 +161,22 @@ class _SetPinPageState extends State<SetPinPage> {
 
   @override
   Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context);
     return FormPage(
-      title: widget.hasExistingPin ? 'Change PIN' : 'Set a PIN',
+      title: widget.hasExistingPin ? l10n.changePin : l10n.setPin,
       formKey: _formKey,
       busy: _busy,
       errorMessage: _error,
-      actionLabel: 'Save',
+      actionLabel: l10n.save,
       onAction: _save,
       secondaryAction: widget.hasExistingPin
           ? TextButton(
               onPressed: _busy ? null : _remove,
-              child: const Text('Remove the PIN'),
+              child: Text(l10n.removePin),
             )
           : null,
       children: [
-        const Text(
-          'The PIN is combined with a key held by this device. Both are needed '
-          'to open your codes, so a PIN alone is not enough for someone who '
-          'copies the file off the device.',
-        ),
+        Text(l10n.pinKeyDescription),
         const SizedBox(height: 24),
         TextFormField(
           controller: _pin,
@@ -177,9 +184,9 @@ class _SetPinPageState extends State<SetPinPage> {
           obscureText: true,
           enabled: !_busy,
           validator: _validate,
-          decoration: const InputDecoration(
-            labelText: 'New PIN or passphrase',
-            border: OutlineInputBorder(),
+          decoration: InputDecoration(
+            labelText: l10n.newPinOrPassphrase,
+            border: const OutlineInputBorder(),
           ),
         ),
         const SizedBox(height: 16),
@@ -188,28 +195,25 @@ class _SetPinPageState extends State<SetPinPage> {
           obscureText: true,
           enabled: !_busy,
           validator: (value) =>
-              value == _pin.text ? null : 'The two entries do not match.',
-          decoration: const InputDecoration(
-            labelText: 'Enter it again',
-            border: OutlineInputBorder(),
+              value == _pin.text ? null : l10n.entriesDoNotMatch,
+          decoration: InputDecoration(
+            labelText: l10n.enterItAgain,
+            border: const OutlineInputBorder(),
           ),
         ),
         const SizedBox(height: 8),
         SwitchListTile(
           value: _useBiometrics,
-          onChanged:
-              _busy ? null : (value) => setState(() => _useBiometrics = value),
-          title: const Text('Allow biometric unlock'),
-          subtitle: const Text(
-            'Binds the key held by this device to your fingerprint or face. '
-            'Enrolling a new fingerprint invalidates it.',
-          ),
+          onChanged: _busy
+              ? null
+              : (value) => setState(() => _useBiometrics = value),
+          title: Text(l10n.allowBiometricUnlock),
+          subtitle: Text(l10n.biometricInvalidationDescription),
           contentPadding: EdgeInsets.zero,
         ),
         const SizedBox(height: 16),
         Text(
-          'Setting a PIN takes a moment: the key is deliberately slow to '
-          'derive, so that guessing it is slow too.',
+          l10n.pinDerivationDescription,
           style: Theme.of(context).textTheme.bodySmall,
         ),
       ],

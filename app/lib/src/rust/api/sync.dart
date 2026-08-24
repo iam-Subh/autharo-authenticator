@@ -6,7 +6,7 @@
 import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `access_token`, `now_ms`, `server_url`, `store_session`, `text`
+// These functions are ignored because they are not marked as `pub`: `access_token`, `check_scheme`, `clear_session`, `is_unauthorized`, `jitter`, `legacy_session`, `legacy_token`, `load_session`, `now_ms`, `record_clock_measurement`, `record_outcome`, `remove_legacy_session`, `rotate_migrated_session_if_needed`, `run_one_cycle`, `save_session`, `server_url`, `session_is_stored`, `store_session`, `text`, `tracing_http_warning`, `try_refresh`, `with_account`
 
 /// Reads the sync status without touching the network.
 SyncStatusView syncStatus() => RustLib.instance.api.crateApiSyncSyncStatus();
@@ -59,6 +59,42 @@ Future<void> signIn({
 /// different confirmation.
 Future<void> signOut() => RustLib.instance.api.crateApiSyncSignOut();
 
+/// Section 9.5: every device that has signed in to this account.
+Future<List<DeviceView>> listDevices() =>
+    RustLib.instance.api.crateApiSyncListDevices();
+
+/// Cuts one device off. Its sessions end in the same request on the server.
+///
+/// Revoking *this* device is allowed, and leaves the local tokens useless. The
+/// caller is expected to sign out locally afterwards — see the screen, which
+/// asks first.
+Future<BigInt> revokeDevice({required String deviceId}) =>
+    RustLib.instance.api.crateApiSyncRevokeDevice(deviceId: deviceId);
+
+/// Ends every session on the account, including this one.
+///
+/// The local tokens are cleared afterwards rather than left to fail on the next
+/// cycle. A device that believes it is signed in and gets a 401 every fifteen
+/// minutes is the silent-stop failure this project already fixed once.
+Future<BigInt> signOutEverywhere() =>
+    RustLib.instance.api.crateApiSyncSignOutEverywhere();
+
+/// Deletes the account on the server and signs this device out.
+///
+/// # What this does not do
+///
+/// It does not touch the local vault. The codes on this device keep working,
+/// which is the correct behaviour and worth being deliberate about: a user
+/// deleting a *sync account* is saying "stop storing my encrypted blobs", not
+/// "destroy the authenticator I use every day". Wiping the device is a separate
+/// action, on a separate screen, with its own confirmation.
+///
+/// Requires the account password, which is derived here into the same
+/// authentication key the server verifies at sign-in. A stolen access token
+/// must not be enough to destroy an account.
+Future<PlatformInt64> deleteAccount({required String password}) =>
+    RustLib.instance.api.crateApiSyncDeleteAccount(password: password);
+
 /// Runs one sync cycle now.
 ///
 /// Requires an open vault. A locked device can sync — OFF-09 is explicit that
@@ -69,7 +105,51 @@ Future<void> signOut() => RustLib.instance.api.crateApiSyncSignOut();
 /// A stale cursor is handled here rather than reported: section 10.6 says the
 /// only correct answer is a full re-sync, so there is nothing for the user to
 /// decide.
-Future<SyncRunView> syncNow() => RustLib.instance.api.crateApiSyncSyncNow();
+Future<SyncRunView> syncNow({required bool force}) =>
+    RustLib.instance.api.crateApiSyncSyncNow(force: force);
+
+/// One device on the account, for the "your devices" screen.
+class DeviceView {
+  final String id;
+  final String name;
+  final String platform;
+
+  /// RFC 3339 as the server wrote it, or absent. Formatted in Dart, which
+  /// already owns every other date the user reads.
+  final String? lastSeen;
+  final bool current;
+  final bool revoked;
+
+  const DeviceView({
+    required this.id,
+    required this.name,
+    required this.platform,
+    this.lastSeen,
+    required this.current,
+    required this.revoked,
+  });
+
+  @override
+  int get hashCode =>
+      id.hashCode ^
+      name.hashCode ^
+      platform.hashCode ^
+      lastSeen.hashCode ^
+      current.hashCode ^
+      revoked.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is DeviceView &&
+          runtimeType == other.runtimeType &&
+          id == other.id &&
+          name == other.name &&
+          platform == other.platform &&
+          lastSeen == other.lastSeen &&
+          current == other.current &&
+          revoked == other.revoked;
+}
 
 /// What one sync run did, for the UI.
 class SyncRunView {
@@ -85,6 +165,17 @@ class SyncRunView {
   /// retrying, which with the same token would loop forever.
   final bool needsSignIn;
 
+  /// True when OFF-06's backoff meant no attempt was made at all.
+  ///
+  /// Reported rather than hidden. A caller that cannot tell "nothing to do"
+  /// from "not yet" has no way to schedule its next wake-up, and a user
+  /// watching a spinner that resolves to nothing learns the button is
+  /// broken.
+  final bool skippedByBackoff;
+
+  /// Milliseconds until the next attempt is due, when one was skipped.
+  final PlatformInt64 retryInMs;
+
   const SyncRunView({
     required this.pulled,
     required this.applied,
@@ -92,6 +183,8 @@ class SyncRunView {
     required this.conflicts,
     required this.countersCorrected,
     required this.needsSignIn,
+    required this.skippedByBackoff,
+    required this.retryInMs,
   });
 
   @override
@@ -101,7 +194,9 @@ class SyncRunView {
       pushed.hashCode ^
       conflicts.hashCode ^
       countersCorrected.hashCode ^
-      needsSignIn.hashCode;
+      needsSignIn.hashCode ^
+      skippedByBackoff.hashCode ^
+      retryInMs.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -113,10 +208,17 @@ class SyncRunView {
           pushed == other.pushed &&
           conflicts == other.conflicts &&
           countersCorrected == other.countersCorrected &&
-          needsSignIn == other.needsSignIn;
+          needsSignIn == other.needsSignIn &&
+          skippedByBackoff == other.skippedByBackoff &&
+          retryInMs == other.retryInMs;
 }
 
-/// Whether this device has a session, and with which server.
+/// Everything OFF-05 needs: three states and the time of the last success.
+///
+/// The state itself is not stored. It is derived by the caller from these
+/// facts, because a stored state goes stale the moment anything happens
+/// without writing it back — and the one thing a status indicator must never
+/// do is confidently report the wrong thing.
 class SyncStatusView {
   final String? serverUrl;
 
@@ -125,10 +227,41 @@ class SyncStatusView {
   final bool signedIn;
   final String? email;
 
-  const SyncStatusView({this.serverUrl, required this.signedIn, this.email});
+  /// Records waiting to reach the server. Zero while locked, because the
+  /// outbox lives in the encrypted database — see [`sync_status`].
+  final int pending;
+
+  /// True when the count above could actually be read.
+  ///
+  /// Without it, "0 pending" and "cannot tell" are the same number, and the
+  /// user interface would show a locked device as fully synced.
+  final bool pendingKnown;
+
+  /// Epoch milliseconds of the last cycle that completed.
+  final PlatformInt64? lastSuccessMs;
+
+  /// Why the last attempt failed, if the one after it has not succeeded.
+  final String? lastError;
+
+  const SyncStatusView({
+    this.serverUrl,
+    required this.signedIn,
+    this.email,
+    required this.pending,
+    required this.pendingKnown,
+    this.lastSuccessMs,
+    this.lastError,
+  });
 
   @override
-  int get hashCode => serverUrl.hashCode ^ signedIn.hashCode ^ email.hashCode;
+  int get hashCode =>
+      serverUrl.hashCode ^
+      signedIn.hashCode ^
+      email.hashCode ^
+      pending.hashCode ^
+      pendingKnown.hashCode ^
+      lastSuccessMs.hashCode ^
+      lastError.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -137,5 +270,9 @@ class SyncStatusView {
           runtimeType == other.runtimeType &&
           serverUrl == other.serverUrl &&
           signedIn == other.signedIn &&
-          email == other.email;
+          email == other.email &&
+          pending == other.pending &&
+          pendingKnown == other.pendingKnown &&
+          lastSuccessMs == other.lastSuccessMs &&
+          lastError == other.lastError;
 }

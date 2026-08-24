@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../../l10n/generated/app_localizations.dart';
 import '../rust/api/vault.dart' as rust;
 import '../services/vault_session.dart';
 import '../ui/form_page.dart';
@@ -49,9 +50,9 @@ class _CreateAccountPageState extends State<CreateAccountPage> {
   /// support all key on it.
   String? _validateEmail(String? value) {
     final email = (value ?? '').trim();
-    if (email.isEmpty) return 'An email address is required.';
+    if (email.isEmpty) return AppLocalizations.of(context).emailRequired;
     if (!email.contains('@') || email.startsWith('@') || email.endsWith('@')) {
-      return 'That does not look like an email address.';
+      return AppLocalizations.of(context).emailInvalid;
     }
     return null;
   }
@@ -62,7 +63,7 @@ class _CreateAccountPageState extends State<CreateAccountPage> {
     // 9.2.1, and a strength meter here would imply a guarantee this screen
     // cannot make.
     if (password.length < 10) {
-      return 'Use at least 10 characters. Longer beats complicated.';
+      return AppLocalizations.of(context).passwordMinimumTen;
     }
     return null;
   }
@@ -83,7 +84,7 @@ class _CreateAccountPageState extends State<CreateAccountPage> {
         _validatePassword(_password.text) ??
         (_confirm.text == _password.text
             ? null
-            : 'The two password entries do not match.');
+            : AppLocalizations.of(context).passwordsDoNotMatch);
   }
 
   Future<void> _create() async {
@@ -116,7 +117,9 @@ class _CreateAccountPageState extends State<CreateAccountPage> {
         MaterialPageRoute(
           builder: (context) => RecoveryKeyPage(
             phrase: recovery.phrase,
-            confirmIndices: recovery.confirmIndices.map((i) => i.toInt()).toList(),
+            confirmIndices: recovery.confirmIndices
+                .map((i) => i.toInt())
+                .toList(),
             onConfirmed: () {
               Navigator.of(context).pop();
             },
@@ -146,19 +149,16 @@ class _CreateAccountPageState extends State<CreateAccountPage> {
 
   @override
   Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context);
     return FormPage(
-      title: 'Create an account',
+      title: l10n.createAccount,
       formKey: _formKey,
       busy: _busy,
       errorMessage: _error,
-      actionLabel: 'Create account',
+      actionLabel: l10n.createAccountAction,
       onAction: _create,
       children: [
-        const Text(
-          'An account lets your codes reach your other devices. They stay '
-          'encrypted on the way and on the server — the key that opens them '
-          'never leaves your devices.',
-        ),
+        Text(l10n.accountSyncDescription),
         const SizedBox(height: 24),
         TextFormField(
           controller: _email,
@@ -168,10 +168,10 @@ class _CreateAccountPageState extends State<CreateAccountPage> {
           autocorrect: false,
           enabled: !_busy,
           validator: _validateEmail,
-          decoration: const InputDecoration(
-            labelText: 'Email address',
-            border: OutlineInputBorder(),
-            helperText: 'Used for recovery and for approving new devices.',
+          decoration: InputDecoration(
+            labelText: l10n.emailAddress,
+            border: const OutlineInputBorder(),
+            helperText: l10n.emailRecoveryDescription,
           ),
         ),
         const SizedBox(height: 16),
@@ -180,9 +180,9 @@ class _CreateAccountPageState extends State<CreateAccountPage> {
           obscureText: true,
           enabled: !_busy,
           validator: _validatePassword,
-          decoration: const InputDecoration(
-            labelText: 'Password',
-            border: OutlineInputBorder(),
+          decoration: InputDecoration(
+            labelText: l10n.password,
+            border: const OutlineInputBorder(),
           ),
         ),
         const SizedBox(height: 16),
@@ -190,17 +190,17 @@ class _CreateAccountPageState extends State<CreateAccountPage> {
           controller: _confirm,
           obscureText: true,
           enabled: !_busy,
-          validator: (value) =>
-              value == _password.text ? null : 'The two entries do not match.',
-          decoration: const InputDecoration(
-            labelText: 'Enter the password again',
-            border: OutlineInputBorder(),
+          validator: (value) => value == _password.text
+              ? null
+              : AppLocalizations.of(context).entriesDoNotMatch,
+          decoration: InputDecoration(
+            labelText: l10n.enterPasswordAgain,
+            border: const OutlineInputBorder(),
           ),
         ),
         const SizedBox(height: 24),
         Text(
-          'Your existing codes are kept as they are. Creating an account adds '
-          'a way to unlock them, it does not re-encrypt them.',
+          l10n.createAccountKeepsCodes,
           style: Theme.of(context).textTheme.bodySmall,
         ),
       ],
