@@ -1,0 +1,18 @@
+{
+  "manifest_version": 3,
+  "name": "Authenticator Companion",
+  "version": "0.1.0",
+  "description": "Store approved authenticator accounts locally in the browser.",
+  "permissions": ["storage", "clipboardWrite"],
+  "optional_host_permissions": ["https://*/*", "http://*/*"],
+  "action": {
+    "default_title": "Authenticator Companion",
+    "default_popup": "popup.html"
+  },
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "authenticator-companion@authcore.dev",
+      "strict_min_version": "128.0"
+    }
+  }
+}

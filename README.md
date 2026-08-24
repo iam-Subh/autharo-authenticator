@@ -1,6 +1,6 @@
 # Cross-Platform Authenticator App
 
-Implementation of the PRD, version 0.13. The build order is the dependency
+Implementation of the PRD, version 0.22. The build order is the dependency
 sequence in section 18: each stage is finished before the next starts.
 
 ## Stage status
@@ -11,9 +11,9 @@ sequence in section 18: each stage is finished before the next starts.
 | S2 — First platform | Android. Flutter UI, QR scan, manual entry, list, copy, application lock | **Done**, verified on a physical device |
 | S3 — Crypto | Vault key, key slots, Argon2id, XChaCha20-Poly1305, recovery key | **Done.** Device slot, record encryption, page encryption, password slot, recovery key |
 | S4 — Backend | API, PostgreSQL schema, key slots, quotas, enumeration resistance | **In progress.** Exit criterion met; sign-up UI built. No sync engine — that is S5 |
-| S5 — Sync | Sync engine, outbox, HLC, conflict resolution, prune watermark | Not started |
+| S5 — Sync | Sync engine, outbox, HLC, conflict resolution, prune watermark | **In progress.** Cycle, HLC with a drift bound, deferred HOTP reconcile, full re-sync, and a seeded property harness. Not yet wired into the app |
 | S6 — Other platforms | Remaining platforms, screen capture, tray and menu bar | Not started |
-| S7 — Passkeys | `passkeys` package, domain association, PRF slot, fallback | Not started |
+| S7 — Passkeys | Android Credential Manager bridge, ceremony schema, domain association, PRF slot, fallback | **In progress.** Native bridge and schema are present; production domain and WebAuthn verification remain |
 
 ## The lock releases the key, it does not hide the screen
 
@@ -269,8 +269,122 @@ confirmation gates the end of sign-up, at the positions the core picked at
 random. Eight widget tests cover the gate, including that a wrong word names
 its position and does not complete sign-up.
 
-Still owed by a later stage: FR-29's second half, exporting the recovery key
-after re-authentication.
+FR-29's second half is now built too, as **rotation rather than reprinting** —
+see the backup section below for why that is the only honest version of it.
+
+## Backup and export (FR-26 to FR-29, FR-36)
+
+Microsoft Authenticator will not export its secrets. The stated reason is
+security; the effect is that leaving it means retyping every account by hand.
+An authenticator holds the keys to everything its user owns, and one that makes
+those hard to move is holding them hostage. So this app can be left, and that
+is why FR-27's plain-text export exists despite being the most dangerous action
+in the application.
+
+`core/src/backup.rs` writes two kinds of file:
+
+| Kind | FR | Protection |
+|---|---|---|
+| Encrypted | FR-26 | Argon2id (64 MiB, t=3, p=4) then XChaCha20-Poly1305 |
+| Plain | FR-27 | None, and the filename says so |
+
+FR-28 reads both back. FR-36 is the `with_vault` guard: every export path fails
+while locked, the same gate `reveal_secret_for_export` already sat behind.
+
+**The derivation parameters are written into the file.** §12.1 rule 2 in the
+export direction, and reading Aegis is what taught it: their exports carry the
+scrypt cost precisely so raising it does not orphan an old backup, and a reader
+that assumed a value would fail on every newer file — reporting a *wrong
+password*, on a correct password. `a_file_written_with_other_parameters_still_opens`
+holds it, and reverting `read` to `KdfParams::default()` fails that test and
+only that test.
+
+### Two dangers, pulling opposite ways
+
+A backup can leak, or it can fail to exist. The safest backup is the one nobody
+made, which is why leaning entirely on the first danger is how you end up with
+Microsoft's design.
+
+Leaking is what users can see afterwards, so it gets the friction: FR-27's
+export is behind two dialogs, and the second cannot be tapped through — it asks
+the user to type `EXPORT`, because a second identical "are you sure" is one
+dialog with an extra tap, and the reflex that dismissed the first dismisses the
+second. `test/plain_export_gate_test.dart` holds this with eight tests; deleting
+the second dialog fails five of them.
+
+Failing to exist is what actually loses the vault, so nothing here hides behind
+an expert-mode toggle, and an empty vault **refuses** to produce a backup rather
+than writing an empty one — a file with no accounts in it is indistinguishable
+from a working one until the day it is needed.
+
+### FR-29 rotates, it does not reprint
+
+The recovery phrase *is* the recovery key — 256 bits encoded as 24 BIP-39 words
+— and §9.2.3 stores only the vault key sealed under it. That direction does not
+run backwards, so there is no old phrase to fetch, and a function claiming to
+reprint one would have had to keep it.
+
+Rotation is the honest version, and the better one: a user asking for their
+phrase again has lost their copy, destroyed it, or had it seen. In all three the
+right answer is a new phrase with the old one dead. The new slot is saved
+*before* the phrase is returned, so there is no window where the user has been
+shown words that were never stored.
+
+### What the device proves
+
+`integration_test/backup_test.dart` asserts on the restored **codes**, not on
+counts. An entry round-trips with the right name and a mangled secret while the
+report cheerfully says "1 imported"; only the code at t=59 catches that. It also
+asserts absence on the exported bytes — no secret, no issuer, no account name —
+in the same shape as the check that the server database holds no plaintext.
+
+## Devices and account safety (§9.5)
+
+The question this answers is "I lost my phone". Until it existed the honest
+answer was that nothing could be done: the vault on that device is encrypted
+behind a hardware key, so it is not an emergency — but it holds a refresh token
+good for thirty days, and every change made anywhere else keeps syncing to it.
+
+On Android, that session pair does not live in `meta.db`. Kotlin encrypts both
+tokens as one AES-256-GCM value under a non-exportable Android Keystore key.
+Rust calls that store through JNI, so Dart never receives the tokens. The key
+does not require biometric approval because background sync must work while the
+application vault is locked. An older plaintext pair is migrated once and its
+metadata rows are deleted with SQLite `secure_delete` enabled. The next online
+operation also forces refresh-token rotation. The server then revokes the old
+pair, including copies recovered from an old journal or storage block.
+
+| Route | Does |
+|---|---|
+| `GET /v1/devices` | Lists every device, revoked ones included |
+| `DELETE /v1/devices/{id}` | Revokes one and ends its sessions in the same request |
+| `POST /v1/auth/logout` | Ends the calling session |
+| `POST /v1/auth/logout-all` | Ends every session on the account |
+| `DELETE /v1/account` | Deletes the account and everything under it |
+
+**A revoke has to bite immediately.** A device that keeps working for another
+fifteen minutes has not been revoked, because those fifteen minutes are the
+whole reason someone pressed the button. So the update marks the device and
+kills its sessions in one request, `refresh` refuses a revoked device rather
+than minting tokens it cannot use, and `session_for_token` joins to `device` so
+a session that somehow survived is still refused.
+
+**Revoked devices stay in the list.** Someone checking whether the lost phone is
+really cut off needs to see it listed as cut off. A list that has simply stopped
+mentioning it proves nothing.
+
+**Deleting the account does not delete the codes.** The most confusable pair in
+the product. Deleting a sync account means "stop storing my encrypted blobs" —
+the codes on the device keep working. Wiping the device is a different action on
+a different screen; putting the two most destructive operations behind one button
+would make the wrong outcome unrecoverable in both directions.
+
+**Deletion requires the password, not just the session.** A stolen access token
+is exactly the situation the rest of this section exists for, and whoever holds
+one must not be able to destroy the account its owner is trying to save. There
+is no soft delete: the server cannot decrypt a record, so a "recoverable"
+account would be an encrypted blob whose key the user has already been told to
+destroy — kept only to be stolen later.
 
 ## The server (S4)
 
@@ -339,6 +453,128 @@ section 10.4, and the outbox drain are S5, with a 1000-operation convergence
 test of their own. The record endpoints store rows and report a base-revision
 mismatch — they do not merge.
 
+## The convergence harness (S5)
+
+`core/tests/harness/` drives three devices through random adds, counter bumps,
+deletes, syncs, locks, unlocks, partitions, prunes and replayed pushes, then
+syncs everything to quiescence and asserts that the devices agree, and that
+what they agree on is right.
+
+Run it:
+
+```sh
+cd core
+cargo test --test convergence                       # 1 000 operations, six seeds
+CONVERGENCE_OPS=100000 cargo test --release --test convergence -- --ignored --nocapture
+
+# Over the real transport. Needs the development database and a server on it.
+cargo run -p authserver &
+cargo test --test convergence_http -- --ignored --nocapture
+```
+
+The hundred-thousand-operation run takes about nine seconds and produces, for
+one seed, 1 988 conflicts, 492 of them three-way, 848 stale cursors, 848 full
+re-syncs, 2 791 replayed pushes and 343 counters corrected.
+
+Every failure prints its seed and a shrunk operation trace, so a hundred
+thousand operations reduce to something short enough to read. Everything random
+comes from that seed, including the record nonces and the device identifiers —
+a run that reached for the operating system anywhere would not replay.
+
+### Three ways a property test lies, and what stops each
+
+**It passes because it never reached the interesting case.** So every event that
+makes a run meaningful is counted, and the run fails naming the one that did not
+happen often enough. That floor came first, before the oracle and before the
+invariants, because without it they both report success on a run that produced
+no conflict. It has since failed three times for three different reasons — a
+generator whose partitions healed faster than they opened, so nothing diverged
+far enough for the counter rule to correct; a hundred-thousand-operation run
+that deleted all eight of its entry identifiers within a few hundred operations
+and spent the remaining ninety-nine thousand doing nothing; and a run that was
+simply too short. None of those would have shown up as a failure.
+
+**It checks the devices against each other.** Three devices can converge on a
+state that has lost an entry, and every convergence invariant still passes. So
+there is a model outside the implementation: the entry set is every add minus
+every delete, and each counter is the largest any device ever wrote. The devices
+are checked against each other and then against that.
+
+**The transport hides the wire.** `SyncTransport` hands `WireRecord` values
+straight across in the in-memory run, so no amount of it says anything about
+serialisation, base64url, UUID parsing, or status codes.
+`core/tests/convergence_http.rs` runs the same harness — the same operations,
+the same invariants, the same oracle — against a real server over real HTTP.
+
+### What it found
+
+Five things, each of which would have been quiet in production. The last two
+needed scale: they appear only past forty thousand operations, once the vault
+crosses one page of records.
+
+1. **A record coming back unchanged was treated as a conflict.** A push does not
+   move the cursor, so the next pull returns what the device just sent. That was
+   recorded as a discarded rival version, and section 10.4 step 5 stops an entry
+   with one outstanding from producing a code. Every HOTP entry a device had
+   pushed refused to produce a code until the next unlock — permanently, on a
+   device that is never locked. Nothing looked wrong: the records agreed and the
+   counters agreed. One `Add` reproduced it. Fixed in `sync::apply_remote`.
+
+2. **A conflict resolved while unlocked was never reconciled.** Section 10.4
+   defers the counter rule because the cycle may have no key. A cycle on an
+   unlocked device has one, and deferring there left the candidate waiting for
+   an unlock that was not coming. `Vault::sync` now runs the reconcile at the
+   end of a cycle, so the deferral lasts exactly as long as the absence of a key.
+
+3. **A stale cursor resurrected a deleted entry.** A cursor goes stale because
+   the device has been away, and a device that has been away is the one with
+   local changes still waiting. The full re-sync replaced every record with the
+   server's, so an unpushed tombstone vanished and the server's live copy came
+   back — which section 10.4 forbids outright. Six operations reproduced it.
+   `sync::full_resync` now applies the server's records through the ordinary
+   rules and drops a local record only if the server does not have it *and* this
+   device is not waiting to push it. `Store::replace_all` keeps the old wholesale
+   behaviour for **Wipe and re-download**, where the user asked for exactly that.
+
+4. **The stale cursor was a `409`.** The same status and the same `conflict`
+   error code as "this email is already registered", separated only by the
+   message string. A client that guessed wrong either re-syncs for nothing or
+   loops forever on a cursor it can never advance. It is `410 Gone` under
+   `cursor_too_old` now. Only the HTTP run could find this: the in-memory
+   transport returns `SyncError::CursorTooOld` directly and no status is
+   involved. Held by `server/tests/stale_cursor.rs` on one side and
+   `only_a_410_means_the_cursor_is_unusable` on the other.
+
+5. **A full re-sync could not read its own second page.** The prune-watermark
+   check exists to tell a *lagging* client it may have missed a delete. It was
+   applied to every cursor — including the ones a re-sync walks through on its
+   way up from zero, which are below the watermark by construction. So page one
+   was served and page two was refused with a 410, and `full_resync` failed
+   before storing a cursor, so the next attempt began at the same place and
+   failed identically. **The device never synced again**, kept making local
+   changes, never saw anyone else's, and reported nothing a user would notice.
+   Under five hundred records a re-sync is a single request from zero and none
+   of it happens, which is why every smaller test passed. `pull` now carries a
+   `PullMode`, and the server a matching `full` parameter — a parameter rather
+   than a second method, so no transport can be written that forgets to
+   distinguish them. Both halves are pinned, and both tests were checked to fail
+   without their fix.
+
+### What it does not cover
+
+Nothing in the HTTP run can move the server's prune watermark — no endpoint
+writes it, and the test holds no database connection — so the stale-cursor and
+full-re-sync parts of the floor are switched off there through
+`Backend::can_prune` rather than quietly left at zero. Those rules are exercised
+against the in-memory server, which can, and the 410 itself is pinned by the two
+directed tests above.
+
+Clock drift is kept under section 10.2's five-minute bound on purpose. A clamped
+timestamp is *stored* clamped, so two devices that disagreed about whether to
+clamp would hold different timestamps for one record and no amount of syncing
+would fix it. That rule has its own tests in `core/tests/sync.rs`; mixing the two
+questions would mean neither failure named itself.
+
 ## Layout
 
 ```
@@ -382,14 +618,49 @@ Requires Rust 1.98+, Flutter 3.44+, and the Android SDK with NDK 28.2.
 No Perl is needed. It was, briefly, while SQLCipher was linked; see "Database
 encryption is not linked" for why that came back out.
 
+One command runs every gate below, and is the one to use:
+
+```sh
+sh scripts/check_all.sh                 # add --device <id> for the on-device tests
+```
+
+It exists because the individual commands are correct and nobody runs all six.
+Two of them also take arguments that are wrong in a way that still exits zero —
+see the comments in the script. Each gate has been proved by breaking something
+it should catch and watching it fail: a failing core test, a clippy lint, an
+error reachable only from `integration_test/`, a failing widget test, a
+forgotten bridge regeneration, and a stopped database.
+
+The individual commands, for when only one matters:
+
 ```sh
 cd core
 cargo test
 cargo clippy --all-targets -- -D warnings
 
+# The server's tests need the development database running.
+cd ../server && cargo test
+
 cd ../app
+# --no-fatal-infos, and no path.
+#
+# No path, because `flutter analyze lib/ test/` silently skips
+# `integration_test/`. That is how a required parameter added to the bridge
+# reached a phone: every analyze was green, over a subset that did not include
+# the caller that broke.
+#
+# --no-fatal-infos, because a bare `flutter analyze` exits non-zero on
+# info-level lints, of which this project has several deliberate ones. A gate
+# that always fails is a gate everyone learns to skip, and then it is not
+# catching the errors either.
+flutter analyze --no-fatal-infos
 flutter test                                        # host widget tests
 flutter test integration_test -d <device>           # on device, needs the core
+
+# Generated code must match the Rust API. `flutter_rust_bridge` dispatches on
+# numeric identifiers rather than exported symbols, so a forgotten regeneration
+# builds green and leaves Dart unable to reach the new function.
+sh ../scripts/check_bridge.sh
 
 # Always through the script, never `flutter build ... | tail`:
 sh ../scripts/verify_build.sh build/app/outputs/flutter-apk/app-debug.apk -- \
@@ -447,24 +718,34 @@ passed it. Use `--contains` for anything whose contents matter:
 sh ../scripts/verify_build.sh --contains librust_lib_authenticator.so   build/app/outputs/flutter-apk/app-debug.apk -- flutter build apk --debug
 ```
 
+## Android vault-key JNI bridge
+
+Android vault-key bytes do not enter Dart. Rust stores setup material behind a
+random one-time handle. Kotlin consumes that handle through JNI and wraps the
+bytes with Android Keystore. During unlock, Kotlin gives the unwrapped bytes
+directly to Rust through JNI and returns only another handle to Dart. Handles
+expire after five minutes, work once, and are cleared on lock, wipe,
+authentication cancellation, and Activity destruction.
+
+The old `wrap` and `unwrap` platform-channel methods no longer exist. The
+channel accepts only `wrapHandle` and `unwrapToHandle`.
+
 ## Known gaps, deliberately
 
-- **FR-35 counts failures but does not act on them.** The wipe after ten
-  failed attempts is P1 and off by default; the counter and the warning exist,
-  the automatic wipe does not.
+- **No certificate pinning**, and the sync token has no scope limit. Both are
+  open from the security audit; see the S9 hardening list.
 
-- **The vault key crosses into Dart.** A non-exportable keystore key can only
-  be driven from platform code, so the raw key passes through Dart once at
-  setup and once at each unlock. Dart cannot wipe memory the way `Zeroizing`
-  can — `VaultKeystore.wipe` overwrites the buffer we own and returns false
-  when handed an unmodifiable channel buffer it cannot touch. Closing this
-  means calling the keystore from Rust over JNI, which needs a handle to the
-  JVM that `flutter_rust_bridge` does not currently hand out.
+- **No trademark logo pack.** Every entry gets a colour and a letter derived
+  from its issuer. The user can enable bundled service symbols or set an emoji.
+  The application performs no online icon lookup. See `EntryAvatar`.
 
-- **No password slot, no recovery key.** Sections 9.2.1 and 9.2.3, needed
-  before S4. Argon2 is already a dependency.
+- **Passkeys (FR-48 to FR-55) still need a production domain.** The Android
+  Credential Manager bridge, ceremony table, and `assetlinks.json` template
+  exist. Server verification and PRF vault-key wrapping stay disabled until
+  the relying-party domain and release signing certificate are final.
 
-- No `otpauth-migration://`, Aegis, or `.2fas` import (S8).
+- **No push signalling (§10.5).** A device learns about a change on the next
+  scheduled cycle rather than immediately. Needs a Firebase project.
 
 ## Local workarounds
 

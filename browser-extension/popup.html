@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Authenticator Companion</title>
+    <link rel="stylesheet" href="popup.css">
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>Authenticator</h1>
+        <button id="lock" class="quiet hidden" type="button">Lock</button>
+      </header>
+
+      <p id="message" class="message hidden" role="alert"></p>
+
+      <section id="setup" class="hidden">
+        <h2>Pair this browser</h2>
+        <p>Create a one-time encrypted share in the mobile app. Paste the complete link here.</p>
+        <label>Share link<input id="setup-link" type="url" autocomplete="off"></label>
+        <label>Browser master password<input id="setup-password" type="password" autocomplete="new-password"></label>
+        <label>Confirm password<input id="setup-confirm" type="password" autocomplete="new-password"></label>
+        <button id="setup-button" type="button">Import and encrypt</button>
+      </section>
+
+      <section id="unlock" class="hidden">
+        <h2>Unlock</h2>
+        <label>Browser master password<input id="unlock-password" type="password" autocomplete="current-password"></label>
+        <button id="unlock-button" type="button">Unlock</button>
+      </section>
+
+      <section id="vault" class="hidden">
+        <div id="entries"></div>
+        <details>
+          <summary>Import another approved account</summary>
+          <label>One-time share link<input id="add-link" type="url" autocomplete="off"></label>
+          <button id="add-button" type="button">Import account</button>
+        </details>
+        <button id="erase" class="danger" type="button">Erase browser vault</button>
+      </section>
+    </main>
+    <script src="popup.js"></script>
+  </body>
+</html>

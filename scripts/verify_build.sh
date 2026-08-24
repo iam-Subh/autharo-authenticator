@@ -21,13 +21,35 @@
 # whose Rust step failed still produced a valid, newer APK carrying the
 # previous `.so`, and the tests that ran against it were testing old code.
 #
+# A third check, and a correction to how NFR-13 describes it.
+#
+# NFR-13 asks the build to assert that the packaged library exports the symbols
+# the application expects, because a forgotten bridge regeneration otherwise
+# produces a green build with an interface the caller cannot reach. That
+# failure is real and it happened here: the whole sync API was compiled,
+# packaged and shipped to a phone before anyone noticed Dart could not reach a
+# line of it.
+#
+# The named mechanism does not detect it. `flutter_rust_bridge` 2.12 exports no
+# symbol per function — the packaged library exports twenty-five symbols in
+# total, and every call goes through `frb_pde_ffi_dispatcher_primary` on a
+# numeric identifier. Adding or removing an API function changes nothing in the
+# symbol table, so that check reads the same before and after. Use
+# `scripts/check_bridge.sh` for the regeneration case: it runs the generator and
+# fails if anything moves, which is evidence rather than inference.
+#
+# `--exports` is still worth having, for a different failure: a library that is
+# not the bridge at all. A wrong crate-type, an over-eager strip, or a
+# mis-merged `.so` from another project all produce a file of the right name in
+# the right place that exports none of these. Name the entry points the loader
+# needs, not the functions the application calls.
+#
 # Usage
 # -----
-#   scripts/verify_build.sh [--contains <entry>] <artifact-path> -- <command> [args...]
+#   scripts/verify_build.sh [--contains <entry>] [--exports <symbol>]... #       <artifact-path> -- <command> [args...]
 #
 # Example
-#   scripts/verify_build.sh app/build/app/outputs/flutter-apk/app-debug.apk -- \
-#     flutter build apk --debug
+#   scripts/verify_build.sh #     --contains lib/arm64-v8a/librust_lib_authenticator.so #     --exports frb_pde_ffi_dispatcher_primary #     --exports frb_get_rust_content_hash #     app/build/app/outputs/flutter-apk/app-debug.apk -- #     flutter build apk --debug
 #
 # Output is streamed, not captured, so a long build stays visible. Do not pipe
 # this script's own output into `head` or `tail` — that reintroduces the exact
@@ -41,10 +63,14 @@ if [ "$#" -lt 3 ]; then
 fi
 
 contains=""
-if [ "$1" = "--contains" ]; then
-    contains="$2"
-    shift 2
-fi
+exports=""
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --contains) contains="$2"; shift 2 ;;
+        --exports)  exports="$exports $2"; shift 2 ;;
+        *) break ;;
+    esac
+done
 
 artifact="$1"
 shift
@@ -100,6 +126,67 @@ if [ -n "$contains" ]; then
     else
         printf 'contains: %s\n' "$contains" >&2
     fi
+fi
+
+# NFR-13: the packaged library must export what the application calls.
+#
+# Read out of the archive rather than off the build directory, because the
+# archive is the artefact that reaches the device — the same reason `--contains`
+# checks the archive. A `.so` sitting in `target/` proves nothing about what was
+# packaged.
+if [ -n "$exports" ]; then
+    if [ -z "$contains" ]; then
+        printf '\nFAILED: --exports needs --contains to name the library to read\n' >&2
+        exit 2
+    fi
+
+    reader=""
+    for candidate in llvm-nm nm llvm-objdump objdump; do
+        if command -v "$candidate" >/dev/null 2>&1; then
+            reader="$candidate"
+            break
+        fi
+    done
+
+    if [ -z "$reader" ]; then
+        # Deliberately fatal, not a warning. A symbol check that quietly skips
+        # itself on the machine where it matters is the same defect it exists
+        # to catch: a green result that proves nothing. The NDK ships
+        # llvm-nm; put it on PATH.
+        printf '\nFAILED: no symbol reader found (llvm-nm, nm, llvm-objdump, objdump).\n' >&2
+        printf 'The NDK ships llvm-nm under toolchains/llvm/prebuilt/*/bin.\n' >&2
+        exit 1
+    fi
+
+    workdir="$(mktemp -d)"
+    trap 'rm -f "$marker"; rm -rf "$workdir"' EXIT
+
+    if ! unzip -o -q -j "$artifact" "$contains" -d "$workdir" 2>/dev/null; then
+        printf '\nFAILED: could not extract %s from %s\n' "$contains" "$artifact" >&2
+        exit 1
+    fi
+
+    library="$workdir/$(basename "$contains")"
+    case "$reader" in
+        *nm)      table=$("$reader" --defined-only --extern-only "$library" 2>/dev/null || "$reader" -D "$library" 2>/dev/null) ;;
+        *objdump) table=$("$reader" -T "$library" 2>/dev/null) ;;
+    esac
+
+    if [ -z "$table" ]; then
+        printf '\nFAILED: %s read no symbols from %s\n' "$reader" "$library" >&2
+        exit 1
+    fi
+
+    for symbol in $exports; do
+        if ! printf '%s' "$table" | grep -q -- "$symbol"; then
+            printf '\nFAILED: %s does not export %s.\n' "$contains" "$symbol" >&2
+            printf 'The build is green and the interface is unreachable. If the\n' >&2
+            printf 'Rust side changed, regenerate the bridge:\n' >&2
+            printf '  cd app && flutter_rust_bridge_codegen generate\n' >&2
+            exit 1
+        fi
+        printf 'exports: %s\n' "$symbol" >&2
+    done
 fi
 
 printf '\nOK: %s (%s bytes), written by this run\n' "$artifact" "$size" >&2
