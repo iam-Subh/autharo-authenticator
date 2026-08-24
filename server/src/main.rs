@@ -5,7 +5,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use authserver::{AppState, SharedState, migrate, router};
+use authserver::{AppState, SharedState, crypto, migrate, router};
 use sqlx::postgres::PgPoolOptions;
 use tracing_subscriber::EnvFilter;
 
@@ -30,7 +30,13 @@ async fn main() -> anyhow::Result<()> {
 
     migrate(&db).await?;
 
-    let state: SharedState = Arc::new(AppState { db, server_key });
+    let fake_auth_hash = crypto::hash_auth_key(&[0u8; 32])
+        .expect("the server must be able to create its login timing hash");
+    let state: SharedState = Arc::new(AppState {
+        db,
+        server_key,
+        fake_auth_hash,
+    });
     let address: SocketAddr = std::env::var("BIND")
         .unwrap_or_else(|_| "127.0.0.1:8080".to_string())
         .parse()?;
@@ -38,7 +44,13 @@ async fn main() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(address).await?;
     tracing::info!("listening on {}", listener.local_addr()?);
 
-    axum::serve(listener, router(state)).await?;
+    axum::serve(
+        listener,
+        // ConnectInfo, so section 9.5's per-address rate limit can see who is
+        // calling. Without it the extractor fails and every sign-in 500s.
+        router(state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }
 
@@ -50,7 +62,10 @@ async fn main() -> anyhow::Result<()> {
 /// across restarts and a fabricated one would not be.
 fn load_server_key() -> anyhow::Result<Vec<u8>> {
     match std::env::var("SERVER_KEY") {
-        Ok(value) if !value.is_empty() => Ok(value.into_bytes()),
+        Ok(value) if value.as_bytes().len() >= 32 => Ok(value.into_bytes()),
+        Ok(_) => anyhow::bail!(
+            "SERVER_KEY must contain at least 32 bytes of random data. A short key lets an attacker predict fabricated prelogin salts."
+        ),
         _ if cfg!(debug_assertions) => {
             tracing::warn!(
                 "SERVER_KEY is not set; using a fixed development key. Fake                  prelogin salts are predictable with this key."

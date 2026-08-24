@@ -157,6 +157,10 @@ pub struct ChangesQuery {
     pub since: i64,
     #[serde(default = "default_limit")]
     pub limit: i64,
+    /// Set while the client is rebuilding its state from nothing (section
+    /// 10.6), which suppresses the prune-watermark check below.
+    #[serde(default)]
+    pub full: bool,
 }
 
 fn default_limit() -> i64 {
@@ -198,8 +202,18 @@ pub async fn pull_changes(
             .await?
             .unwrap_or((0,));
 
-    if query.since > 0 && query.since <= watermark {
-        return Err(ApiError::Conflict {
+    // Not during a full re-sync. The check is about a client resuming a cursor
+    // it saved, which may have missed a delete that has since been pruned. A
+    // re-sync walks up from zero, so every page after the first asks from a
+    // sequence below the watermark by construction — refusing those refuses
+    // page two of every re-sync on a vault larger than one page, and the
+    // re-sync then can never complete, because it fails before it stores a
+    // cursor and the next attempt starts from the same place.
+    //
+    // A missed delete cannot matter here in any case: the client is rebuilding
+    // from nothing and drops whatever this server does not have.
+    if !query.full && query.since > 0 && query.since <= watermark {
+        return Err(ApiError::CursorTooOld {
             message: "This device is too far behind and must re-sync in full.".to_string(),
         });
     }

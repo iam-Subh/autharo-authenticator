@@ -74,6 +74,7 @@ async fn start_server() -> (SocketAddr, sqlx::PgPool) {
     let state: SharedState = Arc::new(AppState {
         db: db.clone(),
         server_key: b"test-server-key".to_vec(),
+        fake_auth_hash: crypto::hash_auth_key(&[0u8; 32]).unwrap(),
     });
 
     // Port 0: the operating system picks a free one, so a test run cannot
@@ -82,7 +83,14 @@ async fn start_server() -> (SocketAddr, sqlx::PgPool) {
     let address = listener.local_addr().unwrap();
 
     tokio::spawn(async move {
-        axum::serve(listener, router(state)).await.unwrap();
+        axum::serve(
+            listener,
+            // ConnectInfo, so section 9.5's per-address rate limit can see who is
+            // calling. Without it the extractor fails and every sign-in 500s.
+            router(state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
     });
 
     (address, db)
@@ -132,7 +140,14 @@ fn pg_dump() -> String {
     // client. `--data-only` would hide a column definition that named a
     // secret, so the whole dump is searched.
     let output = Command::new("docker")
-        .args(["exec", "authcore-pg", "pg_dump", "-U", "authcore", "authcore"])
+        .args([
+            "exec",
+            "authcore-pg",
+            "pg_dump",
+            "-U",
+            "authcore",
+            "authcore",
+        ])
         .output()
         .expect("docker must be available to dump the database");
 
@@ -171,7 +186,7 @@ async fn the_database_dump_holds_no_plaintext_secret() {
         .json(&json!({
             "email": email,
             "auth_key": crypto::b64_encode(&auth_key),
-            "kdf_params": {"memory_kib": 65536, "iterations": 3, "lanes": 4},
+            "kdf_params": {"m": 65536, "t": 3, "p": 4},
             "client_salt": crypto::b64_encode(&[9u8; 16]),
             "password_slot": {
                 "wrapped_key": crypto::b64_encode(&password_wrapped),
@@ -185,7 +200,12 @@ async fn the_database_dump_holds_no_plaintext_secret() {
         .send()
         .await
         .unwrap();
-    assert_eq!(response.status(), 201, "register: {:?}", response.text().await);
+    assert_eq!(
+        response.status(),
+        201,
+        "register: {:?}",
+        response.text().await
+    );
 
     // ---- sign-in, with the control marker as the device name -----------
     let response = client
@@ -257,7 +277,10 @@ async fn the_database_dump_holds_no_plaintext_secret() {
         .fetch_one(&db)
         .await
         .unwrap();
-    assert_eq!(stored, 1, "the record was not stored, so the dump proves nothing");
+    assert_eq!(
+        stored, 1,
+        "the record was not stored, so the dump proves nothing"
+    );
 
     // ---- the dump ------------------------------------------------------
     let dump = pg_dump();
@@ -337,7 +360,7 @@ async fn prelogin_does_not_reveal_whether_an_account_exists() {
         .json(&json!({
             "email": real_email,
             "auth_key": crypto::b64_encode(&[1u8; 32]),
-            "kdf_params": {"memory_kib": 65536, "iterations": 3, "lanes": 4},
+            "kdf_params": {"m": 65536, "t": 3, "p": 4},
             "client_salt": crypto::b64_encode(&[2u8; 16]),
             "password_slot": slot,
             "recovery_slot": slot,

@@ -26,6 +26,23 @@ pub enum ApiError {
     #[error("{message}")]
     Conflict { message: String },
 
+    /// Section 10.6: the cursor points into a range of changes that no longer
+    /// exists, so only a full re-sync is correct.
+    ///
+    /// Its own status, not a `Conflict`. The client has to act on this and on
+    /// nothing else that way, and the two are not distinguishable by a status
+    /// of 409 — which "this email is already registered" also returns, under
+    /// the same `conflict` code. A client left to tell them apart by the
+    /// message string either re-syncs when it should not, or loops forever on
+    /// a cursor it can never advance.
+    #[error("{message}")]
+    CursorTooOld { message: String },
+
+    /// Section 9.5's sign-in rate limit. Carries when another attempt could
+    /// succeed, which section 13 requires as a `Retry-After` header.
+    #[error("too many sign-in attempts. Try again in {retry_after} seconds.")]
+    RateLimited { retry_after: i64 },
+
     /// NFR-11. The message names the limit, because a user who has hit one
     /// needs to know which.
     #[error("{message}")]
@@ -33,6 +50,14 @@ pub enum ApiError {
 
     #[error("the request was too large")]
     TooLarge,
+
+    /// A resource that is not on the caller's account.
+    ///
+    /// Deliberately the same answer for "no such device" and "someone else's
+    /// device". Distinguishing them would turn every endpoint that takes an
+    /// identifier into a way of asking whether that identifier exists.
+    #[error("{message}")]
+    NotFound { message: String },
 
     #[error(transparent)]
     Database(#[from] sqlx::Error),
@@ -48,11 +73,12 @@ impl ApiError {
             Self::InvalidCredentials => (StatusCode::UNAUTHORIZED, "invalid_credentials"),
             Self::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized"),
             Self::Conflict { .. } => (StatusCode::CONFLICT, "conflict"),
+            Self::CursorTooOld { .. } => (StatusCode::GONE, "cursor_too_old"),
+            Self::RateLimited { .. } => (StatusCode::TOO_MANY_REQUESTS, "rate_limited"),
             Self::QuotaExceeded { .. } => (StatusCode::FORBIDDEN, "quota_exceeded"),
             Self::TooLarge => (StatusCode::PAYLOAD_TOO_LARGE, "too_large"),
-            Self::Database(_) | Self::Other(_) => {
-                (StatusCode::INTERNAL_SERVER_ERROR, "internal")
-            }
+            Self::NotFound { .. } => (StatusCode::NOT_FOUND, "not_found"),
+            Self::Database(_) | Self::Other(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
         }
     }
 }
@@ -76,7 +102,19 @@ impl IntoResponse for ApiError {
             other => other.to_string(),
         };
 
-        (status, Json(json!({ "error": code, "message": message }))).into_response()
+        let mut response =
+            (status, Json(json!({ "error": code, "message": message }))).into_response();
+
+        // Section 13. Without it a client has to guess, and a client that
+        // guesses short comes straight back to be refused again — which is the
+        // traffic the limit exists to stop.
+        if let Self::RateLimited { retry_after } = &self
+            && let Ok(value) = retry_after.to_string().parse()
+        {
+            response.headers_mut().insert("retry-after", value);
+        }
+
+        response
     }
 }
 
