@@ -37,4 +37,16 @@ class HomeWidgetService {
       'title': title,
     });
   }
+
+  static Future<void> clearDeviceState() async {
+    try {
+      await _channel.invokeMethod<void>('configure', {
+        'enabled': false,
+        'entryId': null,
+        'title': null,
+      });
+    } on MissingPluginException {
+      // This platform does not implement the Android home-screen widget.
+    }
+  }
 }

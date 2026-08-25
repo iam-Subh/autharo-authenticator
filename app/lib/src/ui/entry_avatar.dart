@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:font_awesome_flutter/font_awesome_flutter.dart';
 
 import '../services/brand_icon_preference.dart';
 import '../services/custom_icon_data.dart';
@@ -6,32 +7,12 @@ import '../services/service_icon_matcher.dart';
 
 /// The tile at the start of every row in the code list (FR-17, FR-23).
 ///
-/// # Why this is not an icon pack
+/// The app first uses the QR issuer to select a bundled service icon. It uses
+/// the account domain if the QR issuer does not match. This process does not
+/// send the issuer or account name to an icon server.
 ///
-/// FR-23's icon pack means shipping a few hundred brand logos. Every one of
-/// them is somebody's trademark, licensed on terms that differ per brand, and
-/// the sets that circulate for this purpose are assembled without permission —
-/// which is a problem that arrives at release, not at build time, and arrives
-/// as a store takedown rather than a bug report.
-///
-/// It also fails at exactly the moment it matters. A pack covers the fifty
-/// services everyone has heard of; a real vault is full of the other kind — a
-/// company VPN, a bank in one country, a self-hosted mail server. Those get the
-/// blank placeholder, and the blank placeholder is where the user's eye stops.
-///
-/// # What actually solves the problem
-///
-/// The job is *telling forty rows apart at a glance while a code is expiring*.
-/// A colour and a letter do that, and they do it for every entry rather than
-/// for the famous ones.
-///
-/// The colour is derived from the issuer, so it is stable: the same account is
-/// the same colour on every device, after a restore, and after a re-import,
-/// without anything being stored or synced to make it so. Two accounts at the
-/// same service share a colour, which is correct — they belong together.
-///
-/// A user who wants something specific can set an emoji instead, and that
-/// *is* stored, syncs with the entry, and survives export.
+/// An unknown service gets a stable colour and letter. A user-selected emoji
+/// or encrypted image always overrides the automatic icon.
 class EntryAvatar extends StatelessWidget {
   const EntryAvatar({
     super.key,
@@ -39,6 +20,7 @@ class EntryAvatar extends StatelessWidget {
     required this.account,
     this.icon,
     this.size = 40,
+    this.forceServiceIcons = false,
   });
 
   /// What the entry calls itself. Drives both the letter and the colour.
@@ -52,6 +34,10 @@ class EntryAvatar extends StatelessWidget {
   final String? icon;
 
   final double size;
+
+  /// Shows the automatic preview in the icon picker even when the list-level
+  /// service-icon preference is off.
+  final bool forceServiceIcons;
 
   /// The name the tile is built from.
   String get _source {
@@ -101,8 +87,10 @@ class EntryAvatar extends StatelessWidget {
   Widget build(BuildContext context) {
     return ValueListenableBuilder<bool>(
       valueListenable: BrandIconPreference.enabled,
-      builder: (context, useServiceIcons, _) =>
-          _buildAvatar(context, useServiceIcons: useServiceIcons),
+      builder: (context, useServiceIcons, _) => _buildAvatar(
+        context,
+        useServiceIcons: forceServiceIcons || useServiceIcons,
+      ),
     );
   }
 
@@ -127,12 +115,25 @@ class EntryAvatar extends StatelessWidget {
       dark ? 0.82 : 0.28,
     ).toColor();
 
-    final chosen = icon?.trim() ?? '';
+    final storedChoice = icon?.trim() ?? '';
+    // Older builds could persist the generated first letter as if it were a
+    // user choice. Treat a matching one-letter value as automatic so existing
+    // Google entries do not stay on the old blue "G" tile.
+    final chosen =
+        storedChoice.characters.length == 1 &&
+            storedChoice.toUpperCase() == _monogram
+        ? ''
+        : storedChoice;
     final customImage = CustomIconData.decode(chosen);
-    final serviceIcon = chosen.isEmpty && useServiceIcons
-        ? ServiceIconMatcher.match(issuer: issuer, account: account)
-        : null;
-    final background = serviceIcon?.colour ?? fallbackBackground;
+    final selectedServiceIcon = ServiceIconMatcher.fromStoredIcon(chosen);
+    final serviceIcon =
+        selectedServiceIcon ??
+        (chosen.isEmpty && useServiceIcons
+            ? ServiceIconMatcher.match(issuer: issuer, account: account)
+            : null);
+    final background = serviceIcon?.faviconUri != null
+        ? Colors.white
+        : serviceIcon?.colour ?? fallbackBackground;
     final foreground = serviceIcon == null
         ? fallbackForeground
         : ThemeData.estimateBrightnessForColor(background) == Brightness.dark
@@ -179,8 +180,31 @@ class EntryAvatar extends StatelessWidget {
                   color: foreground,
                 ),
               )
-            : Icon(serviceIcon.icon, size: size * 0.55, color: foreground),
+            : _serviceVisual(serviceIcon, foreground),
       ),
     );
+  }
+
+  Widget _serviceVisual(ServiceIconMatch match, Color foreground) {
+    final favicon = match.faviconUri;
+    if (favicon == null) return _serviceGlyph(match, foreground);
+    return Padding(
+      padding: EdgeInsets.all(size * 0.14),
+      child: Image.network(
+        favicon.toString(),
+        width: size * 0.72,
+        height: size * 0.72,
+        fit: BoxFit.contain,
+        filterQuality: FilterQuality.medium,
+        gaplessPlayback: true,
+        errorBuilder: (_, _, _) => _serviceGlyph(match, foreground),
+      ),
+    );
+  }
+
+  Widget _serviceGlyph(ServiceIconMatch match, Color foreground) {
+    return match.icon is FaIconData
+        ? FaIcon(match.icon as FaIconData, size: size * 0.55, color: foreground)
+        : Icon(match.icon as IconData, size: size * 0.55, color: foreground);
   }
 }

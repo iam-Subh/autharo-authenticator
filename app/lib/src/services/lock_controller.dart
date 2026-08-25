@@ -1,3 +1,5 @@
+// ignore_for_file: prefer_initializing_formals
+
 import 'package:flutter/widgets.dart';
 
 import 'monotonic_clock.dart';
@@ -135,11 +137,12 @@ class LockController with WidgetsBindingObserver {
     LockPolicyStore? store,
     LockPolicy policy = const LockPolicy(),
     VoidCallback? onLocked,
-  })  : _session = session,
-        _clock = clock,
-        _store = store,
-        _policy = policy,
-        _onLocked = onLocked;
+    // Keep public parameter names free of private underscores.
+  }) : _session = session,
+       _clock = clock,
+       _store = store,
+       _policy = policy,
+       _onLocked = onLocked;
 
   final LockTarget _session;
   final MonotonicClock _clock;
@@ -202,7 +205,8 @@ class LockController with WidgetsBindingObserver {
     // FR-34, and FR-33's "immediately", which is the same instant. Done before
     // the clock read so that the strictest settings do not depend on a channel
     // call completing while the application is being suspended.
-    if (_policy.lockOnBackground || _policy.timeout == LockTimeout.immediately) {
+    if (_policy.lockOnBackground ||
+        _policy.timeout == LockTimeout.immediately) {
       _lock();
       return;
     }

@@ -18,4 +18,8 @@ class CodeVisibilityPreference {
     await _storage.write(key: _key, value: value.toString());
     hideCodesUntilTap.value = value;
   }
+
+  static void resetAfterWipe() {
+    hideCodesUntilTap.value = false;
+  }
 }

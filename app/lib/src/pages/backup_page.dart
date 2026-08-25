@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import '../../l10n/generated/app_localizations.dart';
 import '../rust/api/vault.dart' as rust;
 import '../services/automatic_backup_service.dart';
+import '../services/bounded_file_reader.dart';
 import '../ui/import_report_dialog.dart';
 import '../vault_controller.dart';
 import 'recovery_key_page.dart';
@@ -41,6 +42,8 @@ class BackupPage extends StatefulWidget {
   @override
   State<BackupPage> createState() => _BackupPageState();
 }
+
+const _maximumBackupBytes = 32 * 1024 * 1024;
 
 class _BackupPageState extends State<BackupPage> {
   bool _busy = false;
@@ -204,8 +207,13 @@ class _BackupPageState extends State<BackupPage> {
     final picked = await FilePicker.pickFile(dialogTitle: dialogTitle);
     if (picked == null || !mounted) return null;
     try {
-      return utf8.decode(await picked.readAsBytes());
+      return utf8.decode(
+        await readFileWithLimit(picked, maximumBytes: _maximumBackupBytes),
+      );
     } on FormatException {
+      if (mounted) _say(AppLocalizations.of(context).notApplicationBackup);
+      return null;
+    } on FileSizeLimitExceeded {
       if (mounted) _say(AppLocalizations.of(context).notApplicationBackup);
       return null;
     }

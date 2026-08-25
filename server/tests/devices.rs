@@ -25,6 +25,8 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use tokio::sync::Mutex;
+
 use authserver::{AppState, SharedState, migrate, router};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
@@ -32,12 +34,23 @@ use serde_json::{Value, json};
 use sqlx::postgres::PgPoolOptions;
 use uuid::Uuid;
 
+/// Serialises the whole file, the way `rate_limit.rs` does.
+///
+/// These tests share one database and one per-address budget. Registration
+/// allows ten per address per hour and this file registers about seventeen
+/// accounts, so running them at once means some tests spend a budget another
+/// test has already cleared — and the failure arrives as "registration failed"
+/// on whichever test happened to be unlucky, which is a different set every
+/// run.
+static SERIAL: Mutex<()> = Mutex::const_new(());
+
 fn database_url() -> String {
     std::env::var("DATABASE_URL")
         .unwrap_or_else(|_| "postgres://authcore:devonly@127.0.0.1:15432/authcore".to_string())
 }
 
-async fn start_server() -> (SocketAddr, sqlx::PgPool) {
+async fn start_server() -> (SocketAddr, sqlx::PgPool, tokio::sync::MutexGuard<'static, ()>) {
+    let guard = SERIAL.lock().await;
     let db = PgPoolOptions::new()
         .max_connections(4)
         .connect(&database_url())
@@ -55,14 +68,24 @@ async fn start_server() -> (SocketAddr, sqlx::PgPool) {
     // and for a minute it looked like a revert had broken twelve unrelated
     // things.
     //
-    // Only the address rows, and only this address: the per-account limit is
-    // left alone because each test registers its own email and never comes
-    // close to ten. Cargo runs test binaries one after another, so this cannot
-    // race `rate_limit.rs`, which owns this table and clears all of it.
-    sqlx::query("DELETE FROM auth_attempt WHERE kind = 'address' AND subject = '127.0.0.1'")
-        .execute(&db)
-        .await
-        .unwrap();
+    // Every per-address budget, not a named list of them. The endpoint limits
+    // store their subject as "<endpoint>:<address>", so each new limited
+    // endpoint adds a subject this suite spends — and naming them one at a
+    // time means the file breaks again the next time one is added, with
+    // "registration failed" or worse pointing at nothing.
+    //
+    // The per-account budget is left alone: each test registers its own email
+    // and never comes close to ten. Cargo runs test binaries one after
+    // another, so this cannot race `rate_limit.rs`, which owns this table and
+    // clears all of it.
+    sqlx::query(
+        "DELETE FROM auth_attempt
+          WHERE kind = 'address'
+            AND (subject = '127.0.0.1' OR subject LIKE '%:127.0.0.1')",
+    )
+    .execute(&db)
+    .await
+    .unwrap();
 
     let state: SharedState = Arc::new(AppState {
         db: db.clone(),
@@ -81,7 +104,7 @@ async fn start_server() -> (SocketAddr, sqlx::PgPool) {
         .unwrap();
     });
 
-    (address, db)
+    (address, db, guard)
 }
 
 /// The authentication key every account in this file uses.
@@ -188,7 +211,7 @@ async fn can_still_sync(client: &reqwest::Client, base: &str, token: &str) -> bo
 
 #[tokio::test]
 async fn the_device_list_names_the_caller() {
-    let (address, _db) = start_server().await;
+    let (address, _db, _serial) = start_server().await;
     let base = format!("http://{address}");
     let client = reqwest::Client::new();
 
@@ -212,7 +235,7 @@ async fn the_device_list_names_the_caller() {
 /// The assertion the whole feature rests on.
 #[tokio::test]
 async fn a_revoked_device_cannot_read_the_vault() {
-    let (address, _db) = start_server().await;
+    let (address, _db, _serial) = start_server().await;
     let base = format!("http://{address}");
     let client = reqwest::Client::new();
 
@@ -277,7 +300,7 @@ async fn a_revoked_device_cannot_read_the_vault() {
 /// leave behind, and it is the only state in which the clause is what answers.
 #[tokio::test]
 async fn a_revoked_device_cannot_refresh() {
-    let (address, db) = start_server().await;
+    let (address, db, _serial) = start_server().await;
     let base = format!("http://{address}");
     let client = reqwest::Client::new();
 
@@ -324,7 +347,7 @@ async fn a_revoked_device_cannot_refresh() {
 /// refusal that happens to look correct.
 #[tokio::test]
 async fn an_ordinary_device_can_still_refresh() {
-    let (address, _db) = start_server().await;
+    let (address, _db, _serial) = start_server().await;
     let base = format!("http://{address}");
     let client = reqwest::Client::new();
 
@@ -351,7 +374,7 @@ async fn an_ordinary_device_can_still_refresh() {
 
 #[tokio::test]
 async fn a_revoked_device_stays_in_the_list() {
-    let (address, _db) = start_server().await;
+    let (address, _db, _serial) = start_server().await;
     let base = format!("http://{address}");
     let client = reqwest::Client::new();
 
@@ -389,7 +412,7 @@ async fn a_revoked_device_stays_in_the_list() {
 
 #[tokio::test]
 async fn another_accounts_device_cannot_be_revoked() {
-    let (address, _db) = start_server().await;
+    let (address, _db, _serial) = start_server().await;
     let base = format!("http://{address}");
     let client = reqwest::Client::new();
 
@@ -435,7 +458,7 @@ async fn another_accounts_device_cannot_be_revoked() {
 
 #[tokio::test]
 async fn signing_out_everywhere_ends_every_session() {
-    let (address, _db) = start_server().await;
+    let (address, _db, _serial) = start_server().await;
     let base = format!("http://{address}");
     let client = reqwest::Client::new();
 
@@ -464,7 +487,7 @@ async fn signing_out_everywhere_ends_every_session() {
 
 #[tokio::test]
 async fn signing_out_ends_only_the_caller() {
-    let (address, _db) = start_server().await;
+    let (address, _db, _serial) = start_server().await;
     let base = format!("http://{address}");
     let client = reqwest::Client::new();
 
@@ -488,7 +511,7 @@ async fn signing_out_ends_only_the_caller() {
 
 #[tokio::test]
 async fn deleting_the_account_removes_every_record() {
-    let (address, db) = start_server().await;
+    let (address, db, _serial) = start_server().await;
     let base = format!("http://{address}");
     let client = reqwest::Client::new();
 
@@ -554,7 +577,7 @@ async fn deleting_the_account_removes_every_record() {
 
 #[tokio::test]
 async fn deleting_the_account_needs_the_password() {
-    let (address, db) = start_server().await;
+    let (address, db, _serial) = start_server().await;
     let base = format!("http://{address}");
     let client = reqwest::Client::new();
 
@@ -588,7 +611,7 @@ async fn deleting_the_account_needs_the_password() {
 
 #[tokio::test]
 async fn the_endpoints_refuse_an_unauthenticated_caller() {
-    let (address, _db) = start_server().await;
+    let (address, _db, _serial) = start_server().await;
     let base = format!("http://{address}");
     let client = reqwest::Client::new();
 
@@ -649,7 +672,7 @@ async fn the_endpoints_refuse_an_unauthenticated_caller() {
 /// to a revoked device — so that state is written directly and the token tried.
 #[tokio::test]
 async fn a_live_session_on_a_revoked_device_is_still_refused() {
-    let (address, db) = start_server().await;
+    let (address, db, _serial) = start_server().await;
     let base = format!("http://{address}");
     let client = reqwest::Client::new();
 
@@ -706,7 +729,7 @@ async fn a_live_session_on_a_revoked_device_is_still_refused() {
 ///   back.
 #[tokio::test]
 async fn revoking_ends_the_sessions_rather_than_only_blocking_them() {
-    let (address, db) = start_server().await;
+    let (address, db, _serial) = start_server().await;
     let base = format!("http://{address}");
     let client = reqwest::Client::new();
 
@@ -764,4 +787,98 @@ async fn revoking_ends_the_sessions_rather_than_only_blocking_them() {
     .await
     .unwrap();
     assert!(others > 0, "revoking one device ended another's sessions");
+}
+
+// ---------------------------------------------------------------------------
+// Sharing (section 9.5's neighbour: the only unauthenticated read path)
+// ---------------------------------------------------------------------------
+
+/// The share endpoints are the one place the server hands bytes to somebody
+/// with no account, so the limits around them are the whole defence.
+#[tokio::test]
+async fn retrieving_a_share_is_rate_limited() {
+    let (address, _db, _serial) = start_server().await;
+    let base = format!("http://{address}");
+    let client = reqwest::Client::new();
+
+    let account = register(&client, &base).await;
+    let session = sign_in(&client, &base, &account, "Phone").await;
+
+    let created = client
+        .post(format!("{base}/v1/shares"))
+        .bearer_auth(&session.access)
+        .json(&json!({
+            "payload": "ciphertext-the-server-cannot-read",
+            "expires_in_seconds": 3600,
+            "one_time": false,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert!(created.status().is_success(), "the share was not created");
+    let id = created.json::<Value>().await.unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Unauthenticated, which is correct: the recipient has no account.
+    let first = client
+        .get(format!("{base}/v1/shares/{id}"))
+        .send()
+        .await
+        .unwrap();
+    assert!(first.status().is_success(), "a recipient must be able to read it");
+
+    // Then past the limit. Without one this endpoint was an unauthenticated,
+    // database-touching call anyone could run as fast as they liked.
+    let mut limited = false;
+    for _ in 0..80 {
+        let response = client
+            .get(format!("{base}/v1/shares/{id}"))
+            .send()
+            .await
+            .unwrap();
+        if response.status() == 429 {
+            limited = true;
+            break;
+        }
+    }
+    assert!(limited, "share retrieval was never rate limited");
+}
+
+/// One-time shares are consumed exactly once, even under a race.
+#[tokio::test]
+async fn a_one_time_share_can_only_be_read_once() {
+    let (address, _db, _serial) = start_server().await;
+    let base = format!("http://{address}");
+    let client = reqwest::Client::new();
+
+    let account = register(&client, &base).await;
+    let session = sign_in(&client, &base, &account, "Phone").await;
+
+    let created = client
+        .post(format!("{base}/v1/shares"))
+        .bearer_auth(&session.access)
+        .json(&json!({
+            "payload": "ciphertext",
+            "expires_in_seconds": 3600,
+            "one_time": true,
+        }))
+        .send()
+        .await
+        .unwrap();
+    let id = created.json::<Value>().await.unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let first = client.get(format!("{base}/v1/shares/{id}")).send().await.unwrap();
+    assert!(first.status().is_success());
+
+    let second = client.get(format!("{base}/v1/shares/{id}")).send().await.unwrap();
+    assert_eq!(
+        second.status(),
+        404,
+        "a one-time share was readable twice"
+    );
 }

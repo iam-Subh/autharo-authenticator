@@ -105,6 +105,13 @@ class AppearancePreference {
     language.value = choice;
   }
 
+  static void resetAfterWipe() {
+    theme.value = AppThemeChoice.system;
+    listDensity.value = ListDensityChoice.comfortable;
+    useDynamicColour.value = true;
+    language.value = AppLanguageChoice.system;
+  }
+
   static Color get activeSeed =>
       useDynamicColour.value ? dynamicSeed.value ?? fallbackSeed : fallbackSeed;
 

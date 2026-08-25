@@ -2,14 +2,16 @@ import 'package:flutter/foundation.dart';
 
 import '../rust/api/vault.dart' as rust;
 
-/// Controls the bundled service-symbol pack for the current installation.
+/// Controls full-colour service favicons for the current installation.
 ///
-/// The symbols are part of the application. This service never sends issuer
-/// names to a favicon service or another network endpoint.
+/// When enabled, the avatar sends the matched service domain to Google's
+/// favicon service. When disabled, the app uses only local letter tiles.
 class BrandIconPreference {
   BrandIconPreference._();
 
-  static final enabled = ValueNotifier<bool>(true);
+  // Remote icon lookup discloses the matched service domain. Require explicit
+  // user consent before the first request.
+  static final enabled = ValueNotifier<bool>(false);
 
   static void load() {
     enabled.value = rust.brandIconsEnabled();

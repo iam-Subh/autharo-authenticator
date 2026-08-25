@@ -446,6 +446,16 @@ across two calls, and elapsed time over five requests each.
 change the fake salts on every restart — and a real account's salt does not
 change, so the instability would itself be the answer.
 
+If a reverse proxy terminates HTTPS, set `TRUSTED_PROXY_CIDRS` to the proxy
+socket networks. Separate multiple CIDRs with commas. For example:
+
+```text
+TRUSTED_PROXY_CIDRS=10.0.0.0/24,fd00:1234::/64
+```
+
+Do not put public client networks in this value. The server ignores
+`X-Forwarded-For` when the direct socket peer is outside these networks.
+
 ### What is deliberately absent
 
 The sync engine. S4 ends at the dump test; the cycle, the conflict rules in

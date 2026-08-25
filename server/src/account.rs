@@ -257,7 +257,7 @@ pub async fn delete_account(
         });
     };
 
-    if !crypto::verify_auth_key(&auth_key, &auth_hash) {
+    if !auth::verify_auth_key_limited(auth_key, auth_hash).await? {
         return Err(ApiError::InvalidCredentials);
     }
 

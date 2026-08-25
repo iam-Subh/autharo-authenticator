@@ -38,7 +38,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.12.0";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 1526463101;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 106815891;
 
 // Section: executor
 
@@ -782,41 +782,6 @@ fn wire__crate__api__vault__delete_folder_impl(
         },
     )
 }
-fn wire__crate__api__vault__derive_auth_key_impl(
-    port_: flutter_rust_bridge::for_generated::MessagePort,
-    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
-    rust_vec_len_: i32,
-    data_len_: i32,
-) {
-    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
-        flutter_rust_bridge::for_generated::TaskInfo {
-            debug_name: "derive_auth_key",
-            port: Some(port_),
-            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
-        },
-        move || {
-            let message = unsafe {
-                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
-                    ptr_,
-                    rust_vec_len_,
-                    data_len_,
-                )
-            };
-            let mut deserializer =
-                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
-            let api_password = <String>::sse_decode(&mut deserializer);
-            deserializer.end();
-            move |context| {
-                transform_result_sse::<_, flutter_rust_bridge::for_generated::anyhow::Error>(
-                    (move || {
-                        let output_ok = crate::api::vault::derive_auth_key(api_password)?;
-                        Ok(output_ok)
-                    })(),
-                )
-            }
-        },
-    )
-}
 fn wire__crate__api__vault__detect_import_file_impl(
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
     rust_vec_len_: i32,
@@ -1206,6 +1171,40 @@ fn wire__crate__api__vault__finish_device_setup_impl(
                             api_wrapped,
                             api_nonce,
                         )?;
+                        Ok(output_ok)
+                    })(),
+                )
+            }
+        },
+    )
+}
+fn wire__crate__api__vault__finish_wipe_cleanup_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "finish_wipe_cleanup",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, flutter_rust_bridge::for_generated::anyhow::Error>(
+                    (move || {
+                        let output_ok = crate::api::vault::finish_wipe_cleanup()?;
                         Ok(output_ok)
                     })(),
                 )
@@ -2768,6 +2767,37 @@ fn wire__crate__api__vault__welcome_seen_impl(
         },
     )
 }
+fn wire__crate__api__vault__wipe_cleanup_required_impl(
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) -> flutter_rust_bridge::for_generated::WireSyncRust2DartSse {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::SseCodec, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "wipe_cleanup_required",
+            port: None,
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            deserializer.end();
+            transform_result_sse::<_, flutter_rust_bridge::for_generated::anyhow::Error>(
+                (move || {
+                    let output_ok = crate::api::vault::wipe_cleanup_required()?;
+                    Ok(output_ok)
+                })(),
+            )
+        },
+    )
+}
 fn wire__crate__api__vault__wipe_device_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -3453,26 +3483,26 @@ fn pde_ffi_dispatcher_primary_impl(
         19 => wire__crate__api__sync__delete_account_impl(port, ptr, rust_vec_len, data_len),
         20 => wire__crate__api__vault__delete_entry_impl(port, ptr, rust_vec_len, data_len),
         21 => wire__crate__api__vault__delete_folder_impl(port, ptr, rust_vec_len, data_len),
-        22 => wire__crate__api__vault__derive_auth_key_impl(port, ptr, rust_vec_len, data_len),
-        25 => wire__crate__api__vault__export_backup_impl(port, ptr, rust_vec_len, data_len),
-        26 => wire__crate__api__vault__export_entry_uri_impl(port, ptr, rust_vec_len, data_len),
-        28 => {
+        24 => wire__crate__api__vault__export_backup_impl(port, ptr, rust_vec_len, data_len),
+        25 => wire__crate__api__vault__export_entry_uri_impl(port, ptr, rust_vec_len, data_len),
+        27 => {
             wire__crate__api__vault__find_duplicate_groups_impl(port, ptr, rust_vec_len, data_len)
         }
-        29 => {
+        28 => {
             wire__crate__api__vault__finish_biometric_open_impl(port, ptr, rust_vec_len, data_len)
         }
-        30 => {
+        29 => {
             wire__crate__api__vault__finish_biometric_setup_impl(port, ptr, rust_vec_len, data_len)
         }
-        31 => wire__crate__api__vault__finish_device_open_impl(port, ptr, rust_vec_len, data_len),
-        32 => wire__crate__api__vault__finish_device_open_with_pin_impl(
+        30 => wire__crate__api__vault__finish_device_open_impl(port, ptr, rust_vec_len, data_len),
+        31 => wire__crate__api__vault__finish_device_open_with_pin_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        33 => wire__crate__api__vault__finish_device_setup_impl(port, ptr, rust_vec_len, data_len),
+        32 => wire__crate__api__vault__finish_device_setup_impl(port, ptr, rust_vec_len, data_len),
+        33 => wire__crate__api__vault__finish_wipe_cleanup_impl(port, ptr, rust_vec_len, data_len),
         34 => wire__crate__api__vault__import_backup_impl(port, ptr, rust_vec_len, data_len),
         35 => wire__crate__api__share__import_entry_share_impl(port, ptr, rust_vec_len, data_len),
         36 => wire__crate__api__vault__import_file_impl(port, ptr, rust_vec_len, data_len),
@@ -3521,7 +3551,7 @@ fn pde_ffi_dispatcher_primary_impl(
         74 => wire__crate__api__vault__unlock_with_password_impl(port, ptr, rust_vec_len, data_len),
         75 => wire__crate__api__vault__unlock_with_recovery_impl(port, ptr, rust_vec_len, data_len),
         76 => wire__crate__api__vault__verify_backup_impl(port, ptr, rust_vec_len, data_len),
-        78 => wire__crate__api__vault__wipe_device_impl(port, ptr, rust_vec_len, data_len),
+        79 => wire__crate__api__vault__wipe_device_impl(port, ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -3540,9 +3570,9 @@ fn pde_ffi_dispatcher_sync_impl(
         12 => wire__crate__api__vault__biometric_key_blob_impl(ptr, rust_vec_len, data_len),
         13 => wire__crate__api__vault__brand_icons_enabled_impl(ptr, rust_vec_len, data_len),
         14 => wire__crate__api__vault__build_info_impl(ptr, rust_vec_len, data_len),
-        23 => wire__crate__api__vault__detect_import_file_impl(ptr, rust_vec_len, data_len),
-        24 => wire__crate__api__vault__discard_legacy_vault_impl(ptr, rust_vec_len, data_len),
-        27 => wire__crate__api__vault__failed_unlock_attempts_impl(ptr, rust_vec_len, data_len),
+        22 => wire__crate__api__vault__detect_import_file_impl(ptr, rust_vec_len, data_len),
+        23 => wire__crate__api__vault__discard_legacy_vault_impl(ptr, rust_vec_len, data_len),
+        26 => wire__crate__api__vault__failed_unlock_attempts_impl(ptr, rust_vec_len, data_len),
         37 => wire__crate__api__vault__is_vault_open_impl(ptr, rust_vec_len, data_len),
         41 => wire__crate__api__vault__list_sort_impl(ptr, rust_vec_len, data_len),
         43 => wire__crate__api__vault__lock_policy_impl(ptr, rust_vec_len, data_len),
@@ -3550,7 +3580,8 @@ fn pde_ffi_dispatcher_sync_impl(
         50 => wire__crate__api__vault__open_meta_impl(ptr, rust_vec_len, data_len),
         72 => wire__crate__api__sync__sync_status_impl(ptr, rust_vec_len, data_len),
         77 => wire__crate__api__vault__welcome_seen_impl(ptr, rust_vec_len, data_len),
-        79 => wire__crate__api__vault__wipe_threshold_range_impl(ptr, rust_vec_len, data_len),
+        78 => wire__crate__api__vault__wipe_cleanup_required_impl(ptr, rust_vec_len, data_len),
+        80 => wire__crate__api__vault__wipe_threshold_range_impl(ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }

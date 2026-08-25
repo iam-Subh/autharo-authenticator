@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::sync::Semaphore;
 use uuid::Uuid;
+use zeroize::Zeroizing;
 
 use crate::crypto;
 use crate::error::{ApiError, ApiResult};
@@ -22,9 +23,9 @@ use crate::{AppState, SharedState};
 const ACCESS_TTL_MINUTES: i64 = 15;
 const REFRESH_TTL_DAYS: i64 = 30;
 
-/// Bound the memory used by unauthenticated registration hashes. Each permit
-/// can use about 19 MiB for Argon2id.
-static REGISTRATION_HASH_SLOTS: Semaphore = Semaphore::const_new(4);
+/// Bound all Argon2 work. Each permit can use about 19 MiB. Login and account
+/// deletion need the same bound as registration.
+static ARGON2_SLOTS: Semaphore = Semaphore::const_new(4);
 
 const AUTH_KEY_BYTES: usize = 32;
 const SLOT_NONCE_BYTES: usize = 24;
@@ -130,11 +131,7 @@ pub async fn register(
 
     // Section 9.2.1 step 5. Done before the transaction so the Argon2id cost
     // is not held across a database lock.
-    let _hash_permit = REGISTRATION_HASH_SLOTS.acquire().await.map_err(|error| {
-        ApiError::Other(anyhow::anyhow!("registration hash limiter closed: {error}"))
-    })?;
-    let auth_hash = crypto::hash_auth_key(&auth_key)
-        .map_err(|error| ApiError::Other(anyhow::anyhow!("hashing failed: {error}")))?;
+    let auth_hash = hash_auth_key_limited(auth_key).await?;
 
     let mut transaction = state.db.begin().await?;
 
@@ -365,15 +362,16 @@ pub async fn login(
 
     // One error for a wrong address and a wrong key. Section 9.5 again: a
     // different message here would undo what `prelogin` is protecting.
-    let Some((account_id, Some(auth_hash), wrapped_key, wrap_nonce)) = row else {
-        // A missing account must perform the same expensive verification as
-        // an existing account with a wrong key. Otherwise response time
-        // reveals whether the address exists.
-        let _ = crypto::verify_auth_key(&auth_key, &state.fake_auth_hash);
+    let verification_hash = row
+        .as_ref()
+        .and_then(|(_, hash, _, _)| hash.clone())
+        .unwrap_or_else(|| state.fake_auth_hash.clone());
+    let verified = verify_auth_key_limited(auth_key, verification_hash).await?;
+    let Some((account_id, Some(_), wrapped_key, wrap_nonce)) = row else {
         return Err(ApiError::InvalidCredentials);
     };
 
-    if !crypto::verify_auth_key(&auth_key, &auth_hash) {
+    if !verified {
         return Err(ApiError::InvalidCredentials);
     }
 
@@ -428,8 +426,24 @@ async fn register_device(
             message: "The device description is invalid.".to_string(),
         });
     }
-    quota::check_device_limit(&state.db, account_id).await?;
-
+    let mut transaction = state.db.begin().await?;
+    sqlx::query("SELECT id FROM account WHERE id = $1 FOR UPDATE")
+        .bind(account_id)
+        .execute(&mut *transaction)
+        .await?;
+    let (device_count,): (i64,) =
+        sqlx::query_as("SELECT count(*) FROM device WHERE account_id = $1 AND NOT revoked")
+            .bind(account_id)
+            .fetch_one(&mut *transaction)
+            .await?;
+    if device_count >= quota::MAX_DEVICES {
+        return Err(ApiError::QuotaExceeded {
+            message: format!(
+                "This account already has {} devices. Revoke one before adding another.",
+                quota::MAX_DEVICES
+            ),
+        });
+    }
     let device_id = Uuid::new_v4();
     sqlx::query(
         "INSERT INTO device (id, account_id, name, platform, last_seen)
@@ -439,8 +453,10 @@ async fn register_device(
     .bind(account_id)
     .bind(request.device_name.as_deref().unwrap_or("Unnamed device"))
     .bind(request.device_platform.as_deref().unwrap_or("unknown"))
-    .execute(&state.db)
+    .execute(&mut *transaction)
     .await?;
+
+    transaction.commit().await?;
 
     Ok(device_id)
 }
@@ -490,43 +506,63 @@ pub async fn refresh(
     }
     let hash = token_hash(&request.refresh_token);
 
-    // One statement, so a concurrent second use of the same token cannot both
-    // pass the check. Two cycles racing on a device that woke twice is an
-    // ordinary occurrence, not an attack, and it must not produce two sessions.
-    // The device check belongs here as well as in `session_for_token`. Without
-    // it a revoked device keeps minting fresh access tokens for thirty days —
-    // each one refused, but refused only because of the join downstream. A
-    // revoke should stop the device asking, not merely stop it being answered.
-    let row = sqlx::query_as::<_, (Uuid, Uuid)>(
-        "UPDATE session SET revoked = TRUE
-          WHERE refresh_hash = $1
-            AND NOT revoked
-            AND refresh_expires_at > now()
-            AND (device_id IS NULL OR device_id NOT IN
-                   (SELECT id FROM device WHERE revoked))
-        RETURNING account_id, device_id",
+    let mut transaction = state.db.begin().await?;
+    let row = sqlx::query_as::<_, (Uuid, Option<Uuid>, Uuid, bool, DateTime<Utc>, Option<bool>)>(
+        "SELECT s.account_id, s.device_id, s.family_id, s.revoked,
+                s.refresh_expires_at, d.revoked
+           FROM session s
+           LEFT JOIN device d ON d.id = s.device_id
+          WHERE s.refresh_hash = $1
+          FOR UPDATE OF s",
     )
     .bind(&hash)
-    .fetch_optional(&state.db)
+    .fetch_optional(&mut *transaction)
     .await?;
 
-    let Some((account_id, device_id)) = row else {
-        // Deliberately the same answer for expired, revoked, and never-existed.
-        // Distinguishing them would tell whoever is holding a stolen token
-        // whether it was ever real.
+    let Some((account_id, device_id, family_id, revoked, expires_at, device_revoked)) = row else {
         return Err(ApiError::Unauthorized);
     };
 
-    // Section 9.5's device list is only useful if the times in it are true,
-    // and this is the one authenticated request that already writes and runs
-    // on a known cadence — every fifteen minutes, per section 13. Recording it
-    // on each vault call instead would mean a write on every read.
-    sqlx::query("UPDATE device SET last_seen = now() WHERE id = $1")
-        .bind(device_id)
-        .execute(&state.db)
+    // Reuse of a rotated token means that two parties hold the same token
+    // family. Revoke the full family, including descendants that remain live.
+    if revoked || expires_at <= Utc::now() || device_id.is_none() || device_revoked.unwrap_or(true)
+    {
+        sqlx::query("UPDATE session SET revoked = TRUE WHERE family_id = $1")
+            .bind(family_id)
+            .execute(&mut *transaction)
+            .await?;
+        transaction.commit().await?;
+        return Err(ApiError::Unauthorized);
+    }
+    let device_id = device_id.expect("checked above");
+
+    sqlx::query("UPDATE session SET revoked = TRUE WHERE refresh_hash = $1")
+        .bind(&hash)
+        .execute(&mut *transaction)
         .await?;
 
-    let tokens = issue_session(&state, account_id, device_id).await?;
+    let tokens = Tokens::new();
+    sqlx::query(
+        "INSERT INTO session
+           (id, family_id, account_id, device_id, access_hash, refresh_hash,
+            access_expires_at, refresh_expires_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+    )
+    .bind(Uuid::new_v4())
+    .bind(family_id)
+    .bind(account_id)
+    .bind(device_id)
+    .bind(token_hash(&tokens.access))
+    .bind(token_hash(&tokens.refresh))
+    .bind(tokens.access_expires_at)
+    .bind(tokens.refresh_expires_at)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query("UPDATE device SET last_seen = now() WHERE id = $1")
+        .bind(device_id)
+        .execute(&mut *transaction)
+        .await?;
+    transaction.commit().await?;
 
     Ok(Json(RefreshResponse {
         access_token: tokens.access,
@@ -539,37 +575,73 @@ struct Tokens {
     access: String,
     refresh: String,
     access_expires_at: DateTime<Utc>,
+    refresh_expires_at: DateTime<Utc>,
+}
+
+impl Tokens {
+    fn new() -> Self {
+        Self {
+            access: crypto::random_token(),
+            refresh: crypto::random_token(),
+            access_expires_at: Utc::now() + chrono::Duration::minutes(ACCESS_TTL_MINUTES),
+            refresh_expires_at: Utc::now() + chrono::Duration::days(REFRESH_TTL_DAYS),
+        }
+    }
 }
 
 /// Issues a session, storing only hashes of the tokens.
 async fn issue_session(state: &AppState, account_id: Uuid, device_id: Uuid) -> ApiResult<Tokens> {
-    let access = crypto::random_token();
-    let refresh = crypto::random_token();
-
-    let access_expires_at = Utc::now() + chrono::Duration::minutes(ACCESS_TTL_MINUTES);
-    let refresh_expires_at = Utc::now() + chrono::Duration::days(REFRESH_TTL_DAYS);
+    let tokens = Tokens::new();
+    let session_id = Uuid::new_v4();
 
     sqlx::query(
         "INSERT INTO session
-           (id, account_id, device_id, access_hash, refresh_hash,
+           (id, family_id, account_id, device_id, access_hash, refresh_hash,
             access_expires_at, refresh_expires_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)",
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
     )
-    .bind(Uuid::new_v4())
+    .bind(session_id)
+    .bind(session_id)
     .bind(account_id)
     .bind(device_id)
-    .bind(token_hash(&access))
-    .bind(token_hash(&refresh))
-    .bind(access_expires_at)
-    .bind(refresh_expires_at)
+    .bind(token_hash(&tokens.access))
+    .bind(token_hash(&tokens.refresh))
+    .bind(tokens.access_expires_at)
+    .bind(tokens.refresh_expires_at)
     .execute(&state.db)
     .await?;
 
-    Ok(Tokens {
-        access,
-        refresh,
-        access_expires_at,
+    Ok(tokens)
+}
+
+pub(crate) async fn hash_auth_key_limited(auth_key: Vec<u8>) -> ApiResult<String> {
+    let _permit = ARGON2_SLOTS
+        .acquire()
+        .await
+        .map_err(|error| ApiError::Other(anyhow::anyhow!("Argon2 work limiter closed: {error}")))?;
+    tokio::task::spawn_blocking(move || {
+        let auth_key = Zeroizing::new(auth_key);
+        crypto::hash_auth_key(&auth_key)
+            .map_err(|error| ApiError::Other(anyhow::anyhow!("hashing failed: {error}")))
     })
+    .await
+    .map_err(|error| ApiError::Other(anyhow::anyhow!("hashing task failed: {error}")))?
+}
+
+pub(crate) async fn verify_auth_key_limited(
+    auth_key: Vec<u8>,
+    auth_hash: String,
+) -> ApiResult<bool> {
+    let _permit = ARGON2_SLOTS
+        .acquire()
+        .await
+        .map_err(|error| ApiError::Other(anyhow::anyhow!("Argon2 work limiter closed: {error}")))?;
+    tokio::task::spawn_blocking(move || {
+        let auth_key = Zeroizing::new(auth_key);
+        crypto::verify_auth_key(&auth_key, &auth_hash)
+    })
+    .await
+    .map_err(|error| ApiError::Other(anyhow::anyhow!("verification task failed: {error}")))
 }
 
 pub fn token_hash(token: &str) -> Vec<u8> {

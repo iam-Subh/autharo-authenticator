@@ -6,7 +6,7 @@
 import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `absorb`, `added`, `build_payload`, `cancel_pending_keystore_operations`, `duplicate`, `lock_poisoned`, `open_vault_with_key`, `outbox_len`, `record_failed_unlock`, `secret_for_platform`, `secret_from_platform`, `take_meta`, `with_meta_pub`, `with_meta`, `with_vault_pub`, `with_vault`
+// These functions are ignored because they are not marked as `pub`: `absorb`, `added`, `build_payload`, `cancel_pending_keystore_operations`, `duplicate`, `lock_poisoned`, `open_vault_with_key`, `outbox_len`, `record_failed_unlock`, `refuse_if_trashed`, `secret_for_platform`, `secret_from_platform`, `take_meta`, `with_meta_pub`, `with_meta`, `with_vault_pub`, `with_vault`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `fmt`
 
 /// Deletes an unencrypted vault file if one is present (section 12.1 rule 4).
@@ -196,14 +196,6 @@ Future<void> unlockWithRecovery({
   phrase: phrase,
 );
 
-/// The authentication key that stage S4 will send to the server.
-///
-/// Derived on demand and never stored. Returned as lowercase hex because it
-/// exists only to be put in a request body, and there is no request to make
-/// yet — this is here so S4 has the derivation already tested.
-Future<String> deriveAuthKey({required String password}) =>
-    RustLib.instance.api.crateApiVaultDeriveAuthKey(password: password);
-
 /// Reports what produced this `.so`.
 ///
 /// Exists because a stale library was once packaged and reported as a
@@ -254,6 +246,12 @@ bool isVaultOpen() => RustLib.instance.api.crateApiVaultIsVaultOpen();
 /// ciphertext left on disk is ciphertext an attacker can keep, so the entries
 /// go too.
 Future<void> wipeDevice() => RustLib.instance.api.crateApiVaultWipeDevice();
+
+bool wipeCleanupRequired() =>
+    RustLib.instance.api.crateApiVaultWipeCleanupRequired();
+
+Future<void> finishWipeCleanup() =>
+    RustLib.instance.api.crateApiVaultFinishWipeCleanup();
 
 /// Every entry with its code at `now_unix_seconds`.
 Future<List<EntryView>> listEntries({required PlatformInt64 nowUnixSeconds}) =>

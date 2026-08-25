@@ -15,6 +15,7 @@ use axum::Json;
 use axum::extract::{Query, State};
 use axum::http::HeaderMap;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use uuid::Uuid;
 
 use crate::SharedState;
@@ -66,46 +67,68 @@ pub async fn push_records(
     let account_id = authenticate(&state, &headers).await?;
     quota::check_batch_size(request.records.len())?;
 
+    let mut identifiers = HashSet::with_capacity(request.records.len());
+    let mut records = Vec::with_capacity(request.records.len());
+    for incoming in request.records {
+        if !identifiers.insert(incoming.entry_id) {
+            return Err(ApiError::BadRequest {
+                message: "A batch cannot contain the same entry twice.".to_string(),
+            });
+        }
+        validate_hlc(&incoming.hlc)?;
+        if let Some(base) = &incoming.base_hlc {
+            validate_hlc(base)?;
+        }
+        let ciphertext = incoming.ciphertext.as_deref().map(decode).transpose()?;
+        let nonce = incoming.nonce.as_deref().map(decode).transpose()?;
+        if incoming.deleted {
+            if ciphertext.is_some() || nonce.is_some() {
+                return Err(ApiError::BadRequest {
+                    message: "A deleted record cannot contain ciphertext or a nonce.".to_string(),
+                });
+            }
+        } else {
+            let Some(ciphertext_bytes) = ciphertext.as_ref() else {
+                return Err(ApiError::BadRequest {
+                    message: "A live record must contain ciphertext.".to_string(),
+                });
+            };
+            quota::check_record_size(ciphertext_bytes.len())?;
+            if nonce.as_ref().is_none_or(|bytes| bytes.len() != 24) {
+                return Err(ApiError::BadRequest {
+                    message: "A live record nonce must be 24 bytes.".to_string(),
+                });
+            }
+        }
+        records.push((incoming, ciphertext, nonce));
+    }
+
+    let mut transaction = state.db.begin().await?;
+    // Serialize quota-changing operations for this account. This closes the
+    // gap between a count and its following writes.
+    sqlx::query("SELECT id FROM account WHERE id = $1 FOR UPDATE")
+        .bind(account_id)
+        .execute(&mut *transaction)
+        .await?;
+
     let mut accepted = Vec::new();
     let mut conflicts = Vec::new();
 
-    // Counted before anything is written, so a batch that would cross the
-    // limit is refused whole rather than half-applied.
-    let mut new_entries = 0i64;
-    for incoming in &request.records {
-        let (exists,): (bool,) = sqlx::query_as(
-            "SELECT EXISTS(SELECT 1 FROM record WHERE account_id = $1 AND entry_id = $2)",
-        )
-        .bind(account_id)
-        .bind(incoming.entry_id)
-        .fetch_one(&state.db)
-        .await?;
-        if !exists && !incoming.deleted {
-            new_entries += 1;
-        }
-    }
-    quota::check_entry_limit(&state.db, account_id, new_entries).await?;
+    let (mut resulting_count,): (i64,) =
+        sqlx::query_as("SELECT count(*) FROM record WHERE account_id = $1 AND NOT deleted")
+            .bind(account_id)
+            .fetch_one(&mut *transaction)
+            .await?;
 
-    for incoming in request.records {
-        let ciphertext = match &incoming.ciphertext {
-            Some(value) => Some(decode(value)?),
-            None => None,
-        };
-        if let Some(bytes) = &ciphertext {
-            quota::check_record_size(bytes.len())?;
-        }
-        let nonce = match &incoming.nonce {
-            Some(value) => Some(decode(value)?),
-            None => None,
-        };
-
+    let mut writes = Vec::with_capacity(records.len());
+    for (incoming, ciphertext, nonce) in records {
         let current = sqlx::query_as::<_, (String, Option<Vec<u8>>, Option<Vec<u8>>, bool)>(
             "SELECT hlc, ciphertext, nonce, deleted FROM record
               WHERE account_id = $1 AND entry_id = $2",
         )
         .bind(account_id)
         .bind(incoming.entry_id)
-        .fetch_optional(&state.db)
+        .fetch_optional(&mut *transaction)
         .await?;
 
         // The base revision check, and nothing more. Deciding which write wins
@@ -123,6 +146,33 @@ pub async fn push_records(
             continue;
         }
 
+        if let Some((held_hlc, _, _, _)) = &current
+            && incoming.hlc <= *held_hlc
+        {
+            return Err(ApiError::BadRequest {
+                message: "An updated record must have a newer HLC.".to_string(),
+            });
+        }
+
+        let was_live = current.as_ref().is_some_and(|row| !row.3);
+        if was_live && incoming.deleted {
+            resulting_count -= 1;
+        } else if !was_live && !incoming.deleted {
+            resulting_count += 1;
+        }
+        writes.push((incoming, ciphertext, nonce));
+    }
+
+    if resulting_count > quota::MAX_ENTRIES {
+        return Err(ApiError::QuotaExceeded {
+            message: format!(
+                "An account can hold at most {} entries.",
+                quota::MAX_ENTRIES
+            ),
+        });
+    }
+
+    for (incoming, ciphertext, nonce) in writes {
         sqlx::query(
             "INSERT INTO record (account_id, entry_id, ciphertext, nonce, hlc, deleted)
              VALUES ($1, $2, $3, $4, $5, $6)
@@ -139,11 +189,13 @@ pub async fn push_records(
         .bind(&nonce)
         .bind(&incoming.hlc)
         .bind(incoming.deleted)
-        .execute(&state.db)
+        .execute(&mut *transaction)
         .await?;
 
         accepted.push(incoming.entry_id);
     }
+
+    transaction.commit().await?;
 
     Ok(Json(PushResponse {
         accepted,
@@ -268,4 +320,43 @@ fn decode(value: &str) -> ApiResult<Vec<u8>> {
     crypto::b64_decode(value).map_err(|_| ApiError::BadRequest {
         message: "a record field is not valid base64url".to_string(),
     })
+}
+
+fn validate_hlc(value: &str) -> ApiResult<()> {
+    let bytes = value.as_bytes();
+    let valid = bytes.len() == 34
+        && bytes[12] == b'-'
+        && bytes[17] == b'-'
+        && bytes.iter().enumerate().all(|(index, byte)| {
+            index == 12 || index == 17 || byte.is_ascii_digit() || (b'a'..=b'f').contains(byte)
+        });
+    if valid {
+        Ok(())
+    } else {
+        Err(ApiError::BadRequest {
+            message: "A record HLC must use 12-4-16 lowercase hexadecimal digits.".to_string(),
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_hlc;
+
+    #[test]
+    fn accepts_the_wire_hlc_shape() {
+        assert!(validate_hlc("01931f4a2c10-0003-a91b7f0e44d2c318").is_ok());
+    }
+
+    #[test]
+    fn rejects_hlc_values_that_clients_cannot_parse() {
+        for value in [
+            "",
+            "01931f4a2c10-0003",
+            "01931f4a2c10-0003-a91b7f0e44d2c31z",
+            "01931F4A2C10-0003-a91b7f0e44d2c318",
+        ] {
+            assert!(validate_hlc(value).is_err(), "{value} must be rejected");
+        }
+    }
 }

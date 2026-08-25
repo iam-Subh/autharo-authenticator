@@ -4,20 +4,25 @@
 //! identifier as a capability. The decryption key is never part of a request.
 
 use axum::Json;
-use axum::extract::{Path, State};
+use axum::extract::{ConnectInfo, Path, State};
 use axum::http::HeaderMap;
 use chrono::{DateTime, Duration, Utc};
+use std::net::SocketAddr;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::SharedState;
 use crate::auth;
 use crate::error::{ApiError, ApiResult};
+use crate::ratelimit;
 
 const MIN_TTL_SECONDS: i64 = 5 * 60;
 const MAX_TTL_SECONDS: i64 = 24 * 60 * 60;
 const MAX_PAYLOAD_BYTES: usize = 128 * 1024;
 const MAX_ACTIVE_SHARES: i64 = 20;
+/// Retrievals per address per hour. High enough that a family passing a link
+/// around never notices, low enough that the endpoint is not free to hammer.
+const RETRIEVALS_PER_ADDRESS_PER_HOUR: i64 = 60;
 
 #[derive(Debug, Deserialize)]
 pub struct CreateShareRequest {
@@ -56,14 +61,19 @@ pub async fn create(
         });
     }
 
+    let mut transaction = state.db.begin().await?;
+    sqlx::query("SELECT id FROM account WHERE id = $1 FOR UPDATE")
+        .bind(account_id)
+        .execute(&mut *transaction)
+        .await?;
     sqlx::query("DELETE FROM temporary_share WHERE expires_at <= now()")
-        .execute(&state.db)
+        .execute(&mut *transaction)
         .await?;
     let (active,): (i64,) = sqlx::query_as(
         "SELECT count(*) FROM temporary_share WHERE account_id = $1 AND expires_at > now()",
     )
     .bind(account_id)
-    .fetch_one(&state.db)
+    .fetch_one(&mut *transaction)
     .await?;
     if active >= MAX_ACTIVE_SHARES {
         return Err(ApiError::QuotaExceeded {
@@ -82,8 +92,9 @@ pub async fn create(
     .bind(request.payload.as_bytes())
     .bind(request.one_time)
     .bind(expires_at)
-    .execute(&state.db)
+    .execute(&mut *transaction)
     .await?;
+    transaction.commit().await?;
 
     Ok(Json(ShareResponse {
         id,
@@ -92,10 +103,31 @@ pub async fn create(
     }))
 }
 
+/// The only unauthenticated endpoint that returns stored bytes.
+///
+/// Unauthenticated on purpose: the recipient of a share has no account, which
+/// is the whole point. Guessing an identifier is not the concern — they are
+/// version-4 UUIDs, so there are 122 random bits to find.
+///
+/// The concern is that every other endpoint is rate limited and this one was
+/// not, which left an unauthenticated, database-touching, transaction-opening
+/// call anyone could run as fast as they liked. The limit is per address and
+/// generous: a real recipient opens a link once, occasionally twice.
 pub async fn retrieve(
     State(state): State<SharedState>,
+    ConnectInfo(socket): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> ApiResult<Json<ShareResponse>> {
+    let address = ratelimit::client_address(&headers, socket);
+    ratelimit::record_address_endpoint(
+        &state.db,
+        "share-retrieve",
+        address,
+        RETRIEVALS_PER_ADDRESS_PER_HOUR,
+    )
+    .await?;
+
     let mut transaction = state.db.begin().await?;
     let row: Option<(Vec<u8>, DateTime<Utc>, bool)> = sqlx::query_as(
         "SELECT payload, expires_at, one_time

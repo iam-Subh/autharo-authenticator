@@ -14,6 +14,9 @@ permissions.
 6. Paste the complete link, including the text after `#`.
 7. Set a separate browser master password.
 
+The extension accepts HTTPS share links only. It requests access only to the
+selected share origin.
+
 The mobile action is the approval step. The extension cannot read the mobile
 vault or request another account by itself.
 
@@ -23,6 +26,13 @@ The extension encrypts its local account list with AES-256-GCM. It derives the
 key from the browser master password with PBKDF2-HMAC-SHA-256 and 600,000
 iterations. The password and derived key stay in popup memory. Closing the
 popup locks the extension.
+
+Copied codes are cleared after 30 seconds when the popup remains open. The
+extension checks the current clipboard first, so it does not erase newer text.
+
+## Test
+
+Run `node popup.test.cjs` from this directory.
 
 ## Load for development
 

@@ -1,7 +1,16 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     // The Flutter Gradle Plugin must be applied after the Android and Kotlin Gradle plugins.
     id("dev.flutter.flutter-gradle-plugin")
+}
+
+val releasePropertiesFile = rootProject.file("key.properties")
+val releaseProperties = Properties().apply {
+    if (releasePropertiesFile.exists()) {
+        releasePropertiesFile.inputStream().use(::load)
+    }
 }
 
 android {
@@ -30,6 +39,17 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
+    signingConfigs {
+        if (releasePropertiesFile.exists()) {
+            create("release") {
+                keyAlias = releaseProperties.getProperty("keyAlias")
+                keyPassword = releaseProperties.getProperty("keyPassword")
+                storeFile = file(releaseProperties.getProperty("storeFile"))
+                storePassword = releaseProperties.getProperty("storePassword")
+            }
+        }
+    }
+
     defaultConfig {
         // NOTE: this identity is provisional. It is the Play listing identity
         // and it must appear in assetlinks.json for the S7 passkey work, so
@@ -46,9 +66,8 @@ android {
 
     buildTypes {
         release {
-            // TODO: Add your own signing config for the release build.
-            // Signing with the debug keys for now, so `flutter run --release` works.
-            signingConfig = signingConfigs.getByName("debug")
+            // Never sign a production package with the shared debug key.
+            signingConfig = signingConfigs.findByName("release")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",

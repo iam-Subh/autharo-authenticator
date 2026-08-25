@@ -295,6 +295,19 @@ impl MetaStore {
         Ok(())
     }
 
+    /// Removes all installation metadata but keeps the database schema.
+    ///
+    /// A device wipe must remove account slots, sync cursors, UI settings, and
+    /// lock policy data. Listing keys here would make every future metadata
+    /// key a possible wipe omission.
+    pub fn clear_all(&mut self) -> Result<()> {
+        let transaction = self.connection.transaction()?;
+        transaction.execute("DELETE FROM meta", [])?;
+        transaction.execute("DELETE FROM reconcile_candidate", [])?;
+        transaction.commit()?;
+        Ok(())
+    }
+
     /// The device slot, or `None` on a device that has never been set up.
     pub fn device_slot(&self) -> Result<Option<WrappedVaultKey>> {
         let Some(wrapped) = self.get(META_SLOT_WRAPPED)? else {

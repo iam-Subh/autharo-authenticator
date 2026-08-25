@@ -91,6 +91,19 @@ class AutomaticBackupService {
     await _channel.invokeMethod<void>('clearDirectory');
   }
 
+  /// Removes device-owned backup configuration. Existing encrypted backup
+  /// files remain in the directory that the user selected.
+  static Future<void> clearDeviceState() async {
+    await _storage.delete(key: _enabledKey);
+    await _storage.delete(key: _passphraseKey);
+    await _storage.delete(key: _lastBackupKey);
+    try {
+      await _channel.invokeMethod<void>('clearDirectory');
+    } on MissingPluginException {
+      // This platform does not implement Android automatic backups.
+    }
+  }
+
   Future<bool> runIfDue() async {
     final current = await status();
     if (!current.enabled) return false;

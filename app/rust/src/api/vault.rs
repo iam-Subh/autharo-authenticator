@@ -667,23 +667,6 @@ pub fn unlock_with_recovery(vault_path: String, phrase: String) -> Result<()> {
     open_vault_with_key(&vault_path, take_meta()?, key)
 }
 
-/// The authentication key that stage S4 will send to the server.
-///
-/// Derived on demand and never stored. Returned as lowercase hex because it
-/// exists only to be put in a request body, and there is no request to make
-/// yet — this is here so S4 has the derivation already tested.
-pub fn derive_auth_key(password: String) -> Result<String> {
-    with_meta(|meta| {
-        let slot = account::load(meta)
-            .map_err(|error| anyhow!("{error}"))?
-            .and_then(|account| account.password_slot)
-            .ok_or_else(|| anyhow!("This device has no password slot."))?;
-
-        let key = account::derive_auth_key(&password, &slot).map_err(|error| anyhow!("{error}"))?;
-        Ok(key.iter().map(|byte| format!("{byte:02x}")).collect())
-    })
-}
-
 /// What this native library was built from (NFR-13).
 pub struct BuildInfo {
     /// Full git commit hash, or `"unknown"` outside a checkout.
@@ -889,14 +872,29 @@ pub fn wipe_device() -> Result<()> {
         None => take_meta()?,
     };
 
-    device_slot::wipe(&mut meta).map_err(|error| anyhow!("{error}"))?;
     // The synchronization session is not in meta.db on Android. Clear its
     // dedicated Keystore-backed file as part of the same device wipe.
     crate::api::sync::clear_session(&meta)?;
-    meta.remove(BIOMETRIC_WRAPPED_KEY)?;
-    meta.remove(BIOMETRIC_NONCE)?;
+    meta.clear_all()?;
+    // Dart completes platform-owned cleanup. Keep a durable marker because an
+    // automatic wipe can occur before Dart regains control.
+    meta.set(META_WIPE_CLEANUP_REQUIRED, b"1")?;
     *META.lock().map_err(|_| lock_poisoned())? = Some(meta);
     Ok(())
+}
+
+const META_WIPE_CLEANUP_REQUIRED: &str = "security.wipe_cleanup_required";
+
+#[flutter_rust_bridge::frb(sync)]
+pub fn wipe_cleanup_required() -> Result<bool> {
+    with_meta(|meta| Ok(meta.get(META_WIPE_CLEANUP_REQUIRED)?.is_some()))
+}
+
+pub fn finish_wipe_cleanup() -> Result<()> {
+    with_meta(|meta| {
+        meta.remove(META_WIPE_CLEANUP_REQUIRED)?;
+        Ok(())
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1374,7 +1372,7 @@ pub fn list_trashed_entries() -> Result<Vec<TrashEntryView>> {
                 purge_at: trashed_at.saturating_add(TRASH_RETENTION_MS),
             });
         }
-        trash.sort_by(|left, right| right.trashed_at.cmp(&left.trashed_at));
+        trash.sort_by_key(|entry| std::cmp::Reverse(entry.trashed_at));
         Ok(trash)
     })
 }
@@ -1512,8 +1510,28 @@ pub fn reveal_secret_for_export(id: String) -> Result<String> {
             .payload
             .as_otp()
             .ok_or_else(|| anyhow!("This entry holds no secret."))?;
+        refuse_if_trashed(otp_entry)?;
         Ok(otp_entry.secret.expose().to_string())
     })
+}
+
+/// Refuses a secret that belongs to an entry the user has deleted.
+///
+/// Trash is recoverable inside the application; it is not a thing to carry off
+/// the device. Somebody who removed an account and then exported it — as a
+/// file, a QR code, or a plain setup key — would be handed back a secret they
+/// believe is gone, and in FR-27's plain export it would be readable.
+///
+/// The code list already hides these. The single-secret paths and the backup
+/// did not, which is the sort of gap that opens whenever a new state is added
+/// to a payload and only the obvious reader is updated.
+fn refuse_if_trashed(entry: &authcore::entry::OtpEntry) -> Result<()> {
+    if entry.trashed_at.is_some() {
+        return Err(anyhow!(
+            "This account is in the trash. Restore it before exporting it."
+        ));
+    }
+    Ok(())
 }
 
 /// FR-30: one entry as an `otpauth://` URI, for display as a QR code.
@@ -1540,6 +1558,7 @@ pub fn export_entry_uri(id: String) -> Result<String> {
             .payload
             .as_otp()
             .ok_or_else(|| anyhow!("This entry holds no secret."))?;
+        refuse_if_trashed(otp_entry)?;
 
         let kind = match entry.payload.type_name() {
             "hotp" => OtpKind::Hotp,
@@ -1680,8 +1699,8 @@ pub fn set_list_sort(mode: String) -> Result<()> {
 pub fn brand_icons_enabled() -> Result<bool> {
     with_meta(|meta| {
         Ok(match meta.get(META_BRAND_ICONS)?.as_deref() {
-            Some(b"0") => false,
-            _ => true,
+            Some(b"1") => true,
+            _ => false,
         })
     })
 }
@@ -1961,8 +1980,21 @@ pub fn export_backup(passphrase: Option<String>) -> Result<String> {
                 if unreadable == 1 { "it" } else { "them" },
             ));
         }
+        // Trashed entries are left out. A user who deletes an account and then
+        // makes a backup does not expect the secret they just removed to be in
+        // the file — and in FR-27's plain export it would be readable. Trash is
+        // recoverable inside the app; it is not something to carry off the
+        // device.
+        //
+        // Restoring is unaffected: a live entry exports and comes back live.
         Ok(entries
             .into_iter()
+            .filter(|entry| {
+                entry
+                    .payload
+                    .as_otp()
+                    .is_none_or(|otp| otp.trashed_at.is_none())
+            })
             .map(|entry| entry.payload)
             .collect::<Vec<_>>())
     })?;

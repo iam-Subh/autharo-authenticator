@@ -81,6 +81,7 @@ dependencies = [
  "chrono",
  "getrandom 0.4.3",
  "hmac 0.13.0",
+ "ipnet",
  "reqwest",
  "serde",
  "serde_json",

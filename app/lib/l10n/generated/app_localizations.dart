@@ -419,8 +419,14 @@ abstract class AppLocalizations {
   /// No description provided for @useBuiltInIconsDescription.
   ///
   /// In en, this message translates to:
-  /// **'Matches the QR issuer or account domain to bundled icons. Nothing is sent online.'**
+  /// **'Downloads full-colour service favicons through Google\'s favicon service. Turn this off to keep issuer names on this device.'**
   String get useBuiltInIconsDescription;
+
+  /// No description provided for @serviceIconAttribution.
+  ///
+  /// In en, this message translates to:
+  /// **'Service matching data: 2FA Directory by 2factorauth.'**
+  String get serviceIconAttribution;
 
   /// No description provided for @homeScreenWidget.
   ///
@@ -2743,6 +2749,12 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'An entry can have at most 20 tags.'**
   String get tooManyTags;
+
+  /// No description provided for @tagTooLong.
+  ///
+  /// In en, this message translates to:
+  /// **'A tag can have at most 32 characters.'**
+  String get tagTooLong;
 
   /// No description provided for @renameSyncDescription.
   ///

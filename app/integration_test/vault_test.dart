@@ -587,20 +587,7 @@ void main() {
       timeout: argon2idBudget,
     );
 
-    test(
-      'the authentication key is derived, deterministic, and unstored',
-      () async {
-        final first = await rust.deriveAuthKey(password: password);
-        final second = await rust.deriveAuthKey(password: password);
-
-        expect(first, hasLength(64), reason: '32 bytes as hex');
-        expect(first, second, reason: 'S4 must be able to reproduce it');
-        expect(
-          await rust.deriveAuthKey(password: 'a different password'),
-          isNot(first),
-        );
-      },
-      timeout: argon2idBudget,
-    );
+    // Authentication-key derivation stays inside Rust. Core tests verify its
+    // deterministic result without exposing the key through the Dart bridge.
   });
 }

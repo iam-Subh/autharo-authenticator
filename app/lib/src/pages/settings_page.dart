@@ -669,21 +669,35 @@ class _SettingsPageState extends State<SettingsPage> {
           _SectionHeader(l10n.thisDevice),
           ValueListenableBuilder<bool>(
             valueListenable: BrandIconPreference.enabled,
-            builder: (context, enabled, _) => SwitchListTile(
-              secondary: const Icon(Icons.widgets_outlined),
-              title: Text(l10n.useBuiltInIcons),
-              subtitle: Text(l10n.useBuiltInIconsDescription),
-              value: enabled,
-              onChanged: _busy
-                  ? null
-                  : (value) async {
-                      setState(() => _busy = true);
-                      try {
-                        await BrandIconPreference.setEnabled(value);
-                      } finally {
-                        if (mounted) setState(() => _busy = false);
-                      }
-                    },
+            builder: (context, enabled, _) => Column(
+              children: [
+                SwitchListTile(
+                  secondary: const Icon(Icons.widgets_outlined),
+                  title: Text(l10n.useBuiltInIcons),
+                  subtitle: Text(l10n.useBuiltInIconsDescription),
+                  value: enabled,
+                  onChanged: _busy
+                      ? null
+                      : (value) async {
+                          setState(() => _busy = true);
+                          try {
+                            await BrandIconPreference.setEnabled(value);
+                          } finally {
+                            if (mounted) setState(() => _busy = false);
+                          }
+                        },
+                ),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(72, 0, 16, 8),
+                  child: Align(
+                    alignment: AlignmentDirectional.centerStart,
+                    child: Text(
+                      l10n.serviceIconAttribution,
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                  ),
+                ),
+              ],
             ),
           ),
           if (Theme.of(context).platform == TargetPlatform.android)

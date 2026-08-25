@@ -183,7 +183,11 @@ class AppLocalizationsHi extends AppLocalizations {
 
   @override
   String get useBuiltInIconsDescription =>
-      'QR जारीकर्ता या खाता डोमेन को ऐप में मौजूद आइकन से मिलाता है। कुछ भी ऑनलाइन नहीं भेजा जाता।';
+      'Google की favicon सेवा से पूरे रंग वाला सेवा आइकन डाउनलोड करता है। जारीकर्ता का नाम इसी डिवाइस पर रखने के लिए इसे बंद करें।';
+
+  @override
+  String get serviceIconAttribution =>
+      'सेवा मिलान डेटा: 2factorauth की 2FA Directory।';
 
   @override
   String get homeScreenWidget => 'होम-स्क्रीन विजेट';
@@ -1496,6 +1500,9 @@ class AppLocalizationsHi extends AppLocalizations {
 
   @override
   String get tooManyTags => 'एक प्रविष्टि में अधिकतम 20 टैग हो सकते हैं।';
+
+  @override
+  String get tagTooLong => 'एक टैग में अधिकतम 32 वर्ण हो सकते हैं।';
 
   @override
   String get renameSyncDescription =>

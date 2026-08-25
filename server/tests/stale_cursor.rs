@@ -46,6 +46,15 @@ async fn start_server() -> (SocketAddr, sqlx::PgPool) {
         .expect("the development database must be running: docker start authcore-pg");
     migrate(&db).await.expect("migrations must apply");
 
+    sqlx::query(
+        "DELETE FROM auth_attempt
+          WHERE kind = 'address'
+            AND subject IN ('127.0.0.1', 'register:127.0.0.1')",
+    )
+    .execute(&db)
+    .await
+    .unwrap();
+
     let state: SharedState = Arc::new(AppState {
         db: db.clone(),
         server_key: b"test-server-key".to_vec(),
@@ -321,6 +330,27 @@ async fn a_refresh_token_renews_the_session() {
         replayed.status(),
         reqwest::StatusCode::UNAUTHORIZED,
         "a spent refresh token must not mint a second session"
+    );
+
+    // Replay is evidence that two parties hold one token family. The token
+    // issued before the replay must also stop working.
+    let descendant = client
+        .post(format!("{base}/v1/auth/refresh"))
+        .json(&json!({ "refresh_token": new_refresh }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(descendant.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+    let descendant_access = client
+        .get(format!("{base}/v1/vault/changes"))
+        .bearer_auth(new_access)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        descendant_access.status(),
+        reqwest::StatusCode::UNAUTHORIZED
     );
 }
 

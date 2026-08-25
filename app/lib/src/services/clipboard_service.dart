@@ -53,8 +53,9 @@ class ClipboardService {
   }
 
   void dispose() {
-    _pendingClear?.cancel();
-    _pendingClear = null;
+    // Page disposal can happen before the timer fires. Keep disposal as a
+    // cleanup path so navigation cannot leave the secret on the clipboard.
+    unawaited(clearNow());
   }
 }
 

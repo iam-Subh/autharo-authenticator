@@ -30,6 +30,15 @@ enum SyncState {
   signedOut,
 }
 
+@immutable
+class SyncProblem {
+  const SyncProblem.signedOut() : needsSignIn = true, detail = null;
+  const SyncProblem.error(this.detail) : needsSignIn = false;
+
+  final bool needsSignIn;
+  final String? detail;
+}
+
 /// A snapshot of where sync stands.
 @immutable
 class SyncStatus {
@@ -58,17 +67,15 @@ class SyncStatus {
   final String? lastError;
 
   bool get isConfigured => serverUrl != null;
-  bool get isSignedIn =>
-      state != SyncState.off && state != SyncState.signedOut;
+  bool get isSignedIn => state != SyncState.off && state != SyncState.signedOut;
 
   /// One line for the code list, in the user's terms rather than the system's.
   String get summary => switch (state) {
     SyncState.off => 'Not syncing',
     SyncState.synced =>
       lastSuccess == null ? 'Synced' : 'Synced ${_ago(lastSuccess!)}',
-    SyncState.pending => pendingKnown
-        ? '$pending waiting to sync'
-        : 'Waiting to sync',
+    SyncState.pending =>
+      pendingKnown ? '$pending waiting to sync' : 'Waiting to sync',
     SyncState.offline => 'Not connected',
     SyncState.signedOut => 'Signed out — sign in to keep syncing',
   };
@@ -125,22 +132,22 @@ class SyncController extends ChangeNotifier implements SyncRunner {
   /// automatic retries hammering a failing server; applying it to a button the
   /// user just pressed would mean an app that visibly does nothing, which is
   /// indistinguishable from one that is broken.
-  Future<String?> syncNow({bool force = true}) async {
+  Future<SyncProblem?> syncNow({bool force = true}) async {
     if (_busy) return null;
     _busy = true;
     notifyListeners();
 
-    String? problem;
+    SyncProblem? problem;
     try {
       final run = await rust.syncNow(force: force);
       if (run.needsSignIn) {
-        problem = 'This device has been signed out. Sign in to keep syncing.';
+        problem = const SyncProblem.signedOut();
       }
       // A skipped attempt is not a failure and must not be reported as one.
       // It is also not a success: leaving it silent would have the caller
       // believe a cycle ran.
     } catch (error) {
-      problem = '$error';
+      problem = SyncProblem.error('$error');
     } finally {
       _busy = false;
       await onCycleComplete?.call();

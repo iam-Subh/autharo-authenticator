@@ -5,11 +5,17 @@ const decoder = new TextDecoder();
 const LOCAL_AAD = encoder.encode("authcore-browser-v1");
 const SHARE_AAD = encoder.encode("authcore-share/v1");
 const PBKDF2_ITERATIONS = 600000;
+const MAX_SHARE_RESPONSE_BYTES = 256 * 1024;
+const MAX_BROWSER_ENTRIES = 2000;
+const MAX_LOCAL_VAULT_BYTES = 8 * 1024 * 1024;
+const MAX_UINT64 = (1n << 64n) - 1n;
 
 let entries = [];
 let localKey = null;
 let localSalt = null;
 let rendering = false;
+let copiedValue = null;
+let clipboardTimer = null;
 
 const $ = (id) => document.getElementById(id);
 
@@ -85,14 +91,28 @@ async function unlock() {
   const password = $("unlock-password").value;
   const stored = (await chrome.storage.local.get("vault")).vault;
   try {
+    if (!stored || stored.version !== 1 || stored.kdf !== "PBKDF2-SHA256" ||
+        stored.iterations !== PBKDF2_ITERATIONS || stored.algorithm !== "AES-256-GCM" ||
+        typeof stored.data !== "string" || stored.data.length > Math.ceil(MAX_LOCAL_VAULT_BYTES * 4 / 3)) {
+      throw new Error("The browser vault format is invalid.");
+    }
     localSalt = b64decode(stored.salt);
+    if (localSalt.length !== 16 || b64decode(stored.nonce).length !== 12) {
+      throw new Error("The browser vault parameters are invalid.");
+    }
     localKey = await deriveLocalKey(password, localSalt);
     const plaintext = await crypto.subtle.decrypt(
       { name: "AES-GCM", iv: b64decode(stored.nonce), additionalData: LOCAL_AAD },
       localKey,
       b64decode(stored.data),
     );
-    entries = JSON.parse(decoder.decode(plaintext));
+    if (plaintext.byteLength > MAX_LOCAL_VAULT_BYTES) throw new Error("The browser vault is too large.");
+    const decoded = JSON.parse(decoder.decode(plaintext));
+    if (!Array.isArray(decoded) || decoded.length > MAX_BROWSER_ENTRIES) {
+      throw new Error("The browser vault has an invalid entry count.");
+    }
+    for (const entry of decoded) validateEntry(entry);
+    entries = decoded;
     $("unlock-password").value = "";
     show("vault");
     await renderEntries();
@@ -105,14 +125,22 @@ async function unlock() {
 
 async function importShare(linkText) {
   const url = new URL(linkText.trim());
-  if (!url.hash || !/^https?:$/.test(url.protocol)) throw new Error("The share link is not valid.");
+  if (!url.hash || url.protocol !== "https:" || url.username || url.password) {
+    throw new Error("The share link must use HTTPS.");
+  }
   const permitted = await chrome.permissions.request({ origins: [`${url.origin}/*`] });
   if (!permitted) throw new Error("Permission to contact the share server was not granted.");
   const shareKey = b64decode(url.hash.slice(1));
   if (shareKey.length !== 32) throw new Error("The share link has an invalid key.");
   url.hash = "";
-  const response = await fetch(url.toString(), { credentials: "omit", cache: "no-store" });
-  const body = await response.json().catch(() => null);
+  const response = await fetch(url.toString(), {
+    credentials: "omit",
+    cache: "no-store",
+    redirect: "error",
+    referrerPolicy: "no-referrer",
+  });
+  const bodyText = await readLimitedText(response, MAX_SHARE_RESPONSE_BYTES);
+  const body = JSON.parse(bodyText);
   if (!response.ok) throw new Error(body?.message || `The share server returned HTTP ${response.status}.`);
   const envelope = JSON.parse(body.payload);
   if (envelope.format !== "authcore-share" || envelope.version !== 1 || envelope.algorithm !== "AES-256-GCM") {
@@ -130,21 +158,74 @@ async function importShare(linkText) {
     throw new Error("The share is damaged or the link has the wrong key.");
   }
   const imported = JSON.parse(decoder.decode(plaintext));
-  if (!Array.isArray(imported) || imported.length === 0) throw new Error("The share contains no account.");
+  if (!Array.isArray(imported) || imported.length === 0 || imported.length > MAX_BROWSER_ENTRIES) {
+    throw new Error("The share has an invalid entry count.");
+  }
   for (const entry of imported) validateEntry(entry);
   return imported;
 }
 
 function validateEntry(entry) {
+  if (!entry || typeof entry !== "object" || Array.isArray(entry)) throw new Error("The shared account is invalid.");
   if (!["totp", "hotp", "steam"].includes(entry.type)) throw new Error("The share contains an unsupported entry type.");
-  if (typeof entry.secret !== "string" || typeof entry.account !== "string") throw new Error("The shared account is incomplete.");
+  if (typeof entry.secret !== "string" || entry.secret.length > 1024 ||
+      typeof entry.account !== "string" || entry.account.length === 0 || entry.account.length > 320 ||
+      (entry.issuer != null && (typeof entry.issuer !== "string" || entry.issuer.length > 200)) ||
+      (entry.note != null && (typeof entry.note !== "string" || entry.note.length > 512)) ||
+      (entry.tags != null && (!Array.isArray(entry.tags) || entry.tags.length > 20 ||
+        entry.tags.some((tag) => typeof tag !== "string" || tag.length === 0 || tag.length > 64)))) {
+    throw new Error("The shared account fields are invalid.");
+  }
+  const algorithm = entry.algorithm || "SHA1";
+  if (!["SHA1", "SHA256", "SHA512"].includes(algorithm)) throw new Error("The shared account algorithm is invalid.");
+  if (entry.type === "steam") {
+    if (entry.digits != null && Number(entry.digits) !== 5) throw new Error("The Steam account digits are invalid.");
+  } else if (entry.digits != null && ![6, 7, 8].includes(Number(entry.digits))) {
+    throw new Error("The shared account digits are invalid.");
+  }
+  if (entry.type !== "hotp") {
+    const period = Number(entry.period || 30);
+    if (!Number.isInteger(period) || period < 15 || period > 120) throw new Error("The shared account period is invalid.");
+  } else {
+    const rawCounter = String(entry.counter ?? "0");
+    if (!/^[0-9]{1,20}$/.test(rawCounter) || BigInt(rawCounter) > MAX_UINT64) {
+      throw new Error("The HOTP counter is invalid.");
+    }
+    entry.counter = BigInt(rawCounter).toString();
+  }
   base32decode(entry.secret);
+}
+
+async function readLimitedText(response, maximumBytes) {
+  const declared = Number(response.headers.get("content-length"));
+  if (Number.isFinite(declared) && declared > maximumBytes) throw new Error("The share reply is too large.");
+  if (!response.body) throw new Error("The share server returned an empty reply.");
+  const reader = response.body.getReader();
+  const chunks = [];
+  let total = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > maximumBytes) {
+      await reader.cancel();
+      throw new Error("The share reply is too large.");
+    }
+    chunks.push(value);
+  }
+  const combined = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    combined.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return decoder.decode(combined);
 }
 
 async function setup() {
   clearMessage();
   const password = $("setup-password").value;
-  if (password.length < 10) return message("Use a browser master password with at least 10 characters.");
+  if (password.length < 12) return message("Use a browser master password with at least 12 characters.");
   if (password !== $("setup-confirm").value) return message("The passwords do not match.");
   try {
     const imported = await importShare($("setup-link").value);
@@ -271,7 +352,7 @@ async function renderEntries() {
       const copy = document.createElement("button");
       copy.type = "button";
       copy.textContent = "Copy";
-      copy.addEventListener("click", () => navigator.clipboard.writeText(code));
+      copy.addEventListener("click", () => copySensitive(code));
       actions.append(copy);
       const remove = document.createElement("button");
       remove.type = "button";
@@ -288,7 +369,9 @@ async function renderEntries() {
         next.type = "button";
         next.textContent = "Next";
         next.addEventListener("click", async () => {
-          entries[index].counter = Number(entry.counter || 0) + 1;
+          const counter = BigInt(entry.counter || "0");
+          if (counter >= MAX_UINT64) throw new Error("The HOTP counter reached its maximum value.");
+          entries[index].counter = (counter + 1n).toString();
           await saveVault();
           await renderEntries();
         });
@@ -311,7 +394,25 @@ async function renderEntries() {
   }
 }
 
+async function copySensitive(value) {
+  await navigator.clipboard.writeText(value);
+  copiedValue = value;
+  clearTimeout(clipboardTimer);
+  clipboardTimer = setTimeout(async () => {
+    try {
+      if (copiedValue === value && await navigator.clipboard.readText() === value) {
+        await navigator.clipboard.writeText("");
+      }
+    } finally {
+      if (copiedValue === value) copiedValue = null;
+    }
+  }, 30000);
+}
+
 function lock() {
+  clearTimeout(clipboardTimer);
+  clipboardTimer = null;
+  copiedValue = null;
   entries = [];
   localKey = null;
   localSalt = null;

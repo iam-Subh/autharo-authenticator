@@ -100,6 +100,13 @@ class _ScanPageState extends State<ScanPage> {
       );
       if (picked == null || !mounted) return;
 
+      if (await picked.length() > 20 * 1024 * 1024) {
+        setState(() {
+          _rejected = AppLocalizations.of(context).imageScanFailed;
+        });
+        return;
+      }
+
       final path = picked.path;
       if (path == null) {
         setState(() {

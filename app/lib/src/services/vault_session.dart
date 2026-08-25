@@ -1,10 +1,18 @@
+import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:path_provider/path_provider.dart';
 
 import '../rust/api/vault.dart' as rust;
+import 'appearance_preference.dart';
+import 'automatic_backup_service.dart';
+import 'brand_icon_preference.dart';
+import 'code_visibility_preference.dart';
+import 'home_widget_service.dart';
 import 'lock_controller.dart';
 import 'recovery_status_preference.dart';
+import 'screen_capture_service.dart';
 import 'vault_keystore.dart';
 
 /// Opens, locks, and wipes the vault (PRD section 9.2.4).
@@ -49,6 +57,10 @@ class VaultSession implements LockTarget, LockPolicyStore {
     );
 
     final state = rust.openMeta(metaPath: metaPath);
+    if (rust.wipeCleanupRequired()) {
+      await _completePlatformWipe();
+      return VaultState.needsSetup;
+    }
     await _retireObsoleteKeystoreKeys();
     return switch (state) {
       'absent' => VaultState.needsSetup,
@@ -205,14 +217,21 @@ class VaultSession implements LockTarget, LockPolicyStore {
         nonce: Uint8List.fromList(blob.nonce),
       ),
     );
-    if (blob.needsPin) {
-      await rust.finishDeviceOpenWithPin(
-        vaultPath: path,
-        unwrapped: handle,
-        pin: pin!,
-      );
-    } else {
-      await rust.finishDeviceOpen(vaultPath: path, unwrapped: handle);
+    try {
+      if (blob.needsPin) {
+        await rust.finishDeviceOpenWithPin(
+          vaultPath: path,
+          unwrapped: handle,
+          pin: pin!,
+        );
+      } else {
+        await rust.finishDeviceOpen(vaultPath: path, unwrapped: handle);
+      }
+    } catch (_) {
+      if (rust.wipeCleanupRequired()) {
+        await _completePlatformWipe();
+      }
+      rethrow;
     }
   }
 
@@ -254,8 +273,25 @@ class VaultSession implements LockTarget, LockPolicyStore {
   /// on disk forever.
   Future<void> wipe() async {
     await rust.wipeDevice();
+    await _completePlatformWipe();
+  }
+
+  Future<void> _completePlatformWipe() async {
     await _keystore.deleteKey();
+    final vaultPath = _requirePath();
+    for (final suffix in const ['', '-wal', '-shm', '-journal']) {
+      final file = File('$vaultPath$suffix');
+      if (await file.exists()) await file.delete();
+    }
+    await AutomaticBackupService.clearDeviceState();
+    await HomeWidgetService.clearDeviceState();
+    await ScreenCaptureService().resetAfterWipe();
+    await const FlutterSecureStorage().deleteAll();
     await RecoveryStatusPreference.clear();
+    AppearancePreference.resetAfterWipe();
+    CodeVisibilityPreference.resetAfterWipe();
+    BrandIconPreference.enabled.value = false;
+    await rust.finishWipeCleanup();
   }
 
   String _requirePath() {

@@ -23,4 +23,12 @@ class ScreenCaptureService {
     'setBlocked',
     <String, Object>{'blocked': blocked},
   );
+
+  Future<void> resetAfterWipe() async {
+    try {
+      await setBlocked(true);
+    } on MissingPluginException {
+      // This platform does not implement Android screen-capture protection.
+    }
+  }
 }

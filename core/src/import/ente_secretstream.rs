@@ -95,3 +95,80 @@ pub(super) fn open(
     cipher.apply_keystream(plaintext.as_mut());
     Ok(plaintext)
 }
+
+#[cfg(test)]
+mod libsodium_vectors {
+    use super::*;
+
+    /// Real libsodium output, one message per length, covering every residue
+    /// modulo sixteen.
+    ///
+    /// # Why these exist
+    ///
+    /// The padding this module applies to the Poly1305 input is the one detail
+    /// of `crypto_secretstream_xchacha20poly1305` that cannot be checked by a
+    /// round trip: an encoder and a decoder that pad the same wrong way agree
+    /// perfectly and fail on every real file. The single Ente export in
+    /// `fixtures/` happens to be one length, so it can only ever exercise one
+    /// residue.
+    ///
+    /// These vectors were produced by libsodium itself, through PyNaCl, and
+    /// committed. They are the independent side of the check — nothing in this
+    /// repository generated the ciphertext.
+    #[test]
+    fn every_message_length_matches_libsodium() {
+        let raw = include_str!("fixtures/libsodium-secretstream-vectors.json");
+        let root: serde_json::Value = serde_json::from_str(raw).unwrap();
+
+        let key_bytes = b64(root["key"].as_str().unwrap());
+        let key: [u8; 32] = key_bytes.as_slice().try_into().unwrap();
+
+        let vectors = root["vectors"].as_array().unwrap();
+        assert_eq!(vectors.len(), 40, "the vector file is incomplete");
+
+        let mut residues = std::collections::HashSet::new();
+        for vector in vectors {
+            let mlen = vector["mlen"].as_u64().unwrap() as usize;
+            residues.insert(mlen % 16);
+
+            let header = b64(vector["header"].as_str().unwrap());
+            let data = b64(vector["data"].as_str().unwrap());
+            let expected = b64(vector["plain"].as_str().unwrap());
+
+            let opened = open(&data, &key, &header)
+                .unwrap_or_else(|error| panic!("length {mlen} failed: {error}"));
+            assert_eq!(
+                opened.to_vec(),
+                expected,
+                "length {mlen} decrypted to the wrong bytes"
+            );
+        }
+
+        assert_eq!(residues.len(), 16, "not every length modulo 16 was covered");
+    }
+
+    /// A tampered byte must fail, or the test above would pass on a reader that
+    /// ignored the tag entirely.
+    #[test]
+    fn a_modified_byte_is_refused() {
+        let raw = include_str!("fixtures/libsodium-secretstream-vectors.json");
+        let root: serde_json::Value = serde_json::from_str(raw).unwrap();
+        let key: [u8; 32] = b64(root["key"].as_str().unwrap()).as_slice().try_into().unwrap();
+
+        let vector = &root["vectors"][20];
+        let header = b64(vector["header"].as_str().unwrap());
+        let mut data = b64(vector["data"].as_str().unwrap());
+
+        let last = data.len() - 1;
+        data[last] ^= 0x01;
+        assert!(matches!(
+            open(&data, &key, &header),
+            Err(DecryptError::WrongPasswordOrDamaged)
+        ));
+    }
+
+    fn b64(text: &str) -> Vec<u8> {
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD.decode(text).unwrap()
+    }
+}

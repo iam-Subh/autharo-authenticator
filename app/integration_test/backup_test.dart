@@ -264,4 +264,49 @@ void main() {
       throwsA(anything),
     );
   });
+
+  test('a trashed account is not carried into a backup', () async {
+    // Trash is recoverable inside the app; it is not something to carry off the
+    // device. Somebody who deletes an account and then makes a backup does not
+    // expect the secret they just removed to be in the file - and in FR-27's
+    // plain export it would be sitting there in clear text.
+    //
+    // The code list already hid these. The backup did not, which is the gap
+    // that opens whenever a new state is added to a payload and only the
+    // obvious reader is updated.
+    final keep = await seed(issuer: 'KeepMe');
+    final bin = await seed(issuer: 'BinMe');
+
+    await rust.moveEntryToTrash(id: bin, nowMs: now());
+    added.remove(bin);
+
+    final encrypted = await rust.exportBackup(passphrase: 'a long enough one');
+    final report = await rust.importBackup(
+      text: encrypted,
+      passphrase: 'a long enough one',
+      nowMs: now(),
+    );
+    // The kept one is already present, so it is a duplicate rather than an
+    // import. What matters is that the trashed one is not in the file at all.
+    expect(report.imported, 0, reason: 'the trashed entry was backed up');
+
+    final plain = await rust.exportBackup();
+    expect(
+      plain,
+      isNot(contains('BinMe')),
+      reason: 'a deleted account reached the plain-text export',
+    );
+    expect(plain, contains('KeepMe'), reason: 'a live account must be exported');
+
+    // And the single-secret paths refuse it too.
+    await expectLater(rust.exportEntryUri(id: bin), throwsA(anything));
+    await expectLater(rust.revealSecretForExport(id: bin), throwsA(anything));
+
+    // Restoring it puts it back in reach.
+    await rust.restoreEntry(id: bin, nowMs: now());
+    added.add(bin);
+    expect(await rust.exportEntryUri(id: bin), contains('BinMe'));
+
+    final _ = keep;
+  });
 }

@@ -5,7 +5,10 @@ import 'package:flutter/material.dart';
 
 import '../../l10n/generated/app_localizations.dart';
 import '../rust/api/vault.dart' as rust;
+import '../services/bounded_file_reader.dart';
 import 'import_report_dialog.dart';
+
+const _maximumImportBytes = 32 * 1024 * 1024;
 
 /// Picking an export file and importing it (FR-15, FR-15a, FR-15d).
 ///
@@ -40,11 +43,18 @@ Future<void> importFromFile(
 
   final String text;
   try {
-    text = utf8.decode(await picked.readAsBytes());
-  } on FormatException {
+    text = utf8.decode(
+      await readFileWithLimit(picked, maximumBytes: _maximumImportBytes),
+    );
+  } on FormatException catch (_) {
     // Not text at all — a photograph, a database, a zip. Reported as the wrong
     // file rather than as a decoding failure, which is the same fact in
     // language nobody can act on.
+    if (context.mounted) {
+      _say(context, AppLocalizations.of(context).unreadableExport);
+    }
+    return;
+  } on FileSizeLimitExceeded {
     if (context.mounted) {
       _say(context, AppLocalizations.of(context).unreadableExport);
     }

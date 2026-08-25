@@ -184,7 +184,11 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get useBuiltInIconsDescription =>
-      'Matches the QR issuer or account domain to bundled icons. Nothing is sent online.';
+      'Downloads full-colour service favicons through Google\'s favicon service. Turn this off to keep issuer names on this device.';
+
+  @override
+  String get serviceIconAttribution =>
+      'Service matching data: 2FA Directory by 2factorauth.';
 
   @override
   String get homeScreenWidget => 'Home-screen widget';
@@ -1526,6 +1530,9 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get tooManyTags => 'An entry can have at most 20 tags.';
+
+  @override
+  String get tagTooLong => 'A tag can have at most 32 characters.';
 
   @override
   String get renameSyncDescription =>

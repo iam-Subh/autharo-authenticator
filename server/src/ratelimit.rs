@@ -54,14 +54,13 @@ use crate::error::{ApiError, ApiResult};
 ///
 /// Because a client can send it. Trusting it unconditionally turns the limit
 /// into a formality — an attacker sends a different value each time and is
-/// never counted. It is read only when `TRUST_FORWARDED_FOR` is set, which is
-/// correct exactly when a proxy in front of this server overwrites the header,
-/// and wrong the moment the server is reachable directly.
+/// never counted. The server reads the header only when the socket peer is in
+/// `TRUSTED_PROXY_CIDRS`.
 ///
 /// The leftmost entry is the original client. It is also the one a client can
-/// forge, which is why the switch exists.
+/// forge, which is why the trusted proxy list exists.
 pub fn client_address(headers: &HeaderMap, socket: SocketAddr) -> IpAddr {
-    if std::env::var("TRUST_FORWARDED_FOR").is_ok()
+    if trusted_proxy(socket.ip())
         && let Some(forwarded) = headers.get("x-forwarded-for")
         && let Ok(value) = forwarded.to_str()
         && let Some(first) = value.split(',').next()
@@ -70,6 +69,40 @@ pub fn client_address(headers: &HeaderMap, socket: SocketAddr) -> IpAddr {
         return address;
     }
     socket.ip()
+}
+
+fn trusted_proxy(peer: IpAddr) -> bool {
+    let Ok(configured) = std::env::var("TRUSTED_PROXY_CIDRS") else {
+        return false;
+    };
+    address_in_list(&configured, peer)
+}
+
+fn address_in_list(configured: &str, peer: IpAddr) -> bool {
+    configured.split(',').any(|item| {
+        let item = item.trim();
+        item.parse::<ipnet::IpNet>()
+            .is_ok_and(|network| network.contains(&peer))
+            || item.parse::<IpAddr>().is_ok_and(|address| address == peer)
+    })
+}
+
+#[cfg(test)]
+mod proxy_tests {
+    use super::address_in_list;
+
+    #[test]
+    fn accepts_only_addresses_in_the_configured_networks() {
+        let configured = "10.20.0.0/16, 2001:db8:abcd::/48, 127.0.0.1";
+        assert!(address_in_list(configured, "10.20.3.4".parse().unwrap()));
+        assert!(address_in_list(
+            configured,
+            "2001:db8:abcd::9".parse().unwrap()
+        ));
+        assert!(address_in_list(configured, "127.0.0.1".parse().unwrap()));
+        assert!(!address_in_list(configured, "10.21.3.4".parse().unwrap()));
+        assert!(!address_in_list(configured, "127.0.0.2".parse().unwrap()));
+    }
 }
 
 /// Section 9.5's two limits.

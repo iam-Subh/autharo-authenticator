@@ -31,6 +31,18 @@ fn a_new_database_is_empty_and_usable() {
 }
 
 #[test]
+fn clearing_metadata_does_not_require_a_key_list() {
+    let mut meta = MetaStore::open_in_memory().unwrap();
+    meta.set("known.setting", b"one").unwrap();
+    meta.set("future.setting", b"two").unwrap();
+
+    meta.clear_all().unwrap();
+
+    assert!(meta.get("known.setting").unwrap().is_none());
+    assert!(meta.get("future.setting").unwrap().is_none());
+}
+
+#[test]
 fn a_written_record_reads_back_unchanged() {
     let mut store = Store::open_in_memory(MetaStore::open_in_memory().unwrap()).unwrap();
     let id = new_entry_id();

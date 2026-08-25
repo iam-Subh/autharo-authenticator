@@ -1,11 +1,11 @@
-import 'dart:typed_data';
-
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 
 import '../../l10n/generated/app_localizations.dart';
 import '../rust/api/vault.dart' as rust;
 import '../services/custom_icon_data.dart';
+import '../services/bounded_file_reader.dart';
+import '../services/service_icon_matcher.dart';
 import '../ui/entry_avatar.dart';
 import '../ui/form_page.dart';
 import '../vault_controller.dart';
@@ -29,13 +29,9 @@ import '../vault_controller.dart';
 ///
 /// # The icon
 ///
-/// Every entry already has one without being edited: a colour and a letter
-/// derived from the service name, which is what makes a list of forty rows
-/// scannable. See [EntryAvatar] for why that rather than a pack of brand logos.
-///
-/// This screen lets the user override it with an emoji. That covers the case
-/// the derived tile cannot — two accounts at the same service, which correctly
-/// share a colour and which the user still needs to tell apart at a glance.
+/// Every entry gets a full-colour service favicon when its issuer or account
+/// domain matches the catalog. This screen also supports another service icon,
+/// an emoji, or a custom image as an explicit override.
 class EditEntryPage extends StatefulWidget {
   const EditEntryPage({
     super.key,
@@ -62,6 +58,17 @@ class _EditEntryPageState extends State<EditEntryPage> {
   String? _problem;
 
   @override
+  void initState() {
+    super.initState();
+    _issuer.addListener(_refreshIconPreview);
+    _account.addListener(_refreshIconPreview);
+  }
+
+  void _refreshIconPreview() {
+    if (mounted) setState(() {});
+  }
+
+  @override
   void dispose() {
     _issuer.dispose();
     _account.dispose();
@@ -85,7 +92,7 @@ class _EditEntryPageState extends State<EditEntryPage> {
     final tags = _parsedTags();
     if (tags.length > 20) return AppLocalizations.of(context).tooManyTags;
     if (tags.any((tag) => tag.characters.length > 32)) {
-      return 'A tag can have at most 32 characters.';
+      return AppLocalizations.of(context).tagTooLong;
     }
     return null;
   }
@@ -210,19 +217,7 @@ class _EditEntryPageState extends State<EditEntryPage> {
   }
 }
 
-/// Picks the emoji shown on an entry, or leaves the derived tile alone.
-///
-/// # Why emoji and not a grid of logos
-///
-/// They are on every keyboard, need no licence, need no download, render at any
-/// size, and sync as a few bytes inside the entry that already syncs. A logo
-/// pack would need assets, permission from each trademark holder, and a
-/// fallback for the long tail of services nobody ships a logo for — which is
-/// most of the ones in a real vault.
-///
-/// The suggestions are categories rather than brands, because that is what the
-/// choice is actually for: a user with three accounts at one service is
-/// labelling which one, not which company.
+/// Picks a service favicon, emoji, or custom image for an entry.
 class _IconPicker extends StatefulWidget {
   const _IconPicker({
     required this.issuer,
@@ -296,6 +291,12 @@ class _IconPickerState extends State<_IconPicker> {
     setState(() {});
   }
 
+  void _selectBrand(ServiceIconOption option) {
+    final value = ServiceIconMatcher.selectionValue(option.key);
+    widget.onChanged(widget.icon == value ? null : value);
+    setState(() {});
+  }
+
   Future<void> _pickImage() async {
     if (_pickingImage || !widget.enabled) return;
     setState(() {
@@ -308,10 +309,19 @@ class _IconPickerState extends State<_IconPicker> {
         type: FileType.image,
       );
       if (picked == null || !mounted) return;
-      final bytes = await picked.readAsBytes();
-      final encoded = await CustomIconData.encode(Uint8List.fromList(bytes));
+      final bytes = await readFileWithLimit(
+        picked,
+        maximumBytes: CustomIconData.maxInputBytes,
+      );
+      final encoded = await CustomIconData.encode(bytes);
       if (!mounted) return;
       widget.onChanged(encoded);
+    } on FileSizeLimitExceeded {
+      if (mounted) {
+        setState(
+          () => _imageProblem = AppLocalizations.of(context).imageTooLarge,
+        );
+      }
     } on CustomIconException catch (error) {
       if (mounted) {
         final l10n = AppLocalizations.of(context);
@@ -341,6 +351,7 @@ class _IconPickerState extends State<_IconPicker> {
     final matches = _suggestions
         .where((choice) => query.isEmpty || choice.$2.contains(query))
         .toList();
+    final brandMatches = ServiceIconMatcher.search(query);
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -360,6 +371,7 @@ class _IconPickerState extends State<_IconPicker> {
               account: widget.account,
               icon: widget.icon,
               size: 48,
+              forceServiceIcons: true,
             ),
             const SizedBox(width: 16),
             Expanded(
@@ -413,21 +425,40 @@ class _IconPickerState extends State<_IconPicker> {
           ),
         ],
         const SizedBox(height: 12),
-        if (matches.isEmpty)
+        if (matches.isEmpty && brandMatches.isEmpty)
           Text(l10n.noIconMatches)
-        else
-          Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            children: [
-              for (final choice in matches)
-                _Swatch(
-                  label: choice.$1,
-                  selected: widget.icon == choice.$1,
-                  onTap: widget.enabled ? () => _select(choice.$1) : null,
-                ),
-            ],
-          ),
+        else ...[
+          if (brandMatches.isNotEmpty)
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                for (final option in brandMatches)
+                  _BrandSwatch(
+                    option: option,
+                    selected:
+                        widget.icon ==
+                        ServiceIconMatcher.selectionValue(option.key),
+                    onTap: widget.enabled ? () => _selectBrand(option) : null,
+                  ),
+              ],
+            ),
+          if (brandMatches.isNotEmpty && matches.isNotEmpty)
+            const SizedBox(height: 12),
+          if (matches.isNotEmpty)
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                for (final choice in matches)
+                  _Swatch(
+                    label: choice.$1,
+                    selected: widget.icon == choice.$1,
+                    onTap: widget.enabled ? () => _select(choice.$1) : null,
+                  ),
+              ],
+            ),
+        ],
         if (widget.icon != null) ...[
           const SizedBox(height: 8),
           TextButton.icon(
@@ -437,6 +468,48 @@ class _IconPickerState extends State<_IconPicker> {
           ),
         ],
       ],
+    );
+  }
+}
+
+class _BrandSwatch extends StatelessWidget {
+  const _BrandSwatch({
+    required this.option,
+    required this.selected,
+    required this.onTap,
+  });
+
+  final ServiceIconOption option;
+  final bool selected;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final colours = Theme.of(context).colorScheme;
+    final value = ServiceIconMatcher.selectionValue(option.key);
+    return Tooltip(
+      message: option.label,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(10),
+        child: Container(
+          padding: const EdgeInsets.all(2),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(
+              color: selected ? colours.primary : Colors.transparent,
+              width: 2,
+            ),
+          ),
+          child: EntryAvatar(
+            issuer: option.label,
+            account: option.label,
+            icon: value,
+            size: 36,
+            forceServiceIcons: true,
+          ),
+        ),
+      ),
     );
   }
 }

@@ -77,9 +77,12 @@ class _SyncPageState extends State<SyncPage> {
     final problem = await widget.controller.syncNow();
     await _refreshDashboard();
     if (!mounted || problem == null) return;
+    final message = problem.needsSignIn
+        ? AppLocalizations.of(context).syncSessionExpired
+        : problem.detail!;
     ScaffoldMessenger.of(
       context,
-    ).showSnackBar(SnackBar(content: Text(problem)));
+    ).showSnackBar(SnackBar(content: Text(message)));
   }
 
   Future<void> _signOut() async {

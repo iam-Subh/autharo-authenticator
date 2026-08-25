@@ -28,6 +28,9 @@
 //! that run exercises.
 
 use authcore::transport::{HttpClient, HttpRequest, HttpResponse, Method};
+use std::io::Read;
+
+const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 
 /// A blocking client, because `SyncTransport` is synchronous.
 ///
@@ -79,18 +82,33 @@ impl HttpClient for ReqwestClient {
         let response = builder.send().map_err(describe)?;
         let received_ms = now_ms();
 
+        if response
+            .content_length()
+            .is_some_and(|length| length > MAX_RESPONSE_BYTES as u64)
+        {
+            return Err("the server reply is larger than 8 MiB".to_string());
+        }
+
+        let status = response.status().as_u16();
+
         let date = response
             .headers()
             .get("date")
             .and_then(|value| value.to_str().ok())
             .map(str::to_string);
 
+        let mut body = Vec::new();
+        response
+            .take(MAX_RESPONSE_BYTES as u64 + 1)
+            .read_to_end(&mut body)
+            .map_err(|error| format!("the response could not be read: {error}"))?;
+        if body.len() > MAX_RESPONSE_BYTES {
+            return Err("the server reply is larger than 8 MiB".to_string());
+        }
+
         Ok(HttpResponse {
-            status: response.status().as_u16(),
-            body: response
-                .bytes()
-                .map_err(|error| format!("the response could not be read: {error}"))?
-                .to_vec(),
+            status,
+            body,
             date,
             sent_ms,
             received_ms,

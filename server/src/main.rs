@@ -62,7 +62,7 @@ async fn main() -> anyhow::Result<()> {
 /// across restarts and a fabricated one would not be.
 fn load_server_key() -> anyhow::Result<Vec<u8>> {
     match std::env::var("SERVER_KEY") {
-        Ok(value) if value.as_bytes().len() >= 32 => Ok(value.into_bytes()),
+        Ok(value) if value.len() >= 32 => Ok(value.into_bytes()),
         Ok(_) => anyhow::bail!(
             "SERVER_KEY must contain at least 32 bytes of random data. A short key lets an attacker predict fabricated prelogin salts."
         ),

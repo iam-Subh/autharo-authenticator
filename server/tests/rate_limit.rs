@@ -238,8 +238,7 @@ async fn one_address_being_limited_does_not_affect_another() {
 ///
 /// Trusting that header unconditionally turns the limit into a formality: an
 /// attacker sends a different value each time and is never counted. It is read
-/// only when `TRUST_FORWARDED_FOR` is set, which is correct exactly when a proxy
-/// in front of this server overwrites it.
+/// only when the direct peer belongs to `TRUSTED_PROXY_CIDRS`.
 #[tokio::test]
 async fn a_forged_forwarded_header_is_ignored_by_default() {
     let (address, _db, _serial) = start_server().await;

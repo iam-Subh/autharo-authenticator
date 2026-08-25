@@ -1,519 +1,292 @@
 import 'package:flutter/material.dart';
+import 'package:font_awesome_flutter/font_awesome_flutter.dart';
 import 'package:simple_icons/simple_icons.dart';
+
+part 'service_icon_catalog.g.dart';
+part 'service_domain_catalog.g.dart';
 
 /// A bundled service icon selected from an OTP issuer or account domain.
 class ServiceIconMatch {
-  const ServiceIconMatch({required this.icon, required this.colour});
+  const ServiceIconMatch({
+    required this.icon,
+    required this.colour,
+    this.domain,
+  });
 
-  final IconData icon;
+  /// An [IconData] or a Font Awesome [FaIconData].
+  final Object icon;
   final Color colour;
+  final String? domain;
+
+  Uri? get faviconUri {
+    final host = domain;
+    if (host == null) return null;
+    return Uri.https('t0.gstatic.com', '/faviconV2', {
+      'client': 'SOCIAL',
+      'type': 'FAVICON',
+      'fallback_opts': 'TYPE,SIZE,URL',
+      'url': 'https://$host',
+      'size': '256',
+    });
+  }
 }
 
+class ServiceIconOption {
+  const ServiceIconOption({
+    required this.key,
+    required this.label,
+    required this.match,
+  });
+
+  final String key;
+  final String label;
+  final ServiceIconMatch match;
+}
+
+/// Matches an OTP issuer to a full-colour favicon and an offline icon.
+///
+/// The generated catalog contains every brand in the installed Simple Icons
+/// package. The small override table covers common issuer names that do not
+/// have a current Simple Icons brand because of trademark restrictions.
 class ServiceIconMatcher {
   ServiceIconMatcher._();
 
-  static const _brands = <({List<String> aliases, ServiceIconMatch match})>[
-    (
-      aliases: ['github'],
-      match: ServiceIconMatch(
-        icon: SimpleIcons.github,
-        colour: Color(0xff181717),
-      ),
-    ),
-    (
-      aliases: ['gitlab'],
-      match: ServiceIconMatch(
-        icon: SimpleIcons.gitlab,
-        colour: Color(0xfffc6d26),
-      ),
-    ),
-    (
-      aliases: ['gmail', 'google mail', 'googlemail'],
-      match: ServiceIconMatch(
-        icon: SimpleIcons.gmail,
-        colour: Color(0xffea4335),
-      ),
-    ),
-    (
-      aliases: ['youtube'],
-      match: ServiceIconMatch(
-        icon: SimpleIcons.youtube,
-        colour: Color(0xffff0000),
-      ),
-    ),
-    (
-      aliases: ['google', 'google cloud', 'gcp'],
-      match: ServiceIconMatch(
-        icon: SimpleIcons.google,
-        colour: Color(0xff4285f4),
-      ),
-    ),
-    (
-      aliases: ['apple', 'icloud'],
-      match: ServiceIconMatch(
-        icon: SimpleIcons.apple,
-        colour: Color(0xff000000),
-      ),
-    ),
-    (
-      aliases: ['discord'],
-      match: ServiceIconMatch(
-        icon: SimpleIcons.discord,
-        colour: Color(0xff5865f2),
-      ),
-    ),
-    (
-      aliases: ['steam'],
-      match: ServiceIconMatch(
-        icon: SimpleIcons.steam,
-        colour: Color(0xff171a21),
-      ),
-    ),
-    (
-      aliases: ['proton', 'proton mail', 'protonmail'],
-      match: ServiceIconMatch(
-        icon: SimpleIcons.proton,
-        colour: Color(0xff6d4aff),
-      ),
-    ),
-    (
-      aliases: ['dropbox'],
-      match: ServiceIconMatch(
-        icon: SimpleIcons.dropbox,
-        colour: Color(0xff0061ff),
-      ),
-    ),
-    (
-      aliases: ['cloudflare'],
-      match: ServiceIconMatch(
-        icon: SimpleIcons.cloudflare,
-        colour: Color(0xfff38020),
-      ),
-    ),
-    (
-      aliases: ['instagram'],
-      match: ServiceIconMatch(
-        icon: SimpleIcons.instagram,
-        colour: Color(0xffe4405f),
-      ),
-    ),
-    (
-      aliases: ['facebook'],
-      match: ServiceIconMatch(
-        icon: SimpleIcons.facebook,
-        colour: Color(0xff0866ff),
-      ),
-    ),
-    (
-      aliases: ['meta'],
-      match: ServiceIconMatch(
-        icon: SimpleIcons.meta,
-        colour: Color(0xff0467df),
-      ),
-    ),
-    (
-      aliases: ['reddit'],
-      match: ServiceIconMatch(
-        icon: SimpleIcons.reddit,
-        colour: Color(0xffff4500),
-      ),
-    ),
-    (
-      aliases: ['twitter', 'x com'],
-      match: ServiceIconMatch(icon: SimpleIcons.x, colour: Color(0xff000000)),
-    ),
-    (
-      aliases: ['bitwarden'],
-      match: ServiceIconMatch(
-        icon: SimpleIcons.bitwarden,
-        colour: Color(0xff175ddc),
-      ),
-    ),
-    (
-      aliases: ['paypal'],
-      match: ServiceIconMatch(
-        icon: SimpleIcons.paypal,
-        colour: Color(0xff003087),
-      ),
-    ),
-    (
-      aliases: ['stripe'],
-      match: ServiceIconMatch(
-        icon: SimpleIcons.stripe,
-        colour: Color(0xff635bff),
-      ),
-    ),
-    (
-      aliases: ['coinbase'],
-      match: ServiceIconMatch(
-        icon: SimpleIcons.coinbase,
-        colour: Color(0xff0052ff),
-      ),
-    ),
-    (
-      aliases: ['binance'],
-      match: ServiceIconMatch(
-        icon: SimpleIcons.binance,
-        colour: Color(0xfff0b90b),
-      ),
-    ),
-    (
-      aliases: ['twitch'],
-      match: ServiceIconMatch(
-        icon: SimpleIcons.twitch,
-        colour: Color(0xff9146ff),
-      ),
-    ),
-    (
-      aliases: ['atlassian'],
-      match: ServiceIconMatch(
-        icon: SimpleIcons.atlassian,
-        colour: Color(0xff1868db),
-      ),
-    ),
-    (
-      aliases: ['jira'],
-      match: ServiceIconMatch(
-        icon: SimpleIcons.jira,
-        colour: Color(0xff0052cc),
-      ),
-    ),
-    (
-      aliases: ['confluence'],
-      match: ServiceIconMatch(
-        icon: SimpleIcons.confluence,
-        colour: Color(0xff172b4d),
-      ),
-    ),
-    (
-      aliases: ['notion'],
-      match: ServiceIconMatch(
-        icon: SimpleIcons.notion,
-        colour: Color(0xff000000),
-      ),
-    ),
-    (
-      aliases: ['digitalocean'],
-      match: ServiceIconMatch(
-        icon: SimpleIcons.digitalocean,
-        colour: Color(0xff0080ff),
-      ),
-    ),
-    (
-      aliases: ['auth0'],
-      match: ServiceIconMatch(
-        icon: SimpleIcons.auth0,
-        colour: Color(0xffeb5424),
-      ),
-    ),
-    (
-      aliases: ['okta'],
-      match: ServiceIconMatch(
-        icon: SimpleIcons.okta,
-        colour: Color(0xff007dc1),
-      ),
-    ),
-    (
-      aliases: ['zoom'],
-      match: ServiceIconMatch(
-        icon: SimpleIcons.zoom,
-        colour: Color(0xff0b5cff),
-      ),
-    ),
-    (
-      aliases: ['shopify'],
-      match: ServiceIconMatch(
-        icon: SimpleIcons.shopify,
-        colour: Color(0xff7ab55c),
-      ),
-    ),
-    (
-      aliases: ['epic games', 'epicgames'],
-      match: ServiceIconMatch(
-        icon: SimpleIcons.epicgames,
-        colour: Color(0xff313131),
-      ),
-    ),
-    (
-      aliases: ['tiktok'],
-      match: ServiceIconMatch(
-        icon: SimpleIcons.tiktok,
-        colour: Color(0xff000000),
-      ),
-    ),
-    (
-      aliases: ['spotify'],
-      match: ServiceIconMatch(
-        icon: SimpleIcons.spotify,
-        colour: Color(0xff1ed760),
-      ),
-    ),
-    (
-      aliases: ['telegram'],
-      match: ServiceIconMatch(
-        icon: SimpleIcons.telegram,
-        colour: Color(0xff26a5e4),
-      ),
-    ),
-    (
-      aliases: ['whatsapp'],
-      match: ServiceIconMatch(
-        icon: SimpleIcons.whatsapp,
-        colour: Color(0xff25d366),
-      ),
-    ),
-    (
-      aliases: ['signal'],
-      match: ServiceIconMatch(
-        icon: SimpleIcons.signal,
-        colour: Color(0xff3a76f0),
-      ),
-    ),
-    (
-      aliases: ['mastodon'],
-      match: ServiceIconMatch(
-        icon: SimpleIcons.mastodon,
-        colour: Color(0xff6364ff),
-      ),
-    ),
-    (
-      aliases: ['docker'],
-      match: ServiceIconMatch(
-        icon: SimpleIcons.docker,
-        colour: Color(0xff2496ed),
-      ),
-    ),
-    (
-      aliases: ['kubernetes', 'k8s'],
-      match: ServiceIconMatch(
-        icon: SimpleIcons.kubernetes,
-        colour: Color(0xff326ce5),
-      ),
-    ),
-    (
-      aliases: ['npm', 'npmjs'],
-      match: ServiceIconMatch(icon: SimpleIcons.npm, colour: Color(0xffcb3837)),
-    ),
-    (
-      aliases: ['pypi', 'python package index'],
-      match: ServiceIconMatch(
-        icon: SimpleIcons.pypi,
-        colour: Color(0xff3775a9),
-      ),
-    ),
-    (
-      aliases: ['jetbrains'],
-      match: ServiceIconMatch(
-        icon: SimpleIcons.jetbrains,
-        colour: Color(0xff000000),
-      ),
-    ),
-    (
-      aliases: ['wordpress'],
-      match: ServiceIconMatch(
-        icon: SimpleIcons.wordpress,
-        colour: Color(0xff21759b),
-      ),
-    ),
-    (
-      aliases: ['drupal'],
-      match: ServiceIconMatch(
-        icon: SimpleIcons.drupal,
-        colour: Color(0xff0678be),
-      ),
-    ),
-    (
-      aliases: ['nextcloud'],
-      match: ServiceIconMatch(
-        icon: SimpleIcons.nextcloud,
-        colour: Color(0xff0082c9),
-      ),
-    ),
-    (
-      aliases: ['grafana'],
-      match: ServiceIconMatch(
-        icon: SimpleIcons.grafana,
-        colour: Color(0xfff46800),
-      ),
-    ),
-    (
-      aliases: ['sentry'],
-      match: ServiceIconMatch(
-        icon: SimpleIcons.sentry,
-        colour: Color(0xff362d59),
-      ),
-    ),
-    (
-      aliases: ['tailscale'],
-      match: ServiceIconMatch(
-        icon: SimpleIcons.tailscale,
-        colour: Color(0xff242424),
-      ),
-    ),
-    (
-      aliases: ['wireguard'],
-      match: ServiceIconMatch(
-        icon: SimpleIcons.wireguard,
-        colour: Color(0xff88171a),
-      ),
-    ),
-    (
-      aliases: ['figma'],
-      match: ServiceIconMatch(
-        icon: SimpleIcons.figma,
-        colour: Color(0xfff24e1e),
-      ),
-    ),
-    (
-      aliases: ['trello'],
-      match: ServiceIconMatch(
-        icon: SimpleIcons.trello,
-        colour: Color(0xff0052cc),
-      ),
-    ),
-    (
-      aliases: ['asana'],
-      match: ServiceIconMatch(
-        icon: SimpleIcons.asana,
-        colour: Color(0xfff06a6a),
-      ),
-    ),
-    (
-      aliases: ['todoist'],
-      match: ServiceIconMatch(
-        icon: SimpleIcons.todoist,
-        colour: Color(0xffe44332),
-      ),
-    ),
-    (
-      aliases: ['vercel'],
-      match: ServiceIconMatch(
-        icon: SimpleIcons.vercel,
-        colour: Color(0xff000000),
-      ),
-    ),
-    (
-      aliases: ['netlify'],
-      match: ServiceIconMatch(
-        icon: SimpleIcons.netlify,
-        colour: Color(0xff00c7b7),
-      ),
-    ),
-    (
-      aliases: ['firebase'],
-      match: ServiceIconMatch(
-        icon: SimpleIcons.firebase,
-        colour: Color(0xffffca28),
-      ),
-    ),
-    (
-      aliases: ['mongodb'],
-      match: ServiceIconMatch(
-        icon: SimpleIcons.mongodb,
-        colour: Color(0xff47a248),
-      ),
-    ),
-    (
-      aliases: ['postgres', 'postgresql'],
-      match: ServiceIconMatch(
-        icon: SimpleIcons.postgresql,
-        colour: Color(0xff4169e1),
-      ),
-    ),
-    (
-      aliases: ['mysql'],
-      match: ServiceIconMatch(
-        icon: SimpleIcons.mysql,
-        colour: Color(0xff4479a1),
-      ),
-    ),
-    (
-      aliases: ['ubuntu'],
-      match: ServiceIconMatch(
-        icon: SimpleIcons.ubuntu,
-        colour: Color(0xffe95420),
-      ),
-    ),
-    (
-      aliases: ['linux'],
-      match: ServiceIconMatch(
-        icon: SimpleIcons.linux,
-        colour: Color(0xfffcc624),
-      ),
-    ),
-    (
-      aliases: ['ebay'],
-      match: ServiceIconMatch(
-        icon: SimpleIcons.ebay,
-        colour: Color(0xffe53238),
-      ),
-    ),
-    (
-      aliases: ['etsy'],
-      match: ServiceIconMatch(
-        icon: SimpleIcons.etsy,
-        colour: Color(0xfff16521),
-      ),
-    ),
-    (
-      aliases: ['duolingo'],
-      match: ServiceIconMatch(
-        icon: SimpleIcons.duolingo,
-        colour: Color(0xff58cc02),
-      ),
-    ),
-    (
-      aliases: ['coursera'],
-      match: ServiceIconMatch(
-        icon: SimpleIcons.coursera,
-        colour: Color(0xff0056d2),
-      ),
-    ),
-    (
-      aliases: ['udemy'],
-      match: ServiceIconMatch(
-        icon: SimpleIcons.udemy,
-        colour: Color(0xffa435f0),
-      ),
-    ),
-    (
-      aliases: ['microsoft', 'outlook', 'azure', 'office 365', 'onedrive'],
-      match: ServiceIconMatch(icon: Icons.window, colour: Color(0xff00a4ef)),
-    ),
-    (
-      aliases: ['amazon', 'amazon web services', 'aws'],
-      match: ServiceIconMatch(icon: Icons.cloud, colour: Color(0xffff9900)),
-    ),
-    (
-      aliases: ['slack'],
-      match: ServiceIconMatch(icon: Icons.tag, colour: Color(0xff4a154b)),
-    ),
-    (
-      aliases: ['linkedin'],
-      match: ServiceIconMatch(icon: Icons.business, colour: Color(0xff0a66c2)),
-    ),
-  ];
+  static const selectionPrefix = 'brand:v1:';
+
+  static const _aliases = <String, String>{
+    'aws': 'amazonwebservices',
+    'amazonaws': 'amazonwebservices',
+    'googlemail': 'gmail',
+    'googleworkspace': 'google',
+    'gcp': 'googlecloud',
+    'icloud': 'apple',
+    'office': 'microsoft',
+    'office365': 'microsoft',
+    'microsoft365': 'microsoft',
+    'outlook': 'microsoft',
+    'outlookcom': 'microsoft',
+    'azure': 'microsoft',
+    'azuredevops': 'microsoft',
+    'amazon': 'amazonwebservices',
+    'slackcom': 'slack',
+    'linkedincom': 'linkedin',
+    'twitter': 'x',
+    'twittercom': 'x',
+    'xcom': 'x',
+  };
+
+  static const _fallbackIcons = <String, ServiceIconMatch>{
+    'microsoft': ServiceIconMatch(
+      icon: FontAwesomeIcons.microsoft,
+      colour: Color(0xff00a4ef),
+    ),
+    'amazonwebservices': ServiceIconMatch(
+      icon: FontAwesomeIcons.aws,
+      colour: Color(0xffff9900),
+    ),
+    'slack': ServiceIconMatch(
+      icon: FontAwesomeIcons.slack,
+      colour: Color(0xff4a154b),
+    ),
+    'linkedin': ServiceIconMatch(
+      icon: FontAwesomeIcons.linkedinIn,
+      colour: Color(0xff0a66c2),
+    ),
+  };
+
+  static const _genericParts = <String>{
+    'account',
+    'accounts',
+    'auth',
+    'authentication',
+    'authenticator',
+    'code',
+    'codes',
+    'http',
+    'https',
+    'login',
+    'mail',
+    'otp',
+    'secure',
+    'security',
+    'signin',
+    'totp',
+    'twofactor',
+    '2fa',
+    'www',
+    'com',
+    'net',
+    'org',
+    'co',
+    'io',
+    'app',
+  };
 
   static ServiceIconMatch? match({String? issuer, required String account}) {
     return _matchOne(issuer) ?? _matchOne(account);
   }
 
+  static ServiceIconMatch? fromStoredIcon(String value) {
+    if (!value.startsWith(selectionPrefix)) return null;
+    final key = value.substring(selectionPrefix.length);
+    return _matchKey(key);
+  }
+
+  static String selectionValue(String key) => '$selectionPrefix$key';
+
+  static List<ServiceIconOption> search(String query, {int limit = 32}) {
+    final normalized = _normalize(query);
+    const popular = <String>[
+      'google',
+      'microsoft',
+      'apple',
+      'github',
+      'amazonwebservices',
+      'facebook',
+      'instagram',
+      'linkedin',
+      'slack',
+      'discord',
+      'dropbox',
+      'proton',
+      'paypal',
+      'spotify',
+      'telegram',
+      'whatsapp',
+    ];
+    final List<String> keys;
+    if (normalized.isEmpty) {
+      keys = List<String>.of(popular);
+    } else {
+      keys = <String>{
+        ..._serviceDomains.keys,
+        ..._serviceIconCatalog.keys,
+      }.where((key) => key.contains(normalized)).toList();
+      keys.sort((left, right) {
+        final leftStarts = left.startsWith(normalized);
+        final rightStarts = right.startsWith(normalized);
+        if (leftStarts != rightStarts) return leftStarts ? -1 : 1;
+        return left.compareTo(right);
+      });
+    }
+    return keys
+        .take(limit)
+        .map((key) {
+          final match = _matchKey(key)!;
+          return ServiceIconOption(
+            key: key,
+            label: _serviceDomains[key] ?? key,
+            match: match,
+          );
+        })
+        .toList(growable: false);
+  }
+
   static ServiceIconMatch? _matchOne(String? value) {
-    final source = _normalize(value ?? '');
-    if (source.isEmpty) return null;
-    final padded = ' $source ';
-    for (final brand in _brands) {
-      for (final alias in brand.aliases) {
-        final normalizedAlias = _normalize(alias);
-        if (padded.contains(' $normalizedAlias ')) return brand.match;
+    if (value == null || value.trim().isEmpty) return null;
+    ServiceIconMatch? domainOnlyMatch;
+    for (final candidate in _candidateKeys(value)) {
+      final alias = _aliases[candidate] ?? candidate;
+      final base = _fallbackIcons[alias] ?? _serviceIconCatalog[alias];
+      final domain = _serviceDomains[alias] ?? _domainFromValue(value);
+      if (base != null) {
+        return ServiceIconMatch(
+          icon: base.icon,
+          colour: base.colour,
+          domain: domain,
+        );
+      }
+      if (domain != null) {
+        domainOnlyMatch ??= ServiceIconMatch(
+          icon: Icons.public,
+          colour: const Color(0xff455a64),
+          domain: domain,
+        );
       }
     }
-    return null;
+    return domainOnlyMatch;
+  }
+
+  static ServiceIconMatch? _matchKey(String key) {
+    final alias = _aliases[key] ?? key;
+    final base = _fallbackIcons[alias] ?? _serviceIconCatalog[alias];
+    final domain = _serviceDomains[alias];
+    if (base == null && domain == null) return null;
+    return ServiceIconMatch(
+      icon: base?.icon ?? Icons.public,
+      colour: base?.colour ?? const Color(0xff455a64),
+      domain: domain,
+    );
+  }
+
+  static String? _domainFromValue(String value) {
+    var candidate = value.trim().toLowerCase();
+    final atIndex = candidate.lastIndexOf('@');
+    if (atIndex >= 0) candidate = candidate.substring(atIndex + 1);
+    candidate = candidate
+        .replaceFirst(RegExp(r'^https?://'), '')
+        .split(RegExp(r'[/?:#]'))
+        .first;
+    if (!RegExp(
+      r'^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$',
+    ).hasMatch(candidate)) {
+      return null;
+    }
+    const reservedSuffixes = <String>{
+      '.example',
+      '.invalid',
+      '.localhost',
+      '.test',
+    };
+    if (reservedSuffixes.any(candidate.endsWith)) return null;
+    return candidate;
+  }
+
+  static Iterable<String> _candidateKeys(String value) sync* {
+    final seen = <String>{};
+
+    Iterable<String> add(String source) sync* {
+      final normalized = _normalize(source);
+      if (normalized.isEmpty) return;
+      final catalogKey = RegExp(r'^\d').hasMatch(normalized)
+          ? 'n$normalized'
+          : normalized;
+      if (seen.add(catalogKey)) yield catalogKey;
+    }
+
+    final sources = <String>[];
+    final atIndex = value.lastIndexOf('@');
+    if (atIndex >= 0 && atIndex + 1 < value.length) {
+      // Check the email domain before the local part. A person's name can also
+      // be a brand name and must not override a known domain such as gmail.com.
+      sources.add(value.substring(atIndex + 1));
+    }
+    sources.add(value);
+
+    for (final source in sources) {
+      yield* add(source);
+      final parts = source
+          .toLowerCase()
+          .split(RegExp(r'[^a-z0-9]+'))
+          .where((part) => part.isNotEmpty && !_genericParts.contains(part))
+          .toList(growable: false);
+
+      // Try multi-word brand names before their individual words. For example,
+      // "Google Cloud Platform" must resolve to Google Cloud, not Google.
+      for (var width = parts.length; width >= 2; width--) {
+        for (var start = 0; start + width <= parts.length; start++) {
+          yield* add(parts.sublist(start, start + width).join());
+        }
+      }
+      for (final part in parts) {
+        yield* add(part);
+      }
+    }
   }
 
   static String _normalize(String value) => value
       .toLowerCase()
-      .replaceAll(RegExp('[^a-z0-9]+'), ' ')
-      .trim()
-      .replaceAll(RegExp(' +'), ' ');
+      .replaceAll('&', 'and')
+      .replaceAll('+', 'plus')
+      .replaceAll(RegExp(r'[^a-z0-9]+'), '');
 }
