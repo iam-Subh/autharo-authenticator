@@ -1,6 +1,9 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 
 import '../rust/api/sync.dart' as rust;
+import 'push_notification_service.dart';
 import 'sync_scheduler.dart';
 
 /// The three states OFF-05 requires, and what each one tells the user.
@@ -124,6 +127,11 @@ class SyncController extends ChangeNotifier implements SyncRunner {
       _status = const SyncStatus.off();
     }
     notifyListeners();
+    unawaited(
+      PushNotificationService.instance.refreshRegistration(
+        signedIn: _status.isSignedIn,
+      ),
+    );
   }
 
   /// Runs one cycle. Returns null when it succeeded, or a message to show.

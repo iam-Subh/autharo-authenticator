@@ -35,11 +35,32 @@ anyhow = "1"
 reqwest = { version = "0.12", default-features = false, features = [
     "blocking", "rustls-tls",
 ] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+webpki-roots = "1"
+x509-parser = "0.18"
+sha2 = "0.10"
+base64 = "0.22"
 serde_json = "1.0.151"
 serde = { version = "1.0.229", features = ["derive"] }
 jni = "0.21.1"
 getrandom = "0.4"
 zeroize = "1"
+
+[build-dependencies]
+base64 = "0.22"
+
+[dev-dependencies]
+rcgen = "0.14"
+
+# The Android package contains one copy of this library for each processor
+# architecture. Optimize the release library for size and link dependencies as
+# one unit. Debug builds keep their normal fast compile settings.
+[profile.release]
+opt-level = "s"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
 
 # Android owns the synchronization-session encryption key. Rust calls the
 # small native token store directly, so access and refresh tokens never cross

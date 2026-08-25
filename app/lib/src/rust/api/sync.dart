@@ -6,7 +6,8 @@
 import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `access_token`, `check_scheme`, `clear_session`, `is_unauthorized`, `jitter`, `legacy_session`, `legacy_token`, `load_session`, `now_ms`, `record_clock_measurement`, `record_outcome`, `remove_legacy_session`, `rotate_migrated_session_if_needed`, `run_one_cycle`, `save_session`, `server_url`, `session_is_stored`, `store_session`, `text`, `tracing_http_warning`, `try_refresh`, `with_account`
+// These functions are ignored because they are not marked as `pub`: `access_token`, `capability_token`, `check_scheme`, `clear_capabilities`, `clear_session`, `derive_stored_auth_key`, `elevate_with_auth`, `is_unauthorized`, `jitter`, `legacy_session`, `legacy_token`, `load_session`, `now_ms`, `record_clock_measurement`, `record_outcome`, `remove_legacy_session`, `rotate_migrated_session_if_needed`, `run_one_cycle`, `save_session`, `server_url`, `session_is_stored`, `store_session`, `text`, `tracing_http_warning`, `try_refresh`, `with_account`, `with_scope`
+// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `CachedCapability`
 
 /// Reads the sync status without touching the network.
 SyncStatusView syncStatus() => RustLib.instance.api.crateApiSyncSyncStatus();
@@ -26,11 +27,15 @@ Future<void> setServerUrl({required String url}) =>
 /// has no session, and trying again gets "already registered". If sign-in fails
 /// after a successful registration the error says so, and [`sign_in`] on its
 /// own is the way back.
-Future<void> registerAccount({required String password, String? deviceName}) =>
-    RustLib.instance.api.crateApiSyncRegisterAccount(
-      password: password,
-      deviceName: deviceName,
-    );
+Future<void> registerAccount({
+  required String password,
+  required String recoveryPhrase,
+  String? deviceName,
+}) => RustLib.instance.api.crateApiSyncRegisterAccount(
+  password: password,
+  recoveryPhrase: recoveryPhrase,
+  deviceName: deviceName,
+);
 
 /// Signs in on a device that does not hold the account yet.
 ///
@@ -46,18 +51,34 @@ Future<void> signIn({
   required String email,
   required String password,
   String? deviceName,
+  String? deviceApprovalToken,
+  String? recoveryPhrase,
 }) => RustLib.instance.api.crateApiSyncSignIn(
   email: email,
   password: password,
   deviceName: deviceName,
+  deviceApprovalToken: deviceApprovalToken,
+  recoveryPhrase: recoveryPhrase,
 );
 
-/// Forgets the session. The vault and its entries stay.
+/// Ends the server session, then removes the local session. The vault and its
+/// entries stay.
 ///
 /// Not a wipe: signing out of sync must not cost the user their codes. Wiping
 /// is [`crate::api::vault::wipe_device`], which is a different button with a
 /// different confirmation.
 Future<void> signOut() => RustLib.instance.api.crateApiSyncSignOut();
+
+/// Registers this Android installation for generic vault-change signals.
+///
+/// This Firebase registration token is not an account access token. The
+/// server cannot use it to read or modify the vault.
+Future<void> setPushToken({required String token}) =>
+    RustLib.instance.api.crateApiSyncSetPushToken(token: token);
+
+/// Removes this device's push route while the base session is still valid.
+Future<void> clearPushToken() =>
+    RustLib.instance.api.crateApiSyncClearPushToken();
 
 /// Section 9.5: every device that has signed in to this account.
 Future<List<DeviceView>> listDevices() =>
@@ -65,19 +86,41 @@ Future<List<DeviceView>> listDevices() =>
 
 /// Cuts one device off. Its sessions end in the same request on the server.
 ///
-/// Revoking *this* device is allowed, and leaves the local tokens useless. The
-/// caller is expected to sign out locally afterwards — see the screen, which
-/// asks first.
-Future<BigInt> revokeDevice({required String deviceId}) =>
-    RustLib.instance.api.crateApiSyncRevokeDevice(deviceId: deviceId);
+/// Revoking *this* device is allowed. The function removes its local session
+/// after the server confirms the revoke.
+Future<BigInt> revokeDevice({
+  required String deviceId,
+  required String password,
+  required bool current,
+}) => RustLib.instance.api.crateApiSyncRevokeDevice(
+  deviceId: deviceId,
+  password: password,
+  current: current,
+);
 
 /// Ends every session on the account, including this one.
 ///
 /// The local tokens are cleared afterwards rather than left to fail on the next
 /// cycle. A device that believes it is signed in and gets a 401 every fifteen
 /// minutes is the silent-stop failure this project already fixed once.
-Future<BigInt> signOutEverywhere() =>
-    RustLib.instance.api.crateApiSyncSignOutEverywhere();
+Future<BigInt> signOutEverywhere({required String password}) =>
+    RustLib.instance.api.crateApiSyncSignOutEverywhere(password: password);
+
+/// Creates one short-lived and single-use approval token.
+Future<DeviceApprovalView> createDeviceApproval({required String password}) =>
+    RustLib.instance.api.crateApiSyncCreateDeviceApproval(password: password);
+
+/// Enables recovery-phrase approval for an account created by an older app.
+Future<void> enrollRecoveryAccess({
+  required String password,
+  required String recoveryPhrase,
+}) => RustLib.instance.api.crateApiSyncEnrollRecoveryAccess(
+  password: password,
+  recoveryPhrase: recoveryPhrase,
+);
+
+Future<List<SecurityEventView>> listSecurityActivity() =>
+    RustLib.instance.api.crateApiSyncListSecurityActivity();
 
 /// Deletes the account on the server and signs this device out.
 ///
@@ -95,6 +138,19 @@ Future<BigInt> signOutEverywhere() =>
 Future<PlatformInt64> deleteAccount({required String password}) =>
     RustLib.instance.api.crateApiSyncDeleteAccount(password: password);
 
+/// Authorizes one or more interactive permission groups for five minutes.
+/// The returned server token stays inside Rust memory.
+Future<void> elevateSession({
+  required String password,
+  required List<String> scopes,
+}) => RustLib.instance.api.crateApiSyncElevateSession(
+  password: password,
+  scopes: scopes,
+);
+
+Future<bool> hasElevatedScope({required String scope}) =>
+    RustLib.instance.api.crateApiSyncHasElevatedScope(scope: scope);
+
 /// Runs one sync cycle now.
 ///
 /// Requires an open vault. A locked device can sync — OFF-09 is explicit that
@@ -107,6 +163,24 @@ Future<PlatformInt64> deleteAccount({required String password}) =>
 /// decide.
 Future<SyncRunView> syncNow({required bool force}) =>
     RustLib.instance.api.crateApiSyncSyncNow(force: force);
+
+class DeviceApprovalView {
+  final String token;
+  final String expiresAt;
+
+  const DeviceApprovalView({required this.token, required this.expiresAt});
+
+  @override
+  int get hashCode => token.hashCode ^ expiresAt.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is DeviceApprovalView &&
+          runtimeType == other.runtimeType &&
+          token == other.token &&
+          expiresAt == other.expiresAt;
+}
 
 /// One device on the account, for the "your devices" screen.
 class DeviceView {
@@ -149,6 +223,45 @@ class DeviceView {
           lastSeen == other.lastSeen &&
           current == other.current &&
           revoked == other.revoked;
+}
+
+class SecurityEventView {
+  final PlatformInt64 id;
+  final String eventType;
+  final String createdAt;
+  final String? deviceId;
+  final String? deviceName;
+  final String detailJson;
+
+  const SecurityEventView({
+    required this.id,
+    required this.eventType,
+    required this.createdAt,
+    this.deviceId,
+    this.deviceName,
+    required this.detailJson,
+  });
+
+  @override
+  int get hashCode =>
+      id.hashCode ^
+      eventType.hashCode ^
+      createdAt.hashCode ^
+      deviceId.hashCode ^
+      deviceName.hashCode ^
+      detailJson.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is SecurityEventView &&
+          runtimeType == other.runtimeType &&
+          id == other.id &&
+          eventType == other.eventType &&
+          createdAt == other.createdAt &&
+          deviceId == other.deviceId &&
+          deviceName == other.deviceName &&
+          detailJson == other.detailJson;
 }
 
 /// What one sync run did, for the UI.

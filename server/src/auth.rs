@@ -13,6 +13,7 @@ use tokio::sync::Semaphore;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
+use crate::activity;
 use crate::crypto;
 use crate::error::{ApiError, ApiResult};
 use crate::quota;
@@ -22,6 +23,7 @@ use crate::{AppState, SharedState};
 /// Section 13: an access token lasts 15 minutes, a refresh token 30 days.
 const ACCESS_TTL_MINUTES: i64 = 15;
 const REFRESH_TTL_DAYS: i64 = 30;
+const CAPABILITY_TTL_MINUTES: i64 = 5;
 
 /// Bound all Argon2 work. Each permit can use about 19 MiB. Login and account
 /// deletion need the same bound as registration.
@@ -38,6 +40,14 @@ const MAX_EMAIL_BYTES: usize = 320;
 const MAX_DEVICE_NAME_BYTES: usize = 100;
 const MAX_PLATFORM_BYTES: usize = 40;
 const MAX_TOKEN_BYTES: usize = 128;
+
+pub const SCOPE_VAULT_SYNC: &str = "vault:sync";
+pub const SCOPE_SECURITY_READ: &str = "security:read";
+pub const SCOPE_SHARE_WRITE: &str = "share:write";
+pub const SCOPE_SESSION_SELF: &str = "session:self";
+const DEFAULT_SCOPES: [&str; 2] = [SCOPE_VAULT_SYNC, SCOPE_SESSION_SELF];
+
+const ELEVATED_SCOPES: [&str; 2] = [SCOPE_SECURITY_READ, SCOPE_SHARE_WRITE];
 
 /// The floor every `prelogin` response is padded to.
 ///
@@ -71,6 +81,9 @@ pub struct RegisterRequest {
     /// The client's authentication key. Hashed on arrival and never stored as
     /// it is (section 9.2.1 step 5).
     pub auth_key: String,
+    /// A separate proof derived from the recovery phrase. The phrase itself
+    /// never reaches the server.
+    pub recovery_auth_key: String,
     /// The Argon2id parameters the client used, returned later by `prelogin`
     /// so any device can reproduce the derivation.
     pub kdf_params: serde_json::Value,
@@ -116,6 +129,12 @@ pub async fn register(
             message: "The authentication key must be 256 bits.".to_string(),
         });
     }
+    let recovery_auth_key = decode(&request.recovery_auth_key, "recovery_auth_key")?;
+    if recovery_auth_key.len() != AUTH_KEY_BYTES {
+        return Err(ApiError::BadRequest {
+            message: "The recovery authentication key must be 256 bits.".to_string(),
+        });
+    }
     let client_salt = decode(&request.client_salt, "client_salt")?;
     if client_salt.len() != 16 {
         return Err(ApiError::BadRequest {
@@ -132,6 +151,7 @@ pub async fn register(
     // Section 9.2.1 step 5. Done before the transaction so the Argon2id cost
     // is not held across a database lock.
     let auth_hash = hash_auth_key_limited(auth_key).await?;
+    let recovery_auth_hash = hash_auth_key_limited(recovery_auth_key).await?;
 
     let mut transaction = state.db.begin().await?;
 
@@ -170,13 +190,14 @@ pub async fn register(
     .await?;
 
     sqlx::query(
-        "INSERT INTO key_slot (id, account_id, type, wrapped_key, wrap_nonce)
-         VALUES ($1, $2, 'recovery', $3, $4)",
+        "INSERT INTO key_slot (id, account_id, type, wrapped_key, wrap_nonce, auth_hash)
+         VALUES ($1, $2, 'recovery', $3, $4, $5)",
     )
     .bind(Uuid::new_v4())
     .bind(account_id)
     .bind(&recovery.0)
     .bind(&recovery.1)
+    .bind(&recovery_auth_hash)
     .execute(&mut *transaction)
     .await?;
 
@@ -184,6 +205,15 @@ pub async fn register(
         .bind(account_id)
         .execute(&mut *transaction)
         .await?;
+
+    activity::record_in_transaction(
+        &mut transaction,
+        account_id,
+        None,
+        "account_registered",
+        serde_json::json!({}),
+    )
+    .await?;
 
     transaction.commit().await?;
 
@@ -314,6 +344,11 @@ pub struct LoginRequest {
     pub auth_key: String,
     pub device_name: Option<String>,
     pub device_platform: Option<String>,
+    /// A single-use token created by an existing device. The first active
+    /// device does not need one.
+    pub device_approval_token: Option<String>,
+    /// Optional emergency approval derived from the recovery phrase.
+    pub recovery_auth_key: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -375,6 +410,26 @@ pub async fn login(
         return Err(ApiError::InvalidCredentials);
     }
 
+    let recovery_approved = if let Some(encoded) = request.recovery_auth_key.as_deref() {
+        let candidate = decode(encoded, "recovery_auth_key")?;
+        if candidate.len() != AUTH_KEY_BYTES {
+            false
+        } else {
+            let stored = sqlx::query_as::<_, (Option<String>,)>(
+                "SELECT auth_hash FROM key_slot WHERE account_id = $1 AND type = 'recovery'",
+            )
+            .bind(account_id)
+            .fetch_optional(&state.db)
+            .await?;
+            match stored {
+                Some((Some(hash),)) => verify_auth_key_limited(candidate, hash).await?,
+                _ => false,
+            }
+        }
+    } else {
+        false
+    };
+
     let recovery = sqlx::query_as::<_, (Vec<u8>, Vec<u8>)>(
         "SELECT wrapped_key, wrap_nonce FROM key_slot
           WHERE account_id = $1 AND type = 'recovery'",
@@ -383,8 +438,8 @@ pub async fn login(
     .fetch_one(&state.db)
     .await?;
 
-    let device_id = register_device(&state, account_id, &request).await?;
-    let tokens = issue_session(&state, account_id, device_id).await?;
+    let (_device_id, tokens) =
+        register_device_and_issue_session(&state, account_id, &request, recovery_approved).await?;
 
     sqlx::query(
         "UPDATE key_slot SET last_used = now() WHERE account_id = $1 AND type = 'password'",
@@ -408,11 +463,12 @@ pub async fn login(
     }))
 }
 
-async fn register_device(
+pub(crate) async fn register_device_and_issue_session(
     state: &AppState,
     account_id: Uuid,
     request: &LoginRequest,
-) -> ApiResult<Uuid> {
+    recovery_approved: bool,
+) -> ApiResult<(Uuid, Tokens)> {
     if request
         .device_name
         .as_ref()
@@ -436,6 +492,11 @@ async fn register_device(
             .bind(account_id)
             .fetch_one(&mut *transaction)
             .await?;
+    let (device_history,): (i64,) =
+        sqlx::query_as("SELECT count(*) FROM device WHERE account_id = $1")
+            .bind(account_id)
+            .fetch_one(&mut *transaction)
+            .await?;
     if device_count >= quota::MAX_DEVICES {
         return Err(ApiError::QuotaExceeded {
             message: format!(
@@ -444,21 +505,86 @@ async fn register_device(
             ),
         });
     }
+
+    let approval_method = if device_history == 0 {
+        "initial"
+    } else if recovery_approved {
+        "recovery"
+    } else {
+        let token = request
+            .device_approval_token
+            .as_deref()
+            .filter(|value| !value.is_empty() && value.len() <= MAX_TOKEN_BYTES)
+            .ok_or(ApiError::DeviceApprovalRequired)?;
+        let consumed = sqlx::query_as::<_, (Uuid,)>(
+            "UPDATE device_approval
+                SET used_at = now()
+              WHERE account_id = $1
+                AND token_hash = $2
+                AND used_at IS NULL
+                AND expires_at > now()
+              RETURNING id",
+        )
+        .bind(account_id)
+        .bind(token_hash(token))
+        .fetch_optional(&mut *transaction)
+        .await?;
+        if consumed.is_none() {
+            return Err(ApiError::DeviceApprovalRequired);
+        }
+        "device"
+    };
+
     let device_id = Uuid::new_v4();
+    let device_name = request.device_name.as_deref().unwrap_or("Unnamed device");
+    let device_platform = request.device_platform.as_deref().unwrap_or("unknown");
     sqlx::query(
         "INSERT INTO device (id, account_id, name, platform, last_seen)
          VALUES ($1, $2, $3, $4, now())",
     )
     .bind(device_id)
     .bind(account_id)
-    .bind(request.device_name.as_deref().unwrap_or("Unnamed device"))
-    .bind(request.device_platform.as_deref().unwrap_or("unknown"))
+    .bind(device_name)
+    .bind(device_platform)
     .execute(&mut *transaction)
+    .await?;
+
+    let tokens = Tokens::new();
+    let session_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO session
+           (id, family_id, account_id, device_id, access_hash, refresh_hash,
+            access_expires_at, refresh_expires_at, scopes)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+    )
+    .bind(session_id)
+    .bind(session_id)
+    .bind(account_id)
+    .bind(device_id)
+    .bind(token_hash(&tokens.access))
+    .bind(token_hash(&tokens.refresh))
+    .bind(tokens.access_expires_at)
+    .bind(tokens.refresh_expires_at)
+    .bind(DEFAULT_SCOPES.to_vec())
+    .execute(&mut *transaction)
+    .await?;
+
+    activity::record_in_transaction(
+        &mut transaction,
+        account_id,
+        Some(device_id),
+        "device_added",
+        serde_json::json!({
+            "name": device_name,
+            "platform": device_platform,
+            "approval_method": approval_method,
+        }),
+    )
     .await?;
 
     transaction.commit().await?;
 
-    Ok(device_id)
+    Ok((device_id, tokens))
 }
 
 #[derive(Debug, Deserialize)]
@@ -471,6 +597,73 @@ pub struct RefreshResponse {
     pub access_token: String,
     pub refresh_token: String,
     pub access_expires_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ElevateRequest {
+    pub auth_key: String,
+    pub scopes: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ElevateResponse {
+    pub access_token: String,
+    pub scopes: Vec<String>,
+    pub expires_at: DateTime<Utc>,
+}
+
+/// Issues a short-lived permission for an interactive action.
+///
+/// The persistent session can synchronize in the background. It cannot read
+/// security data or create a share. Those permissions require the account
+/// password and are never refreshable or written to disk by the client.
+pub async fn elevate(
+    State(state): State<SharedState>,
+    ConnectInfo(socket): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Json(request): Json<ElevateRequest>,
+) -> ApiResult<Json<ElevateResponse>> {
+    let token = bearer(&headers)?;
+    let session = session_for_token_with_scope(&state.db, token, SCOPE_SESSION_SELF).await?;
+    let mut scopes = request.scopes;
+    scopes.sort();
+    scopes.dedup();
+    if scopes.is_empty()
+        || scopes.len() > ELEVATED_SCOPES.len()
+        || scopes
+            .iter()
+            .any(|scope| !ELEVATED_SCOPES.contains(&scope.as_str()))
+    {
+        return Err(ApiError::InvalidScope);
+    }
+    verify_step_up(
+        &state,
+        session.account_id,
+        &request.auth_key,
+        ratelimit::client_address(&headers, socket),
+    )
+    .await?;
+
+    let access_token = crypto::random_token();
+    let expires_at = Utc::now() + chrono::Duration::minutes(CAPABILITY_TTL_MINUTES);
+    sqlx::query(
+        "INSERT INTO capability_session
+           (id, parent_session_id, token_hash, scopes, expires_at)
+         VALUES ($1, $2, $3, $4, $5)",
+    )
+    .bind(Uuid::new_v4())
+    .bind(session.session_id)
+    .bind(token_hash(&access_token))
+    .bind(&scopes)
+    .bind(expires_at)
+    .execute(&state.db)
+    .await?;
+
+    Ok(Json(ElevateResponse {
+        access_token,
+        scopes,
+        expires_at,
+    }))
 }
 
 /// Exchanges a refresh token for a new pair (section 13).
@@ -507,9 +700,20 @@ pub async fn refresh(
     let hash = token_hash(&request.refresh_token);
 
     let mut transaction = state.db.begin().await?;
-    let row = sqlx::query_as::<_, (Uuid, Option<Uuid>, Uuid, bool, DateTime<Utc>, Option<bool>)>(
+    let row = sqlx::query_as::<
+        _,
+        (
+            Uuid,
+            Option<Uuid>,
+            Uuid,
+            bool,
+            DateTime<Utc>,
+            Option<bool>,
+            Vec<String>,
+        ),
+    >(
         "SELECT s.account_id, s.device_id, s.family_id, s.revoked,
-                s.refresh_expires_at, d.revoked
+                s.refresh_expires_at, d.revoked, s.scopes
            FROM session s
            LEFT JOIN device d ON d.id = s.device_id
           WHERE s.refresh_hash = $1
@@ -519,7 +723,8 @@ pub async fn refresh(
     .fetch_optional(&mut *transaction)
     .await?;
 
-    let Some((account_id, device_id, family_id, revoked, expires_at, device_revoked)) = row else {
+    let Some((account_id, device_id, family_id, revoked, expires_at, device_revoked, scopes)) = row
+    else {
         return Err(ApiError::Unauthorized);
     };
 
@@ -527,6 +732,16 @@ pub async fn refresh(
     // family. Revoke the full family, including descendants that remain live.
     if revoked || expires_at <= Utc::now() || device_id.is_none() || device_revoked.unwrap_or(true)
     {
+        if revoked {
+            activity::record_in_transaction(
+                &mut transaction,
+                account_id,
+                device_id,
+                "refresh_replay_detected",
+                serde_json::json!({ "session_family_id": family_id }),
+            )
+            .await?;
+        }
         sqlx::query("UPDATE session SET revoked = TRUE WHERE family_id = $1")
             .bind(family_id)
             .execute(&mut *transaction)
@@ -545,8 +760,8 @@ pub async fn refresh(
     sqlx::query(
         "INSERT INTO session
            (id, family_id, account_id, device_id, access_hash, refresh_hash,
-            access_expires_at, refresh_expires_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+             access_expires_at, refresh_expires_at, scopes)
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
     )
     .bind(Uuid::new_v4())
     .bind(family_id)
@@ -556,6 +771,7 @@ pub async fn refresh(
     .bind(token_hash(&tokens.refresh))
     .bind(tokens.access_expires_at)
     .bind(tokens.refresh_expires_at)
+    .bind(scopes)
     .execute(&mut *transaction)
     .await?;
     sqlx::query("UPDATE device SET last_seen = now() WHERE id = $1")
@@ -571,11 +787,11 @@ pub async fn refresh(
     }))
 }
 
-struct Tokens {
-    access: String,
-    refresh: String,
-    access_expires_at: DateTime<Utc>,
-    refresh_expires_at: DateTime<Utc>,
+pub(crate) struct Tokens {
+    pub(crate) access: String,
+    pub(crate) refresh: String,
+    pub(crate) access_expires_at: DateTime<Utc>,
+    pub(crate) refresh_expires_at: DateTime<Utc>,
 }
 
 impl Tokens {
@@ -587,31 +803,6 @@ impl Tokens {
             refresh_expires_at: Utc::now() + chrono::Duration::days(REFRESH_TTL_DAYS),
         }
     }
-}
-
-/// Issues a session, storing only hashes of the tokens.
-async fn issue_session(state: &AppState, account_id: Uuid, device_id: Uuid) -> ApiResult<Tokens> {
-    let tokens = Tokens::new();
-    let session_id = Uuid::new_v4();
-
-    sqlx::query(
-        "INSERT INTO session
-           (id, family_id, account_id, device_id, access_hash, refresh_hash,
-            access_expires_at, refresh_expires_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
-    )
-    .bind(session_id)
-    .bind(session_id)
-    .bind(account_id)
-    .bind(device_id)
-    .bind(token_hash(&tokens.access))
-    .bind(token_hash(&tokens.refresh))
-    .bind(tokens.access_expires_at)
-    .bind(tokens.refresh_expires_at)
-    .execute(&state.db)
-    .await?;
-
-    Ok(tokens)
 }
 
 pub(crate) async fn hash_auth_key_limited(auth_key: Vec<u8>) -> ApiResult<String> {
@@ -644,12 +835,63 @@ pub(crate) async fn verify_auth_key_limited(
     .map_err(|error| ApiError::Other(anyhow::anyhow!("verification task failed: {error}")))
 }
 
+pub(crate) async fn verify_step_up(
+    state: &SharedState,
+    account_id: Uuid,
+    encoded_auth_key: &str,
+    address: std::net::IpAddr,
+) -> ApiResult<()> {
+    ratelimit::record_and_check(&state.db, &format!("stepup:{account_id}"), Some(address)).await?;
+    let auth_key =
+        crypto::b64_decode(encoded_auth_key).map_err(|_| ApiError::InvalidCredentials)?;
+    if auth_key.len() != AUTH_KEY_BYTES {
+        return Err(ApiError::InvalidCredentials);
+    }
+    let stored = sqlx::query_as::<_, (Option<String>,)>(
+        "SELECT auth_hash FROM key_slot WHERE account_id = $1 AND type = 'password'",
+    )
+    .bind(account_id)
+    .fetch_optional(&state.db)
+    .await?;
+    let Some((Some(auth_hash),)) = stored else {
+        return Err(ApiError::InvalidCredentials);
+    };
+    if !verify_auth_key_limited(auth_key, auth_hash).await? {
+        return Err(ApiError::InvalidCredentials);
+    }
+    Ok(())
+}
+
+pub(crate) async fn verify_recovery_approval(
+    state: &SharedState,
+    account_id: Uuid,
+    encoded_recovery_key: Option<&str>,
+) -> ApiResult<bool> {
+    let Some(encoded) = encoded_recovery_key else {
+        return Ok(false);
+    };
+    let candidate = decode(encoded, "recovery_auth_key")?;
+    if candidate.len() != AUTH_KEY_BYTES {
+        return Ok(false);
+    }
+    let stored = sqlx::query_as::<_, (Option<String>,)>(
+        "SELECT auth_hash FROM key_slot WHERE account_id = $1 AND type = 'recovery'",
+    )
+    .bind(account_id)
+    .fetch_optional(&state.db)
+    .await?;
+    match stored {
+        Some((Some(hash),)) => verify_auth_key_limited(candidate, hash).await,
+        _ => Ok(false),
+    }
+}
+
 pub fn token_hash(token: &str) -> Vec<u8> {
     Sha256::digest(token.as_bytes()).to_vec()
 }
 
 /// Who is calling: the session, its account, and the device it belongs to.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct Session {
     pub session_id: Uuid,
     pub account_id: Uuid,
@@ -657,11 +899,17 @@ pub struct Session {
     /// so this is rare, but section 9.5's endpoints act on devices and must
     /// cope with not having one.
     pub device_id: Option<Uuid>,
+    pub scopes: Vec<String>,
 }
 
-/// Resolves a bearer token to an account, or refuses.
-pub async fn account_for_token(db: &sqlx::PgPool, token: &str) -> ApiResult<Uuid> {
-    Ok(session_for_token(db, token).await?.account_id)
+pub async fn account_for_token_with_scope(
+    db: &sqlx::PgPool,
+    token: &str,
+    scope: &str,
+) -> ApiResult<Uuid> {
+    Ok(session_for_token_with_scope(db, token, scope)
+        .await?
+        .account_id)
 }
 
 /// The same check, keeping the session and device it resolved.
@@ -679,9 +927,9 @@ pub async fn account_for_token(db: &sqlx::PgPool, token: &str) -> ApiResult<Uuid
 /// The cost is one join on a request that already hits the database. The
 /// failure it prevents is a lost phone that keeps syncing after its owner was
 /// told it would not.
-pub async fn session_for_token(db: &sqlx::PgPool, token: &str) -> ApiResult<Session> {
-    let row = sqlx::query_as::<_, (Uuid, Uuid, Option<Uuid>)>(
-        "SELECT s.id, s.account_id, s.device_id
+pub(crate) async fn session_for_token(db: &sqlx::PgPool, token: &str) -> ApiResult<Session> {
+    let row = sqlx::query_as::<_, (Uuid, Uuid, Option<Uuid>, Vec<String>)>(
+        "SELECT s.id, s.account_id, s.device_id, s.scopes
            FROM session s
            LEFT JOIN device d ON d.id = s.device_id
           WHERE s.access_hash = $1
@@ -693,12 +941,71 @@ pub async fn session_for_token(db: &sqlx::PgPool, token: &str) -> ApiResult<Sess
     .fetch_optional(db)
     .await?;
 
-    row.map(|(session_id, account_id, device_id)| Session {
+    row.map(|(session_id, account_id, device_id, scopes)| Session {
         session_id,
         account_id,
         device_id,
+        scopes,
     })
     .ok_or(ApiError::Unauthorized)
+}
+
+pub async fn session_for_token_with_scope(
+    db: &sqlx::PgPool,
+    token: &str,
+    scope: &str,
+) -> ApiResult<Session> {
+    match session_for_token(db, token).await {
+        Ok(session) => {
+            if session.scopes.iter().any(|value| value == scope) {
+                return Ok(session);
+            }
+            if ELEVATED_SCOPES.contains(&scope) {
+                return Err(ApiError::ElevationRequired);
+            }
+            return Err(ApiError::InsufficientScope);
+        }
+        Err(ApiError::Unauthorized) => {}
+        Err(error) => return Err(error),
+    }
+
+    let row = sqlx::query_as::<_, (Uuid, Uuid, Option<Uuid>, Vec<String>, DateTime<Utc>, bool)>(
+        "SELECT s.id, s.account_id, s.device_id, c.scopes, c.expires_at, c.revoked
+           FROM capability_session c
+           JOIN session s ON s.id = c.parent_session_id
+           LEFT JOIN device d ON d.id = s.device_id
+          WHERE c.token_hash = $1
+            AND NOT s.revoked
+            AND s.access_expires_at > now()
+            AND (d.id IS NULL OR NOT d.revoked)",
+    )
+    .bind(token_hash(token))
+    .fetch_optional(db)
+    .await?;
+
+    let Some((session_id, account_id, device_id, scopes, expires_at, revoked)) = row else {
+        return Err(ApiError::Unauthorized);
+    };
+    if revoked || expires_at <= Utc::now() {
+        return Err(ApiError::CapabilityExpired);
+    }
+    if !scopes.iter().any(|value| value == scope) {
+        return Err(ApiError::InsufficientScope);
+    }
+    Ok(Session {
+        session_id,
+        account_id,
+        device_id,
+        scopes,
+    })
+}
+
+fn bearer(headers: &HeaderMap) -> ApiResult<&str> {
+    headers
+        .get("authorization")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .ok_or(ApiError::Unauthorized)
 }
 
 fn decode(value: &str, field: &str) -> ApiResult<Vec<u8>> {
@@ -707,14 +1014,14 @@ fn decode(value: &str, field: &str) -> ApiResult<Vec<u8>> {
     })
 }
 
-fn decode_slot(slot: &WrappedSlot, field: &str) -> ApiResult<(Vec<u8>, Vec<u8>)> {
+pub(crate) fn decode_slot(slot: &WrappedSlot, field: &str) -> ApiResult<(Vec<u8>, Vec<u8>)> {
     Ok((
         decode(&slot.wrapped_key, field)?,
         decode(&slot.nonce, field)?,
     ))
 }
 
-fn validate_slot(slot: &(Vec<u8>, Vec<u8>), field: &str) -> ApiResult<()> {
+pub(crate) fn validate_slot(slot: &(Vec<u8>, Vec<u8>), field: &str) -> ApiResult<()> {
     if slot.0.len() != WRAPPED_VAULT_KEY_BYTES || slot.1.len() != SLOT_NONCE_BYTES {
         return Err(ApiError::BadRequest {
             message: format!("{field} has an invalid length."),

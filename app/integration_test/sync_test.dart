@@ -104,7 +104,7 @@ void main() {
         '@example.invalid';
     const password = 'device-test-password-that-is-long-enough';
 
-    await rust.createAccount(email: email, password: password);
+    final recovery = await rust.createAccount(email: email, password: password);
     await sync_api.setServerUrl(url: syncUrl);
 
     // One entry, so there is something to push that was not there before.
@@ -120,7 +120,11 @@ void main() {
     );
     added.add(outcome.addedId!);
 
-    await sync_api.registerAccount(password: password, deviceName: 'probe');
+    await sync_api.registerAccount(
+      password: password,
+      recoveryPhrase: recovery.phrase,
+      deviceName: 'probe',
+    );
 
     final status = sync_api.syncStatus();
     expect(status.signedIn, isTrue, reason: 'registration should sign in too');

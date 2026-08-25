@@ -5,8 +5,7 @@ import 'package:flutter/widgets.dart';
 /// When a sync cycle runs (PRD section 10.3, OFF-05, OFF-06, OFF-08).
 ///
 /// Section 10.3 names the triggers: "on application start, on a change, on a
-/// push notification, and every 15 minutes in the foreground." Push signalling
-/// is section 10.5 and is not built yet; the rest are here.
+/// push notification, and every 15 minutes in the foreground."
 ///
 /// # Why this is separate from the controller
 ///
@@ -94,6 +93,12 @@ class SyncScheduler with WidgetsBindingObserver {
   /// reopen is the moment a user is most likely to be looking at the list and
   /// least likely to forgive it being stale.
   void onUnlocked() => _run();
+
+  /// Firebase reported that another device changed the vault.
+  ///
+  /// The push payload is only a signal. The normal authenticated sync request
+  /// obtains and verifies the encrypted records.
+  void onPushSignal() => _run();
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {

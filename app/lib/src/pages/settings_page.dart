@@ -6,6 +6,7 @@ import '../services/appearance_preference.dart';
 import '../services/lock_controller.dart';
 import '../services/brand_icon_preference.dart';
 import '../services/code_visibility_preference.dart';
+import '../services/device_integrity_service.dart';
 import '../services/screen_capture_service.dart';
 import '../services/recovery_status_preference.dart';
 import '../services/sync_controller.dart';
@@ -414,6 +415,48 @@ class _SettingsPageState extends State<SettingsPage> {
                 : (value) =>
                       _setPolicy(policy.copyWith(lockOnBackground: value)),
           ),
+          if (Theme.of(context).platform == TargetPlatform.android)
+            ValueListenableBuilder<RootPolicy>(
+              valueListenable: DeviceIntegrityService.policy,
+              builder: (context, policy, _) => ListTile(
+                leading: const Icon(Icons.gpp_maybe_outlined),
+                title: Text(l10n.rootPolicy),
+                subtitle: ValueListenableBuilder<DeviceIntegrityResult>(
+                  valueListenable: DeviceIntegrityService.result,
+                  builder: (context, result, _) => Text(
+                    result.evaluated
+                        ? switch (policy) {
+                            RootPolicy.ignore => l10n.rootPolicyIgnoreDescription,
+                            RootPolicy.warn => l10n.rootPolicyWarnDescription,
+                            RootPolicy.block => l10n.rootPolicyBlockDescription,
+                          }
+                        : l10n.rootCheckNotEvaluated,
+                  ),
+                ),
+                trailing: DropdownButton<RootPolicy>(
+                  value: policy,
+                  onChanged: (value) async {
+                    if (value != null) {
+                      await DeviceIntegrityService.setPolicy(value);
+                    }
+                  },
+                  items: [
+                    DropdownMenuItem(
+                      value: RootPolicy.ignore,
+                      child: Text(l10n.ignore),
+                    ),
+                    DropdownMenuItem(
+                      value: RootPolicy.warn,
+                      child: Text(l10n.warn),
+                    ),
+                    DropdownMenuItem(
+                      value: RootPolicy.block,
+                      child: Text(l10n.block),
+                    ),
+                  ],
+                ),
+              ),
+            ),
           // FR-35. Placed after the ordinary lock settings and never
           // presented as a recommendation: it is the only setting in this app
           // that can destroy the vault, and it is off unless asked for.

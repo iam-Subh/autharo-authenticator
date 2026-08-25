@@ -57,6 +57,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   DetectedFileView dco_decode_detected_file_view(dynamic raw);
 
   @protected
+  DeviceApprovalView dco_decode_device_approval_view(dynamic raw);
+
+  @protected
   DeviceView dco_decode_device_view(dynamic raw);
 
   @protected
@@ -105,6 +108,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<RefusedView> dco_decode_list_refused_view(dynamic raw);
 
   @protected
+  List<SecurityEventView> dco_decode_list_security_event_view(dynamic raw);
+
+  @protected
   List<TrashEntryView> dco_decode_list_trash_entry_view(dynamic raw);
 
   @protected
@@ -132,6 +138,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<String>? dco_decode_opt_list_String(dynamic raw);
 
   @protected
+  PasskeyWrappedKeyView dco_decode_passkey_wrapped_key_view(dynamic raw);
+
+  @protected
   (int, int) dco_decode_record_u_32_u_32(dynamic raw);
 
   @protected
@@ -139,6 +148,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   RefusedView dco_decode_refused_view(dynamic raw);
+
+  @protected
+  SecurityEventView dco_decode_security_event_view(dynamic raw);
 
   @protected
   ShareLinkView dco_decode_share_link_view(dynamic raw);
@@ -208,6 +220,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   DetectedFileView sse_decode_detected_file_view(SseDeserializer deserializer);
 
   @protected
+  DeviceApprovalView sse_decode_device_approval_view(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   DeviceView sse_decode_device_view(SseDeserializer deserializer);
 
   @protected
@@ -258,6 +275,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<RefusedView> sse_decode_list_refused_view(SseDeserializer deserializer);
 
   @protected
+  List<SecurityEventView> sse_decode_list_security_event_view(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   List<TrashEntryView> sse_decode_list_trash_entry_view(
     SseDeserializer deserializer,
   );
@@ -291,6 +313,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<String>? sse_decode_opt_list_String(SseDeserializer deserializer);
 
   @protected
+  PasskeyWrappedKeyView sse_decode_passkey_wrapped_key_view(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   (int, int) sse_decode_record_u_32_u_32(SseDeserializer deserializer);
 
   @protected
@@ -300,6 +327,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   RefusedView sse_decode_refused_view(SseDeserializer deserializer);
+
+  @protected
+  SecurityEventView sse_decode_security_event_view(
+    SseDeserializer deserializer,
+  );
 
   @protected
   ShareLinkView sse_decode_share_link_view(SseDeserializer deserializer);
@@ -386,6 +418,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_device_approval_view(
+    DeviceApprovalView self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_device_view(DeviceView self, SseSerializer serializer);
 
   @protected
@@ -461,6 +499,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_list_security_event_view(
+    List<SecurityEventView> self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_list_trash_entry_view(
     List<TrashEntryView> self,
     SseSerializer serializer,
@@ -503,6 +547,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_opt_list_String(List<String>? self, SseSerializer serializer);
 
   @protected
+  void sse_encode_passkey_wrapped_key_view(
+    PasskeyWrappedKeyView self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_record_u_32_u_32((int, int) self, SseSerializer serializer);
 
   @protected
@@ -513,6 +563,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_refused_view(RefusedView self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_security_event_view(
+    SecurityEventView self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_share_link_view(ShareLinkView self, SseSerializer serializer);

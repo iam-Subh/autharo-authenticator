@@ -1765,4 +1765,172 @@ class AppLocalizationsHi extends AppLocalizations {
   @override
   String get automaticBackupPassphraseMissing =>
       'स्वचालित बैकअप का पासफ़्रेज़ नहीं है। इसे फिर सेट करें।';
+
+  @override
+  String get approveNewDevice => 'नए डिवाइस को अनुमति दें';
+
+  @override
+  String get approveNewDeviceDescription =>
+      'एक बार उपयोग होने वाला कोड बनाएं। यह 10 मिनट में समाप्त होगा। नया कोड पुराने कोड को बदल देता है।';
+
+  @override
+  String get deviceApprovalCode => 'डिवाइस अनुमति कोड';
+
+  @override
+  String get deviceApprovalCodeHelp =>
+      'यह कोड नए डिवाइस पर दर्ज करें। कोड एक बार काम करता है।';
+
+  @override
+  String approvalCodeExpires(String time) {
+    return '$time पर समाप्त होगा';
+  }
+
+  @override
+  String get copy => 'कॉपी करें';
+
+  @override
+  String get copied => 'कॉपी किया गया';
+
+  @override
+  String get continueLabel => 'जारी रखें';
+
+  @override
+  String get passwordRequiredForSecurityAction =>
+      'इस सुरक्षा क्रिया की अनुमति देने के लिए खाते का पासवर्ड दर्ज करें।';
+
+  @override
+  String get passwordRequiredForProtectedAction =>
+      'खाते का पासवर्ड दर्ज करें। अनुमति पांच मिनट तक सक्रिय रहती है।';
+
+  @override
+  String get deviceApprovalCodeOptional => 'डिवाइस अनुमति कोड (वैकल्पिक)';
+
+  @override
+  String get deviceApprovalSignInHelp =>
+      'मौजूदा डिवाइस यह कोड बनाता है। पहले डिवाइस को इसकी आवश्यकता नहीं है।';
+
+  @override
+  String get securityActivity => 'सुरक्षा गतिविधि';
+
+  @override
+  String get securityActivityDescription =>
+      'इस खाते के डिवाइस और सत्र बदलाव देखें।';
+
+  @override
+  String get noSecurityActivity => 'कोई सुरक्षा गतिविधि उपलब्ध नहीं है।';
+
+  @override
+  String get securityDeviceAdded => 'डिवाइस जोड़ा गया';
+
+  @override
+  String get securityDeviceRemoved => 'डिवाइस हटाया गया';
+
+  @override
+  String get securityApprovalCreated => 'डिवाइस अनुमति बनाई गई';
+
+  @override
+  String get securityDeviceSignedOut => 'डिवाइस साइन आउट हुआ';
+
+  @override
+  String get securityAllDevicesSignedOut => 'सभी डिवाइस साइन आउट हुए';
+
+  @override
+  String get securityTokenReuseDetected => 'सत्र टोकन का दोबारा उपयोग मिला';
+
+  @override
+  String get rootDetectedTitle => 'रूट एक्सेस मिला';
+
+  @override
+  String get rootWarningDescription =>
+      'रूट किए गए डिवाइस पर दूसरा सॉफ़्टवेयर authenticator डेटा पढ़ सकता है। केवल अपने नियंत्रण वाले डिवाइस पर जारी रखें।';
+
+  @override
+  String get rootBlockedDescription =>
+      'वर्तमान नीति रूट किए गए डिवाइस पर वॉल्ट एक्सेस रोकती है।';
+
+  @override
+  String get rootDetectionLimit =>
+      'रूट जांच डिवाइस संकेतों का उपयोग करती है। यह बदले हुए सिस्टम को गलत पहचान सकती है। उन्नत रूट टूल इसे पार कर सकते हैं।';
+
+  @override
+  String get rootCheckNotEvaluated =>
+      'डिवाइस संशोधन जांच का मूल्यांकन नहीं हुआ। इसका अर्थ यह नहीं है कि डिवाइस सुरक्षित है।';
+
+  @override
+  String get changeRootPolicyToWarn => 'नीति को चेतावनी पर बदलें';
+
+  @override
+  String get ignoreRootWarning => 'यह चेतावनी अनदेखी करें';
+
+  @override
+  String get rootPolicy => 'रूट डिवाइस नीति';
+
+  @override
+  String get rootPolicyIgnoreDescription => 'चेतावनी या रोक न लगाएं।';
+
+  @override
+  String get rootPolicyWarnDescription => 'वॉल्ट खुलने से पहले चेतावनी दिखाएं।';
+
+  @override
+  String get rootPolicyBlockDescription => 'नीति बदलने तक वॉल्ट रोकें।';
+
+  @override
+  String get ignore => 'अनदेखा करें';
+
+  @override
+  String get warn => 'चेतावनी';
+
+  @override
+  String get block => 'रोकें';
+
+  @override
+  String get recoveryPhraseRequired => 'रिकवरी वाक्यांश';
+
+  @override
+  String get recoveryPhraseOptional => 'रिकवरी वाक्यांश (वैकल्पिक)';
+
+  @override
+  String get recoveryPhraseSyncRegistrationHelp =>
+      'जब कोई स्वीकृत डिवाइस उपलब्ध न हो, तब खाता वापस पाने के लिए 24 शब्द दर्ज करें।';
+
+  @override
+  String get recoveryPhraseSignInHelp =>
+      'इसका उपयोग केवल तब करें जब कोई मौजूदा डिवाइस अनुमति कोड न बना सके।';
+
+  @override
+  String get enterRecoveryPhraseForSync =>
+      'इस खाते का 24 शब्दों वाला रिकवरी वाक्यांश दर्ज करें।';
+
+  @override
+  String get enableRecoverySignIn => 'रिकवरी साइन-इन चालू करें';
+
+  @override
+  String get enableRecoverySignInDescription =>
+      'स्वीकृत डिवाइस उपलब्ध न होने पर रिकवरी वाक्यांश की अनुमति दें।';
+
+  @override
+  String get enableRecoverySignInHelp =>
+      'यह पुराने ऐप से बने खातों को अपडेट करता है। ऐप वाक्यांश की जांच डिवाइस पर करता है। वाक्यांश सर्वर पर नहीं जाता।';
+
+  @override
+  String get recoveryAccessEnabled => 'रिकवरी साइन-इन चालू है।';
+
+  @override
+  String get enable => 'चालू करें';
+
+  @override
+  String get securityRecoveryEnabled => 'रिकवरी साइन-इन चालू किया गया';
+
+  @override
+  String get rootIndicatorTestKeys =>
+      'सिस्टम इमेज टेस्ट साइनिंग कुंजी का उपयोग करती है।';
+
+  @override
+  String get rootIndicatorRootFiles => 'रूट प्रबंधन फ़ाइल मौजूद है।';
+
+  @override
+  String get rootIndicatorUnknown => 'डिवाइस ने रूट संकेत दिया।';
+
+  @override
+  String get securityAccountRegistered => 'सिंक खाता बनाया गया';
 }

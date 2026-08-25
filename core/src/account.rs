@@ -45,11 +45,14 @@ use crate::vault::RecordCipher;
 /// as a record, nor one slot's as another's.
 const PASSWORD_SLOT_ID: &str = "authcore/password-slot";
 const RECOVERY_SLOT_ID: &str = "authcore/recovery-slot";
+const PASSKEY_SLOT_ID: &str = "authcore/passkey-slot";
 const SLOT_VERSION: u32 = 1;
 
 /// HKDF labels splitting the master key (section 9.2.1 step 4).
 const INFO_AUTH: &[u8] = b"authcore/v1/auth";
 const INFO_KEK: &[u8] = b"authcore/v1/kek";
+const INFO_RECOVERY_AUTH: &[u8] = b"authcore/v1/recovery-auth";
+const INFO_PASSKEY_KEK: &[u8] = b"authcore/v1/passkey-kek";
 
 /// `meta` keys. These are wrapped keys and public parameters, so the
 /// unencrypted metadata file is the right place: nothing here opens anything
@@ -86,6 +89,10 @@ pub enum AccountError {
     },
     /// The recovery phrase parsed but does not open this vault.
     WrongRecoveryKey,
+    /// The credential provider returned no usable PRF output.
+    BadPasskeyPrf,
+    /// The PRF output did not open the stored passkey slot.
+    WrongPasskey,
     /// No account has been created on this device.
     NoAccount,
     /// A stored slot is present but incomplete.
@@ -112,6 +119,10 @@ impl fmt::Display for AccountError {
                 "That recovery phrase is a valid phrase, but it does not belong \
                  to this vault.",
             ),
+            Self::BadPasskeyPrf => {
+                f.write_str("The passkey provider did not return a 32-byte PRF result.")
+            }
+            Self::WrongPasskey => f.write_str("That passkey cannot open this vault."),
             Self::NoAccount => f.write_str("No account has been created on this device."),
             Self::CorruptSlot { detail } => {
                 write!(f, "A stored key record is damaged: {detail}")
@@ -202,6 +213,16 @@ pub struct PasswordSlot {
 /// The stored recovery slot.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecoverySlot {
+    pub wrapped_key: Vec<u8>,
+    pub nonce: Vec<u8>,
+}
+
+/// A vault key sealed under key material from the WebAuthn PRF extension.
+///
+/// This structure contains ciphertext and a nonce only. It is safe to store
+/// with the server account record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PasskeySlot {
     pub wrapped_key: Vec<u8>,
     pub nonce: Vec<u8>,
 }
@@ -344,6 +365,27 @@ pub fn derive_auth_key(password: &str, slot: &PasswordSlot) -> Result<Zeroizing<
     Ok(expand(&master, INFO_AUTH))
 }
 
+/// Derives a server authentication key from a valid 24-word recovery phrase.
+/// The phrase does not cross the network.
+pub fn derive_recovery_auth_key(phrase: &str) -> Result<Zeroizing<[u8; KEY_LEN]>> {
+    let mnemonic = Mnemonic::parse_in(Language::English, phrase.trim()).map_err(|error| {
+        AccountError::BadRecoveryPhrase {
+            detail: error.to_string(),
+        }
+    })?;
+    let (entropy, len) = mnemonic.to_entropy_array();
+    if len != KEY_LEN {
+        return Err(AccountError::BadRecoveryPhrase {
+            detail: format!(
+                "expected {RECOVERY_WORDS} words, not {}",
+                mnemonic.word_count()
+            ),
+        });
+    }
+    let source = Zeroizing::new(entropy[..len].try_into().expect("length checked above"));
+    Ok(expand(&source, INFO_RECOVERY_AUTH))
+}
+
 /// Unwraps the vault key with the account password.
 pub fn unlock_with_password(meta: &MetaStore, password: &str) -> Result<VaultKey> {
     let account = load(meta)?.ok_or(AccountError::NoAccount)?;
@@ -398,6 +440,44 @@ pub fn unlock_with_recovery(meta: &MetaStore, phrase: &str) -> Result<VaultKey> 
         .map_err(|_| AccountError::WrongRecoveryKey)?;
 
     Ok(VaultKey::from_slice(&opened)?)
+}
+
+/// Seals the current vault key with a WebAuthn PRF result.
+///
+/// The PRF result is credential-specific secret material. HKDF gives the slot
+/// a separate key domain before XChaCha20-Poly1305 seals the vault key.
+pub fn wrap_with_passkey_prf(vault_key: &VaultKey, prf_result: &[u8]) -> Result<PasskeySlot> {
+    let kek = passkey_kek(prf_result)?;
+    let sealed = XChaChaCipher::new(&VaultKey::from_slice(kek.as_slice())?)
+        .seal(PASSKEY_SLOT_ID, SLOT_VERSION, vault_key.expose())
+        .map_err(|_| AccountError::CorruptSlot {
+            detail: "the passkey slot could not be sealed".to_string(),
+        })?;
+    Ok(PasskeySlot {
+        wrapped_key: sealed.ciphertext,
+        nonce: sealed.nonce,
+    })
+}
+
+/// Opens a passkey slot with a WebAuthn PRF result.
+pub fn unlock_with_passkey_prf(slot: &PasskeySlot, prf_result: &[u8]) -> Result<VaultKey> {
+    let kek = passkey_kek(prf_result)?;
+    let opened = XChaChaCipher::new(&VaultKey::from_slice(kek.as_slice())?)
+        .open(
+            PASSKEY_SLOT_ID,
+            SLOT_VERSION,
+            &slot.wrapped_key,
+            &slot.nonce,
+        )
+        .map_err(|_| AccountError::WrongPasskey)?;
+    Ok(VaultKey::from_slice(&opened)?)
+}
+
+fn passkey_kek(prf_result: &[u8]) -> Result<Zeroizing<[u8; KEY_LEN]>> {
+    let source: [u8; KEY_LEN] = prf_result
+        .try_into()
+        .map_err(|_| AccountError::BadPasskeyPrf)?;
+    Ok(expand(&Zeroizing::new(source), INFO_PASSKEY_KEK))
 }
 
 /// HKDF-SHA-256 over the master key (section 9.2.1 step 4).
@@ -503,4 +583,40 @@ fn decode_params(bytes: &[u8]) -> Result<KdfParams> {
         detail: "the KDF parameters are outside the supported range".to_string(),
     })?;
     Ok(params)
+}
+
+#[cfg(test)]
+mod passkey_tests {
+    use super::*;
+
+    #[test]
+    fn a_passkey_prf_slot_opens_the_same_vault_key() {
+        let vault_key = VaultKey::from_slice(&[7; KEY_LEN]).unwrap();
+        let prf = [11; KEY_LEN];
+        let slot = wrap_with_passkey_prf(&vault_key, &prf).unwrap();
+
+        assert_eq!(unlock_with_passkey_prf(&slot, &prf).unwrap(), vault_key);
+        assert_ne!(slot.wrapped_key.as_slice(), vault_key.expose());
+    }
+
+    #[test]
+    fn another_prf_result_cannot_open_the_slot() {
+        let vault_key = VaultKey::from_slice(&[7; KEY_LEN]).unwrap();
+        let slot = wrap_with_passkey_prf(&vault_key, &[11; KEY_LEN]).unwrap();
+
+        assert!(matches!(
+            unlock_with_passkey_prf(&slot, &[12; KEY_LEN]),
+            Err(AccountError::WrongPasskey)
+        ));
+    }
+
+    #[test]
+    fn the_prf_result_must_be_exactly_32_bytes() {
+        let vault_key = VaultKey::from_slice(&[7; KEY_LEN]).unwrap();
+
+        assert!(matches!(
+            wrap_with_passkey_prf(&vault_key, &[1; KEY_LEN - 1]),
+            Err(AccountError::BadPasskeyPrf)
+        ));
+    }
 }

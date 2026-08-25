@@ -3199,6 +3199,306 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Automatic backup has no passphrase. Set it up again.'**
   String get automaticBackupPassphraseMissing;
+
+  /// No description provided for @approveNewDevice.
+  ///
+  /// In en, this message translates to:
+  /// **'Approve a new device'**
+  String get approveNewDevice;
+
+  /// No description provided for @approveNewDeviceDescription.
+  ///
+  /// In en, this message translates to:
+  /// **'Create a single-use code that expires in 10 minutes. A new code replaces the old code.'**
+  String get approveNewDeviceDescription;
+
+  /// No description provided for @deviceApprovalCode.
+  ///
+  /// In en, this message translates to:
+  /// **'Device approval code'**
+  String get deviceApprovalCode;
+
+  /// No description provided for @deviceApprovalCodeHelp.
+  ///
+  /// In en, this message translates to:
+  /// **'Enter this code on the new device. The code works once.'**
+  String get deviceApprovalCodeHelp;
+
+  /// No description provided for @approvalCodeExpires.
+  ///
+  /// In en, this message translates to:
+  /// **'Expires at {time}'**
+  String approvalCodeExpires(String time);
+
+  /// No description provided for @copy.
+  ///
+  /// In en, this message translates to:
+  /// **'Copy'**
+  String get copy;
+
+  /// No description provided for @copied.
+  ///
+  /// In en, this message translates to:
+  /// **'Copied'**
+  String get copied;
+
+  /// No description provided for @continueLabel.
+  ///
+  /// In en, this message translates to:
+  /// **'Continue'**
+  String get continueLabel;
+
+  /// No description provided for @passwordRequiredForSecurityAction.
+  ///
+  /// In en, this message translates to:
+  /// **'Enter the account password to permit this security action.'**
+  String get passwordRequiredForSecurityAction;
+
+  /// No description provided for @passwordRequiredForProtectedAction.
+  ///
+  /// In en, this message translates to:
+  /// **'Enter the account password. Authorization remains active for five minutes.'**
+  String get passwordRequiredForProtectedAction;
+
+  /// No description provided for @deviceApprovalCodeOptional.
+  ///
+  /// In en, this message translates to:
+  /// **'Device approval code (optional)'**
+  String get deviceApprovalCodeOptional;
+
+  /// No description provided for @deviceApprovalSignInHelp.
+  ///
+  /// In en, this message translates to:
+  /// **'An existing device creates this code. The first device does not need one.'**
+  String get deviceApprovalSignInHelp;
+
+  /// No description provided for @securityActivity.
+  ///
+  /// In en, this message translates to:
+  /// **'Security activity'**
+  String get securityActivity;
+
+  /// No description provided for @securityActivityDescription.
+  ///
+  /// In en, this message translates to:
+  /// **'Review device and session changes on this account.'**
+  String get securityActivityDescription;
+
+  /// No description provided for @noSecurityActivity.
+  ///
+  /// In en, this message translates to:
+  /// **'No security activity is available.'**
+  String get noSecurityActivity;
+
+  /// No description provided for @securityDeviceAdded.
+  ///
+  /// In en, this message translates to:
+  /// **'Device added'**
+  String get securityDeviceAdded;
+
+  /// No description provided for @securityDeviceRemoved.
+  ///
+  /// In en, this message translates to:
+  /// **'Device removed'**
+  String get securityDeviceRemoved;
+
+  /// No description provided for @securityApprovalCreated.
+  ///
+  /// In en, this message translates to:
+  /// **'Device approval created'**
+  String get securityApprovalCreated;
+
+  /// No description provided for @securityDeviceSignedOut.
+  ///
+  /// In en, this message translates to:
+  /// **'Device signed out'**
+  String get securityDeviceSignedOut;
+
+  /// No description provided for @securityAllDevicesSignedOut.
+  ///
+  /// In en, this message translates to:
+  /// **'All devices signed out'**
+  String get securityAllDevicesSignedOut;
+
+  /// No description provided for @securityTokenReuseDetected.
+  ///
+  /// In en, this message translates to:
+  /// **'Session token reuse detected'**
+  String get securityTokenReuseDetected;
+
+  /// No description provided for @rootDetectedTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Root access detected'**
+  String get rootDetectedTitle;
+
+  /// No description provided for @rootWarningDescription.
+  ///
+  /// In en, this message translates to:
+  /// **'A rooted device can let other software read authenticator data. Continue only if you control this device.'**
+  String get rootWarningDescription;
+
+  /// No description provided for @rootBlockedDescription.
+  ///
+  /// In en, this message translates to:
+  /// **'The current policy blocks vault access on a rooted device.'**
+  String get rootBlockedDescription;
+
+  /// No description provided for @rootDetectionLimit.
+  ///
+  /// In en, this message translates to:
+  /// **'Root detection uses device indicators. It can report a modified system incorrectly, and advanced root tools can bypass it.'**
+  String get rootDetectionLimit;
+
+  /// No description provided for @rootCheckNotEvaluated.
+  ///
+  /// In en, this message translates to:
+  /// **'The device modification check was not evaluated. This does not mean the device is safe.'**
+  String get rootCheckNotEvaluated;
+
+  /// No description provided for @changeRootPolicyToWarn.
+  ///
+  /// In en, this message translates to:
+  /// **'Change policy to Warn'**
+  String get changeRootPolicyToWarn;
+
+  /// No description provided for @ignoreRootWarning.
+  ///
+  /// In en, this message translates to:
+  /// **'Ignore this warning'**
+  String get ignoreRootWarning;
+
+  /// No description provided for @rootPolicy.
+  ///
+  /// In en, this message translates to:
+  /// **'Rooted-device policy'**
+  String get rootPolicy;
+
+  /// No description provided for @rootPolicyIgnoreDescription.
+  ///
+  /// In en, this message translates to:
+  /// **'Do not warn or block.'**
+  String get rootPolicyIgnoreDescription;
+
+  /// No description provided for @rootPolicyWarnDescription.
+  ///
+  /// In en, this message translates to:
+  /// **'Show a warning before the vault opens.'**
+  String get rootPolicyWarnDescription;
+
+  /// No description provided for @rootPolicyBlockDescription.
+  ///
+  /// In en, this message translates to:
+  /// **'Block the vault until the policy changes.'**
+  String get rootPolicyBlockDescription;
+
+  /// No description provided for @ignore.
+  ///
+  /// In en, this message translates to:
+  /// **'Ignore'**
+  String get ignore;
+
+  /// No description provided for @warn.
+  ///
+  /// In en, this message translates to:
+  /// **'Warn'**
+  String get warn;
+
+  /// No description provided for @block.
+  ///
+  /// In en, this message translates to:
+  /// **'Block'**
+  String get block;
+
+  /// No description provided for @recoveryPhraseRequired.
+  ///
+  /// In en, this message translates to:
+  /// **'Recovery phrase'**
+  String get recoveryPhraseRequired;
+
+  /// No description provided for @recoveryPhraseOptional.
+  ///
+  /// In en, this message translates to:
+  /// **'Recovery phrase (optional)'**
+  String get recoveryPhraseOptional;
+
+  /// No description provided for @recoveryPhraseSyncRegistrationHelp.
+  ///
+  /// In en, this message translates to:
+  /// **'Enter the 24 words to enable account recovery when no approved device is available.'**
+  String get recoveryPhraseSyncRegistrationHelp;
+
+  /// No description provided for @recoveryPhraseSignInHelp.
+  ///
+  /// In en, this message translates to:
+  /// **'Use this only when no existing device can create an approval code.'**
+  String get recoveryPhraseSignInHelp;
+
+  /// No description provided for @enterRecoveryPhraseForSync.
+  ///
+  /// In en, this message translates to:
+  /// **'Enter the 24-word recovery phrase for this account.'**
+  String get enterRecoveryPhraseForSync;
+
+  /// No description provided for @enableRecoverySignIn.
+  ///
+  /// In en, this message translates to:
+  /// **'Enable recovery sign-in'**
+  String get enableRecoverySignIn;
+
+  /// No description provided for @enableRecoverySignInDescription.
+  ///
+  /// In en, this message translates to:
+  /// **'Permit the recovery phrase when no approved device is available.'**
+  String get enableRecoverySignInDescription;
+
+  /// No description provided for @enableRecoverySignInHelp.
+  ///
+  /// In en, this message translates to:
+  /// **'This updates accounts created by an older app. The app verifies the phrase locally. The phrase does not reach the server.'**
+  String get enableRecoverySignInHelp;
+
+  /// No description provided for @recoveryAccessEnabled.
+  ///
+  /// In en, this message translates to:
+  /// **'Recovery sign-in is enabled.'**
+  String get recoveryAccessEnabled;
+
+  /// No description provided for @enable.
+  ///
+  /// In en, this message translates to:
+  /// **'Enable'**
+  String get enable;
+
+  /// No description provided for @securityRecoveryEnabled.
+  ///
+  /// In en, this message translates to:
+  /// **'Recovery sign-in enabled'**
+  String get securityRecoveryEnabled;
+
+  /// No description provided for @rootIndicatorTestKeys.
+  ///
+  /// In en, this message translates to:
+  /// **'The system image uses test signing keys.'**
+  String get rootIndicatorTestKeys;
+
+  /// No description provided for @rootIndicatorRootFiles.
+  ///
+  /// In en, this message translates to:
+  /// **'A root-management file is present.'**
+  String get rootIndicatorRootFiles;
+
+  /// No description provided for @rootIndicatorUnknown.
+  ///
+  /// In en, this message translates to:
+  /// **'The device reported a root indicator.'**
+  String get rootIndicatorUnknown;
+
+  /// No description provided for @securityAccountRegistered.
+  ///
+  /// In en, this message translates to:
+  /// **'Sync account created'**
+  String get securityAccountRegistered;
 }
 
 class _AppLocalizationsDelegate

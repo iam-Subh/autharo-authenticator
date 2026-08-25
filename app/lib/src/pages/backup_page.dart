@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 
 import '../../l10n/generated/app_localizations.dart';
 import '../rust/api/vault.dart' as rust;
+import '../rust/api/sync.dart' as sync_api;
 import '../services/automatic_backup_service.dart';
 import '../services/bounded_file_reader.dart';
 import '../ui/import_report_dialog.dart';
@@ -320,6 +321,12 @@ class _BackupPageState extends State<BackupPage> {
         ),
       ),
     );
+    if (sync_api.syncStatus().signedIn) {
+      await sync_api.enrollRecoveryAccess(
+        password: password,
+        recoveryPhrase: view.phrase,
+      );
+    }
   });
 
   @override

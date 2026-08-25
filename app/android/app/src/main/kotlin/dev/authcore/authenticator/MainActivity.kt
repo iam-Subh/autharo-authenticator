@@ -59,9 +59,11 @@ class MainActivity : FlutterFragmentActivity() {
             "dev.authcore.authenticator/automatic_backup"
         const val HOME_WIDGET_CHANNEL = "dev.authcore.authenticator/home_widget"
         const val PASSKEY_CHANNEL = "dev.authcore.authenticator/passkey"
+        const val DEVICE_INTEGRITY_CHANNEL = "dev.authcore.authenticator/device_integrity"
         const val CHOOSE_BACKUP_DIRECTORY = 7001
         const val SECURITY_PREFERENCES = "security_preferences"
         const val BLOCK_SCREENSHOTS = "block_screenshots"
+        const val ROOT_POLICY = "root_policy"
     }
 
     private var pendingBackupDirectoryResult: MethodChannel.Result? = null
@@ -122,6 +124,47 @@ class MainActivity : FlutterFragmentActivity() {
                         null
                     }
                     result.success(colour)
+                }
+                else -> result.notImplemented()
+            }
+        }
+
+        MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            DEVICE_INTEGRITY_CHANNEL,
+        ).setMethodCallHandler { call, result ->
+            when (call.method) {
+                "getPolicy" -> result.success(
+                    getSharedPreferences(SECURITY_PREFERENCES, MODE_PRIVATE)
+                        .getString(ROOT_POLICY, "warn"),
+                )
+                "setPolicy" -> {
+                    val policy = call.argument<String>("policy")
+                    if (policy !in setOf("ignore", "warn", "block")) {
+                        return@setMethodCallHandler result.error(
+                            "invalid_policy",
+                            "The root policy is invalid",
+                            null,
+                        )
+                    }
+                    val stored = getSharedPreferences(SECURITY_PREFERENCES, MODE_PRIVATE)
+                        .edit()
+                        .putString(ROOT_POLICY, policy)
+                        .commit()
+                    if (stored) result.success(null) else result.error(
+                        "preference_failure",
+                        "The root policy could not be stored",
+                        null,
+                    )
+                }
+                "check" -> {
+                    val assessment = DeviceIntegrityDetector.forCurrentDevice().evaluate()
+                    result.success(
+                        mapOf(
+                            "evaluated" to assessment.evaluated,
+                            "indicators" to assessment.indicators,
+                        ),
+                    )
                 }
                 else -> result.notImplemented()
             }

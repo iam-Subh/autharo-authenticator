@@ -67,6 +67,8 @@ async fn start_server() -> (
         db: db.clone(),
         server_key: b"test-server-key".to_vec(),
         fake_auth_hash: authserver::crypto::hash_auth_key(&[0u8; 32]).unwrap(),
+        passkeys: None,
+        push: None,
     });
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -173,6 +175,7 @@ async fn an_unknown_address_is_limited_exactly_like_a_real_one() {
         .json(&json!({
             "email": real,
             "auth_key": B64.encode([0x33u8; 32]),
+            "recovery_auth_key": B64.encode([0x77u8; 32]),
             "kdf_params": { "m": 65536, "t": 3, "p": 4 },
             "client_salt": B64.encode([0x44u8; 16]),
             "password_slot": slot,
@@ -311,6 +314,7 @@ async fn registration_is_limited_before_expensive_hashing() {
             .json(&json!({
                 "email": unique_email(&format!("registration-{i}")),
                 "auth_key": "invalid",
+                "recovery_auth_key": "invalid",
                 "kdf_params": {"m": 65536, "t": 3, "p": 4},
                 "client_salt": "invalid",
                 "password_slot": {"wrapped_key": "invalid", "nonce": "invalid"},
@@ -327,6 +331,7 @@ async fn registration_is_limited_before_expensive_hashing() {
         .json(&json!({
             "email": unique_email("registration-limited"),
             "auth_key": "invalid",
+            "recovery_auth_key": "invalid",
             "kdf_params": {"m": 65536, "t": 3, "p": 4},
             "client_salt": "invalid",
             "password_slot": {"wrapped_key": "invalid", "nonce": "invalid"},

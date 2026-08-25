@@ -651,6 +651,46 @@ pub fn account_email() -> Result<Option<String>> {
     })
 }
 
+/// The encrypted vault-key slot stored with one passkey credential.
+pub struct PasskeyWrappedKeyView {
+    pub wrapped_key: Vec<u8>,
+    pub nonce: Vec<u8>,
+}
+
+/// Wraps the unlocked vault key with a WebAuthn PRF result.
+///
+/// The PRF result enters Rust. The raw vault key does not leave Rust.
+pub fn create_passkey_wrapped_key(prf_result: Vec<u8>) -> Result<PasskeyWrappedKeyView> {
+    let key = CURRENT_KEY
+        .lock()
+        .map_err(|_| lock_poisoned())?
+        .as_ref()
+        .cloned()
+        .ok_or_else(|| anyhow!("Unlock the vault before registering a passkey."))?;
+    let slot =
+        account::wrap_with_passkey_prf(&key, &prf_result).map_err(|error| anyhow!("{error}"))?;
+    Ok(PasskeyWrappedKeyView {
+        wrapped_key: slot.wrapped_key,
+        nonce: slot.nonce,
+    })
+}
+
+/// Opens the vault with a verified passkey response and its PRF result.
+///
+/// The server verifies the WebAuthn response before it returns the encrypted
+/// slot. This function only unwraps that slot. The raw vault key stays in Rust.
+pub fn unlock_with_passkey(
+    vault_path: String,
+    prf_result: Vec<u8>,
+    wrapped_key: Vec<u8>,
+    nonce: Vec<u8>,
+) -> Result<()> {
+    let slot = account::PasskeySlot { wrapped_key, nonce };
+    let key =
+        account::unlock_with_passkey_prf(&slot, &prf_result).map_err(|error| anyhow!("{error}"))?;
+    open_vault_with_key(&vault_path, take_meta()?, key)
+}
+
 /// Opens the vault with the account password (section 9.2.1).
 pub fn unlock_with_password(vault_path: String, password: String) -> Result<()> {
     let key = with_meta(|meta| {
@@ -830,6 +870,7 @@ fn open_vault_with_key(vault_path: &str, meta: MetaStore, key: VaultKey) -> Resu
 #[flutter_rust_bridge::frb(sync)]
 pub fn lock_vault() -> Result<()> {
     cancel_pending_keystore_operations();
+    crate::api::sync::clear_capabilities();
     #[cfg(any(target_os = "android", feature = "jni-host-check"))]
     crate::vault_key_bridge::clear_pending_secrets();
 
@@ -858,6 +899,7 @@ pub fn is_vault_open() -> bool {
 /// go too.
 pub fn wipe_device() -> Result<()> {
     cancel_pending_keystore_operations();
+    crate::api::sync::clear_capabilities();
     #[cfg(any(target_os = "android", feature = "jni-host-check"))]
     crate::vault_key_bridge::clear_pending_secrets();
 

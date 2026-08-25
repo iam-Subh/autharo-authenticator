@@ -39,6 +39,8 @@ class _SyncSignInPageState extends State<SyncSignInPage> {
   final _server = TextEditingController();
   final _email = TextEditingController();
   final _password = TextEditingController();
+  final _approval = TextEditingController();
+  final _recovery = TextEditingController();
 
   bool _busy = false;
   String? _problem;
@@ -59,6 +61,8 @@ class _SyncSignInPageState extends State<SyncSignInPage> {
     _server.dispose();
     _email.dispose();
     _password.dispose();
+    _approval.dispose();
+    _recovery.dispose();
     super.dispose();
   }
 
@@ -82,6 +86,10 @@ class _SyncSignInPageState extends State<SyncSignInPage> {
           ? AppLocalizations.of(context).enterNewAccountPassword
           : AppLocalizations.of(context).enterAccountPassword;
     }
+    if (_isRegister &&
+        _recovery.text.trim().split(RegExp(r'\s+')).length != 24) {
+      return AppLocalizations.of(context).enterRecoveryPhraseForSync;
+    }
     return null;
   }
 
@@ -102,6 +110,7 @@ class _SyncSignInPageState extends State<SyncSignInPage> {
       if (_isRegister) {
         await rust.registerAccount(
           password: _password.text,
+          recoveryPhrase: _recovery.text.trim(),
           deviceName: 'this device',
         );
       } else {
@@ -109,6 +118,12 @@ class _SyncSignInPageState extends State<SyncSignInPage> {
           email: _email.text.trim(),
           password: _password.text,
           deviceName: 'this device',
+          deviceApprovalToken: _approval.text.trim().isEmpty
+              ? null
+              : _approval.text.trim(),
+          recoveryPhrase: _recovery.text.trim().isEmpty
+              ? null
+              : _recovery.text.trim(),
         );
       }
 
@@ -178,6 +193,35 @@ class _SyncSignInPageState extends State<SyncSignInPage> {
           obscureText: true,
           enabled: !_busy,
           onSubmitted: (_) => _busy ? null : _submit(),
+        ),
+        if (!_isRegister) ...[
+          const SizedBox(height: 12),
+          TextField(
+            controller: _approval,
+            decoration: InputDecoration(
+              labelText: l10n.deviceApprovalCodeOptional,
+              helperText: l10n.deviceApprovalSignInHelp,
+            ),
+            autocorrect: false,
+            enableSuggestions: false,
+            enabled: !_busy,
+          ),
+        ],
+        const SizedBox(height: 12),
+        TextField(
+          controller: _recovery,
+          decoration: InputDecoration(
+            labelText: _isRegister
+                ? l10n.recoveryPhraseRequired
+                : l10n.recoveryPhraseOptional,
+            helperText: _isRegister
+                ? l10n.recoveryPhraseSyncRegistrationHelp
+                : l10n.recoveryPhraseSignInHelp,
+          ),
+          obscureText: true,
+          autocorrect: false,
+          enableSuggestions: false,
+          enabled: !_busy,
         ),
       ],
     );

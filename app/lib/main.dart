@@ -14,9 +14,11 @@ import 'src/services/automatic_backup_service.dart';
 import 'src/services/appearance_preference.dart';
 import 'src/services/brand_icon_preference.dart';
 import 'src/services/code_visibility_preference.dart';
+import 'src/services/device_integrity_service.dart';
 import 'src/services/monotonic_clock.dart';
 import 'src/services/reference_time.dart';
 import 'src/services/recovery_status_preference.dart';
+import 'src/services/push_notification_service.dart';
 import 'src/services/sync_controller.dart';
 import 'src/services/sync_scheduler.dart';
 import 'src/services/vault_session.dart';
@@ -28,6 +30,12 @@ void main() {
 }
 
 Future<void> _initializeServices() async {
+  try {
+    await DeviceIntegrityService.load();
+  } catch (_) {
+    // A platform check failure does not imply a compromised device. Keep the
+    // warning policy and report the check as unavailable.
+  }
   await RustLib.init();
   try {
     BrandIconPreference.load();
@@ -149,8 +157,100 @@ class _InitializationGateState extends State<_InitializationGate> {
         if (snapshot.connectionState != ConnectionState.done) {
           return const _StartupProgress();
         }
-        return const _Bootstrap();
+        return const _DeviceIntegrityGate(child: _Bootstrap());
       },
+    );
+  }
+}
+
+class _DeviceIntegrityGate extends StatefulWidget {
+  const _DeviceIntegrityGate({required this.child});
+
+  final Widget child;
+
+  @override
+  State<_DeviceIntegrityGate> createState() => _DeviceIntegrityGateState();
+}
+
+class _DeviceIntegrityGateState extends State<_DeviceIntegrityGate> {
+  bool _acceptedWarning = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final check = DeviceIntegrityService.result.value;
+    final policy = DeviceIntegrityService.policy.value;
+    if (!check.evaluated ||
+        !check.indicatorsDetected ||
+        policy == RootPolicy.ignore ||
+        (policy == RootPolicy.warn && _acceptedWarning)) {
+      return widget.child;
+    }
+
+    final l10n = AppLocalizations.of(context);
+    final blocked = policy == RootPolicy.block;
+    return Scaffold(
+      body: SafeArea(
+        child: ListView(
+          padding: const EdgeInsets.all(24),
+          children: [
+            Icon(
+              Icons.gpp_maybe_outlined,
+              size: 48,
+              color: Theme.of(context).colorScheme.error,
+            ),
+            const SizedBox(height: 16),
+            Text(
+              l10n.rootDetectedTitle,
+              style: Theme.of(context).textTheme.headlineSmall,
+            ),
+            const SizedBox(height: 12),
+            Text(
+              blocked
+                  ? l10n.rootBlockedDescription
+                  : l10n.rootWarningDescription,
+            ),
+            const SizedBox(height: 16),
+            for (final indicator in check.indicators)
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                leading: const Icon(Icons.warning_amber_outlined),
+                title: Text(switch (indicator) {
+                  'test_keys' => l10n.rootIndicatorTestKeys,
+                  'root_files' => l10n.rootIndicatorRootFiles,
+                  _ => l10n.rootIndicatorUnknown,
+                }),
+              ),
+            const SizedBox(height: 16),
+            if (!blocked)
+              FilledButton(
+                onPressed: () => setState(() => _acceptedWarning = true),
+                child: Text(l10n.continueLabel),
+              ),
+            if (blocked) ...[
+              FilledButton.tonal(
+                onPressed: () async {
+                  await DeviceIntegrityService.setPolicy(RootPolicy.warn);
+                  if (mounted) setState(() {});
+                },
+                child: Text(l10n.changeRootPolicyToWarn),
+              ),
+              const SizedBox(height: 8),
+              TextButton(
+                onPressed: () async {
+                  await DeviceIntegrityService.setPolicy(RootPolicy.ignore);
+                  if (mounted) setState(() {});
+                },
+                child: Text(l10n.ignoreRootWarning),
+              ),
+            ],
+            const SizedBox(height: 12),
+            Text(
+              l10n.rootDetectionLimit,
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+          ],
+        ),
+      ),
     );
   }
 }
@@ -220,6 +320,7 @@ class _BootstrapState extends State<_Bootstrap> {
     },
   );
   late final _scheduler = SyncScheduler(runner: _sync);
+  final _push = PushNotificationService.instance;
   final _automaticBackup = AutomaticBackupService();
   late final _lock = LockController(
     session: _session,
@@ -238,6 +339,7 @@ class _BootstrapState extends State<_Bootstrap> {
   @override
   void initState() {
     super.initState();
+    _push.configure(onVaultChanged: () async => _scheduler.onPushSignal());
     _lock.start();
   }
 
@@ -247,6 +349,8 @@ class _BootstrapState extends State<_Bootstrap> {
   Future<void> _startSync() async {
     await _sync.refresh();
     _scheduler.start();
+    await _push.start();
+    await _push.refreshRegistration(signedIn: _sync.status.isSignedIn);
   }
 
   Future<void> _runAutomaticBackupIfDue() async {
@@ -285,6 +389,7 @@ class _BootstrapState extends State<_Bootstrap> {
     _scheduler.dispose();
     _automaticBackup.dispose();
     _sync.dispose();
+    unawaited(_push.dispose());
     _lock.dispose();
     _controller?.dispose();
     super.dispose();

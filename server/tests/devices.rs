@@ -49,7 +49,11 @@ fn database_url() -> String {
         .unwrap_or_else(|_| "postgres://authcore:devonly@127.0.0.1:15432/authcore".to_string())
 }
 
-async fn start_server() -> (SocketAddr, sqlx::PgPool, tokio::sync::MutexGuard<'static, ()>) {
+async fn start_server() -> (
+    SocketAddr,
+    sqlx::PgPool,
+    tokio::sync::MutexGuard<'static, ()>,
+) {
     let guard = SERIAL.lock().await;
     let db = PgPoolOptions::new()
         .max_connections(4)
@@ -91,6 +95,8 @@ async fn start_server() -> (SocketAddr, sqlx::PgPool, tokio::sync::MutexGuard<'s
         db: db.clone(),
         server_key: b"test-server-key".to_vec(),
         fake_auth_hash: authserver::crypto::hash_auth_key(&[0u8; 32]).unwrap(),
+        passkeys: None,
+        push: None,
     });
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -113,6 +119,7 @@ const AUTH_KEY: [u8; 32] = [0x33u8; 32];
 struct Account {
     email: String,
     id: Uuid,
+    sessions: Mutex<Vec<String>>,
 }
 
 struct Signed {
@@ -136,6 +143,7 @@ async fn register(client: &reqwest::Client, base: &str) -> Account {
         .json(&json!({
             "email": email,
             "auth_key": B64.encode(AUTH_KEY),
+            "recovery_auth_key": B64.encode([0x77u8; 32]),
             "kdf_params": { "m": 65536, "t": 3, "p": 4 },
             "client_salt": B64.encode([0x44u8; 16]),
             "password_slot": slot,
@@ -152,11 +160,36 @@ async fn register(client: &reqwest::Client, base: &str) -> Account {
         .parse()
         .unwrap();
 
-    Account { email, id }
+    Account {
+        email,
+        id,
+        sessions: Mutex::new(Vec::new()),
+    }
 }
 
 /// Signs in, which also creates a device row.
 async fn sign_in(client: &reqwest::Client, base: &str, account: &Account, name: &str) -> Signed {
+    let existing = account.sessions.lock().await.clone();
+    let mut approval_token = None;
+    for access in existing.iter().rev() {
+        let Ok(security) = request_elevation(client, base, access, &["security:read"]).await else {
+            continue;
+        };
+        let response = client
+            .post(format!("{base}/v1/device-approvals"))
+            .bearer_auth(&security)
+            .json(&json!({ "auth_key": B64.encode(AUTH_KEY) }))
+            .send()
+            .await
+            .unwrap();
+        if response.status().is_success() {
+            approval_token = response.json::<Value>().await.unwrap()["token"]
+                .as_str()
+                .map(str::to_string);
+            break;
+        }
+    }
+    let use_recovery = approval_token.is_none();
     let response = client
         .post(format!("{base}/v1/auth/login"))
         .json(&json!({
@@ -164,6 +197,12 @@ async fn sign_in(client: &reqwest::Client, base: &str, account: &Account, name: 
             "auth_key": B64.encode(AUTH_KEY),
             "device_name": name,
             "device_platform": "test",
+            "device_approval_token": approval_token,
+            "recovery_auth_key": if use_recovery {
+                Some(B64.encode([0x77u8; 32]))
+            } else {
+                None
+            },
         }))
         .send()
         .await
@@ -171,16 +210,54 @@ async fn sign_in(client: &reqwest::Client, base: &str, account: &Account, name: 
     assert!(response.status().is_success(), "login failed for {name}");
 
     let body = response.json::<Value>().await.unwrap();
-    Signed {
+    let signed = Signed {
         access: body["access_token"].as_str().unwrap().to_string(),
         refresh: body["refresh_token"].as_str().unwrap().to_string(),
+    };
+    account.sessions.lock().await.push(signed.access.clone());
+    signed
+}
+
+async fn elevate(client: &reqwest::Client, base: &str, access: &str, scopes: &[&str]) -> String {
+    request_elevation(client, base, access, scopes)
+        .await
+        .unwrap_or_else(|error| panic!("elevation failed: {error}"))
+}
+
+async fn request_elevation(
+    client: &reqwest::Client,
+    base: &str,
+    access: &str,
+    scopes: &[&str],
+) -> Result<String, String> {
+    let response = client
+        .post(format!("{base}/v1/auth/elevate"))
+        .bearer_auth(access)
+        .json(&json!({
+            "auth_key": B64.encode(AUTH_KEY),
+            "scopes": scopes,
+        }))
+        .send()
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = response.text().await.unwrap();
+    if !status.is_success() {
+        return Err(format!("{status}: {body}"));
     }
+    Ok(
+        serde_json::from_str::<Value>(&body).unwrap()["access_token"]
+            .as_str()
+            .unwrap()
+            .to_string(),
+    )
 }
 
 async fn devices(client: &reqwest::Client, base: &str, token: &str) -> Vec<Value> {
+    let security = elevate(client, base, token, &["security:read"]).await;
     let response = client
         .get(format!("{base}/v1/devices"))
-        .bearer_auth(token)
+        .bearer_auth(security)
         .send()
         .await
         .unwrap();
@@ -207,7 +284,294 @@ async fn can_still_sync(client: &reqwest::Client, base: &str, token: &str) -> bo
         .is_success()
 }
 
+async fn raw_login(
+    client: &reqwest::Client,
+    base: &str,
+    account: &Account,
+    name: &str,
+    approval: Option<&str>,
+    recovery: bool,
+) -> reqwest::Response {
+    client
+        .post(format!("{base}/v1/auth/login"))
+        .json(&json!({
+            "email": account.email,
+            "auth_key": B64.encode(AUTH_KEY),
+            "device_name": name,
+            "device_platform": "test",
+            "device_approval_token": approval,
+            "recovery_auth_key": recovery.then(|| B64.encode([0x77u8; 32])),
+        }))
+        .send()
+        .await
+        .unwrap()
+}
+
 // ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_password_alone_cannot_add_a_second_device() {
+    let (address, _db, _serial) = start_server().await;
+    let base = format!("http://{address}");
+    let client = reqwest::Client::new();
+    let account = register(&client, &base).await;
+    let _first = sign_in(&client, &base, &account, "First").await;
+
+    let response = raw_login(&client, &base, &account, "Unapproved", None, false).await;
+    assert_eq!(response.status(), reqwest::StatusCode::FORBIDDEN);
+    let body = response.json::<Value>().await.unwrap();
+    assert_eq!(body["error"], json!("device_approval_required"));
+}
+
+#[tokio::test]
+async fn a_device_approval_code_works_only_once() {
+    let (address, _db, _serial) = start_server().await;
+    let base = format!("http://{address}");
+    let client = reqwest::Client::new();
+    let account = register(&client, &base).await;
+    let first = sign_in(&client, &base, &account, "First").await;
+    let security = elevate(&client, &base, &first.access, &["security:read"]).await;
+    let approval = client
+        .post(format!("{base}/v1/device-approvals"))
+        .bearer_auth(&security)
+        .json(&json!({ "auth_key": B64.encode(AUTH_KEY) }))
+        .send()
+        .await
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap()["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let accepted = raw_login(&client, &base, &account, "Second", Some(&approval), false).await;
+    assert!(accepted.status().is_success());
+    let replay = raw_login(&client, &base, &account, "Third", Some(&approval), false).await;
+    assert_eq!(replay.status(), reqwest::StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn persistent_and_capability_scopes_are_isolated() {
+    let (address, db, _serial) = start_server().await;
+    let base = format!("http://{address}");
+    let client = reqwest::Client::new();
+    let account = register(&client, &base).await;
+    let session = sign_in(&client, &base, &account, "Phone").await;
+
+    let security = elevate(&client, &base, &session.access, &["security:read"]).await;
+    let base_security = client
+        .get(format!("{base}/v1/devices"))
+        .bearer_auth(&session.access)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(base_security.status(), reqwest::StatusCode::FORBIDDEN);
+    assert_eq!(
+        base_security.json::<Value>().await.unwrap()["error"],
+        "elevation_required"
+    );
+
+    let capability_vault = client
+        .get(format!("{base}/v1/vault/changes?since=0"))
+        .bearer_auth(&security)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(capability_vault.status(), reqwest::StatusCode::FORBIDDEN);
+    assert!(devices(&client, &base, &session.access).await.len() == 1);
+
+    let (scopes,): (Vec<String>,) =
+        sqlx::query_as("SELECT scopes FROM session WHERE account_id = $1 AND NOT revoked LIMIT 1")
+            .bind(account.id)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+    assert_eq!(scopes, vec!["vault:sync", "session:self"]);
+}
+
+#[tokio::test]
+async fn a_push_route_is_private_to_the_device_and_removed_on_sign_out() {
+    let (address, db, _serial) = start_server().await;
+    let base = format!("http://{address}");
+    let client = reqwest::Client::new();
+    let account = register(&client, &base).await;
+    let session = sign_in(&client, &base, &account, "Push phone").await;
+
+    let registered = client
+        .put(format!("{base}/v1/devices/push-token"))
+        .bearer_auth(&session.access)
+        .json(&json!({ "token": "fcm-installation-route" }))
+        .send()
+        .await
+        .unwrap();
+    assert!(registered.status().is_success());
+    assert_eq!(
+        registered.json::<Value>().await.unwrap()["registered"],
+        true
+    );
+
+    let (stored,): (Option<String>,) =
+        sqlx::query_as("SELECT push_token FROM device WHERE account_id = $1 AND name = $2")
+            .bind(account.id)
+            .bind("Push phone")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+    assert_eq!(stored.as_deref(), Some("fcm-installation-route"));
+
+    let signed_out = client
+        .post(format!("{base}/v1/auth/logout"))
+        .bearer_auth(&session.access)
+        .send()
+        .await
+        .unwrap();
+    assert!(signed_out.status().is_success());
+
+    let (stored, revoked): (Option<String>, bool) = sqlx::query_as(
+        "SELECT push_token, revoked FROM device WHERE account_id = $1 AND name = $2",
+    )
+    .bind(account.id)
+    .bind("Push phone")
+    .fetch_one(&db)
+    .await
+    .unwrap();
+    assert!(stored.is_none());
+    assert!(revoked);
+}
+
+#[tokio::test]
+async fn an_expired_capability_is_rejected_with_its_own_error() {
+    let (address, db, _serial) = start_server().await;
+    let base = format!("http://{address}");
+    let client = reqwest::Client::new();
+    let account = register(&client, &base).await;
+    let session = sign_in(&client, &base, &account, "Phone").await;
+    let security = elevate(&client, &base, &session.access, &["security:read"]).await;
+
+    sqlx::query(
+        "UPDATE capability_session SET expires_at = now() - interval '1 second'
+          WHERE parent_session_id IN (SELECT id FROM session WHERE account_id = $1)",
+    )
+    .bind(account.id)
+    .execute(&db)
+    .await
+    .unwrap();
+
+    let response = client
+        .get(format!("{base}/v1/devices"))
+        .bearer_auth(security)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        response.json::<Value>().await.unwrap()["error"],
+        "capability_expired"
+    );
+}
+
+#[tokio::test]
+async fn refreshing_a_session_does_not_add_elevated_scopes() {
+    let (address, db, _serial) = start_server().await;
+    let base = format!("http://{address}");
+    let client = reqwest::Client::new();
+    let account = register(&client, &base).await;
+    let session = sign_in(&client, &base, &account, "Phone").await;
+
+    let response = client
+        .post(format!("{base}/v1/auth/refresh"))
+        .json(&json!({ "refresh_token": session.refresh }))
+        .send()
+        .await
+        .unwrap();
+    assert!(response.status().is_success());
+    let renewed = response.json::<Value>().await.unwrap()["access_token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let denied = client
+        .get(format!("{base}/v1/devices"))
+        .bearer_auth(renewed)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), reqwest::StatusCode::FORBIDDEN);
+    let (scopes,): (Vec<String>,) =
+        sqlx::query_as("SELECT scopes FROM session WHERE account_id = $1 AND NOT revoked LIMIT 1")
+            .bind(account.id)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+    assert_eq!(scopes, vec!["vault:sync", "session:self"]);
+}
+
+#[tokio::test]
+async fn device_changes_appear_in_security_activity() {
+    let (address, _db, _serial) = start_server().await;
+    let base = format!("http://{address}");
+    let client = reqwest::Client::new();
+    let account = register(&client, &base).await;
+    let session = sign_in(&client, &base, &account, "Phone").await;
+    let security = elevate(&client, &base, &session.access, &["security:read"]).await;
+    let response = client
+        .get(format!("{base}/v1/security/activity"))
+        .bearer_auth(&security)
+        .send()
+        .await
+        .unwrap();
+    assert!(response.status().is_success());
+    let events = response.json::<Value>().await.unwrap()["events"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert!(
+        events
+            .iter()
+            .any(|event| event["event_type"] == "device_added")
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| event["event_type"] == "account_registered")
+    );
+}
+
+#[tokio::test]
+async fn an_existing_account_can_enable_recovery_device_approval() {
+    let (address, db, _serial) = start_server().await;
+    let base = format!("http://{address}");
+    let client = reqwest::Client::new();
+    let account = register(&client, &base).await;
+    let first = sign_in(&client, &base, &account, "First").await;
+    let security = elevate(&client, &base, &first.access, &["security:read"]).await;
+    sqlx::query("UPDATE key_slot SET auth_hash = NULL WHERE account_id = $1 AND type = 'recovery'")
+        .bind(account.id)
+        .execute(&db)
+        .await
+        .unwrap();
+
+    let refused = raw_login(&client, &base, &account, "Recovery", None, true).await;
+    assert_eq!(refused.status(), reqwest::StatusCode::FORBIDDEN);
+    let enrolled = client
+        .post(format!("{base}/v1/recovery/enroll"))
+        .bearer_auth(&security)
+        .json(&json!({
+            "auth_key": B64.encode(AUTH_KEY),
+            "recovery_auth_key": B64.encode([0x77u8; 32]),
+            "recovery_slot": {
+                "wrapped_key": B64.encode([0x11u8; 48]),
+                "nonce": B64.encode([0x22u8; 24]),
+            },
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert!(enrolled.status().is_success());
+    let accepted = raw_login(&client, &base, &account, "Recovery", None, true).await;
+    assert!(accepted.status().is_success());
+}
 
 #[tokio::test]
 async fn the_device_list_names_the_caller() {
@@ -258,10 +622,12 @@ async fn a_revoked_device_cannot_read_the_vault() {
         .as_str()
         .unwrap()
         .to_string();
+    let security = elevate(&client, &base, &kept.access, &["security:read"]).await;
 
     let revoked = client
         .delete(format!("{base}/v1/devices/{lost_id}"))
-        .bearer_auth(&kept.access)
+        .bearer_auth(&security)
+        .json(&json!({ "auth_key": B64.encode(AUTH_KEY) }))
         .send()
         .await
         .unwrap();
@@ -391,10 +757,12 @@ async fn a_revoked_device_stays_in_the_list() {
         .as_str()
         .unwrap()
         .to_string();
+    let security = elevate(&client, &base, &kept.access, &["security:read"]).await;
 
     client
         .delete(format!("{base}/v1/devices/{lost_id}"))
-        .bearer_auth(&kept.access)
+        .bearer_auth(&security)
+        .json(&json!({ "auth_key": B64.encode(AUTH_KEY) }))
         .send()
         .await
         .unwrap();
@@ -426,10 +794,12 @@ async fn another_accounts_device_cannot_be_revoked() {
         .as_str()
         .unwrap()
         .to_string();
+    let my_security = elevate(&client, &base, &my_session.access, &["security:read"]).await;
 
     let attempt = client
         .delete(format!("{base}/v1/devices/{their_id}"))
-        .bearer_auth(&my_session.access)
+        .bearer_auth(&my_security)
+        .json(&json!({ "auth_key": B64.encode(AUTH_KEY) }))
         .send()
         .await
         .unwrap();
@@ -440,7 +810,8 @@ async fn another_accounts_device_cannot_be_revoked() {
     assert_eq!(attempt.status(), 404);
     let invented = client
         .delete(format!("{base}/v1/devices/{}", Uuid::new_v4()))
-        .bearer_auth(&my_session.access)
+        .bearer_auth(&my_security)
+        .json(&json!({ "auth_key": B64.encode(AUTH_KEY) }))
         .send()
         .await
         .unwrap();
@@ -465,10 +836,12 @@ async fn signing_out_everywhere_ends_every_session() {
     let account = register(&client, &base).await;
     let one = sign_in(&client, &base, &account, "One").await;
     let two = sign_in(&client, &base, &account, "Two").await;
+    let security = elevate(&client, &base, &one.access, &["security:read"]).await;
 
     let response = client
         .post(format!("{base}/v1/auth/logout-all"))
-        .bearer_auth(&one.access)
+        .bearer_auth(&security)
+        .json(&json!({ "auth_key": B64.encode(AUTH_KEY) }))
         .send()
         .await
         .unwrap();
@@ -479,8 +852,8 @@ async fn signing_out_everywhere_ends_every_session() {
     assert!(!can_still_sync(&client, &base, &one.access).await);
     assert!(!can_still_sync(&client, &base, &two.access).await);
 
-    // But the devices are not revoked — they can sign in again with the
-    // password, which is the point of this being separate from revocation.
+    // Recovery remains possible after every device is revoked. A password
+    // alone must not silently restore device access.
     let back = sign_in(&client, &base, &account, "One").await;
     assert!(can_still_sync(&client, &base, &back.access).await);
 }
@@ -534,10 +907,11 @@ async fn deleting_the_account_removes_every_record() {
         .send()
         .await
         .unwrap();
+    let security = elevate(&client, &base, &session.access, &["security:read"]).await;
 
     let deleted = client
         .delete(format!("{base}/v1/account"))
-        .bearer_auth(&session.access)
+        .bearer_auth(&security)
         .json(&json!({ "auth_key": B64.encode(AUTH_KEY) }))
         .send()
         .await
@@ -583,13 +957,14 @@ async fn deleting_the_account_needs_the_password() {
 
     let account = register(&client, &base).await;
     let session = sign_in(&client, &base, &account, "Phone").await;
+    let security = elevate(&client, &base, &session.access, &["security:read"]).await;
 
     // A stolen access token is exactly the situation the rest of section 9.5
     // exists for. Whoever holds one must not be able to destroy the account
     // its owner is trying to save.
     let attempt = client
         .delete(format!("{base}/v1/account"))
-        .bearer_auth(&session.access)
+        .bearer_auth(&security)
         .json(&json!({ "auth_key": B64.encode([0xFFu8; 32]) }))
         .send()
         .await
@@ -746,10 +1121,12 @@ async fn revoking_ends_the_sessions_rather_than_only_blocking_them() {
         .as_str()
         .unwrap()
         .to_string();
+    let security = elevate(&client, &base, &kept.access, &["security:read"]).await;
 
     let response = client
         .delete(format!("{base}/v1/devices/{lost_id}"))
-        .bearer_auth(&kept.access)
+        .bearer_auth(&security)
+        .json(&json!({ "auth_key": B64.encode(AUTH_KEY) }))
         .send()
         .await
         .unwrap();
@@ -803,10 +1180,11 @@ async fn retrieving_a_share_is_rate_limited() {
 
     let account = register(&client, &base).await;
     let session = sign_in(&client, &base, &account, "Phone").await;
+    let sharing = elevate(&client, &base, &session.access, &["share:write"]).await;
 
     let created = client
         .post(format!("{base}/v1/shares"))
-        .bearer_auth(&session.access)
+        .bearer_auth(&sharing)
         .json(&json!({
             "payload": "ciphertext-the-server-cannot-read",
             "expires_in_seconds": 3600,
@@ -827,7 +1205,10 @@ async fn retrieving_a_share_is_rate_limited() {
         .send()
         .await
         .unwrap();
-    assert!(first.status().is_success(), "a recipient must be able to read it");
+    assert!(
+        first.status().is_success(),
+        "a recipient must be able to read it"
+    );
 
     // Then past the limit. Without one this endpoint was an unauthenticated,
     // database-touching call anyone could run as fast as they liked.
@@ -855,10 +1236,11 @@ async fn a_one_time_share_can_only_be_read_once() {
 
     let account = register(&client, &base).await;
     let session = sign_in(&client, &base, &account, "Phone").await;
+    let sharing = elevate(&client, &base, &session.access, &["share:write"]).await;
 
     let created = client
         .post(format!("{base}/v1/shares"))
-        .bearer_auth(&session.access)
+        .bearer_auth(&sharing)
         .json(&json!({
             "payload": "ciphertext",
             "expires_in_seconds": 3600,
@@ -872,13 +1254,17 @@ async fn a_one_time_share_can_only_be_read_once() {
         .unwrap()
         .to_string();
 
-    let first = client.get(format!("{base}/v1/shares/{id}")).send().await.unwrap();
+    let first = client
+        .get(format!("{base}/v1/shares/{id}"))
+        .send()
+        .await
+        .unwrap();
     assert!(first.status().is_success());
 
-    let second = client.get(format!("{base}/v1/shares/{id}")).send().await.unwrap();
-    assert_eq!(
-        second.status(),
-        404,
-        "a one-time share was readable twice"
-    );
+    let second = client
+        .get(format!("{base}/v1/shares/{id}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(second.status(), 404, "a one-time share was readable twice");
 }

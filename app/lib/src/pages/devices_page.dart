@@ -2,6 +2,9 @@ import 'package:flutter/material.dart';
 
 import '../../l10n/generated/app_localizations.dart';
 import '../rust/api/sync.dart' as rust;
+import '../services/clipboard_service.dart';
+import '../services/security_elevation.dart';
+import 'security_activity_page.dart';
 
 /// Your devices, and the ways off the account (PRD §9.5).
 ///
@@ -41,11 +44,18 @@ class _DevicesPageState extends State<DevicesPage> {
   List<rust.DeviceView>? _devices;
   Object? _error;
   bool _busy = false;
+  final _clipboard = ClipboardService(clearAfter: const Duration(minutes: 10));
 
   @override
   void initState() {
     super.initState();
-    _load();
+    WidgetsBinding.instance.addPostFrameCallback((_) => _authorizeAndLoad());
+  }
+
+  @override
+  void dispose() {
+    _clipboard.dispose();
+    super.dispose();
   }
 
   Future<void> _load() async {
@@ -53,6 +63,19 @@ class _DevicesPageState extends State<DevicesPage> {
     try {
       final devices = await rust.listDevices();
       if (mounted) setState(() => _devices = devices);
+    } catch (error) {
+      if (mounted) setState(() => _error = error);
+    }
+  }
+
+  Future<void> _authorizeAndLoad() async {
+    try {
+      final authorized = await authorizeScope(
+        context,
+        scope: securityReadScope,
+        action: AppLocalizations.of(context).yourDevices,
+      );
+      if (authorized && mounted) await _load();
     } catch (error) {
       if (mounted) setState(() => _error = error);
     }
@@ -122,14 +145,24 @@ class _DevicesPageState extends State<DevicesPage> {
     );
     if (confirmed != true || !mounted) return;
 
-    await rust.revokeDevice(deviceId: device.id);
+    final password = await _requestPassword(
+      device.current
+          ? AppLocalizations.of(context).signOut
+          : AppLocalizations.of(context).removeThisDevice,
+    );
+    if (password == null || !mounted) return;
+
+    await rust.revokeDevice(
+      deviceId: device.id,
+      password: password,
+      current: device.current,
+    );
     if (!mounted) return;
 
     if (device.current) {
       // The tokens still on this device now name a revoked session. Clearing
       // them locally keeps the app honest about its own state instead of
       // failing every cycle for the next fifteen minutes.
-      await rust.signOut();
       if (mounted) widget.onSignedOut();
       return;
     }
@@ -158,9 +191,104 @@ class _DevicesPageState extends State<DevicesPage> {
     );
     if (confirmed != true || !mounted) return;
 
-    await rust.signOutEverywhere();
+    final password = await _requestPassword(
+      AppLocalizations.of(context).signOutEverywhere,
+    );
+    if (password == null || !mounted) return;
+
+    await rust.signOutEverywhere(password: password);
     if (mounted) widget.onSignedOut();
   });
+
+  Future<String?> _requestPassword(String action) {
+    return showDialog<String>(
+      context: context,
+      builder: (_) => _StepUpPasswordDialog(action: action),
+    );
+  }
+
+  Future<void> _createApproval() => _guard(() async {
+    final password = await _requestPassword(
+      AppLocalizations.of(context).approveNewDevice,
+    );
+    if (password == null || !mounted) return;
+    final approval = await rust.createDeviceApproval(password: password);
+    if (!mounted) return;
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) => AlertDialog(
+        icon: const Icon(Icons.phonelink_lock_outlined),
+        title: Text(AppLocalizations.of(context).deviceApprovalCode),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(AppLocalizations.of(context).deviceApprovalCodeHelp),
+            const SizedBox(height: 16),
+            SelectableText(
+              approval.token,
+              style: Theme.of(context).textTheme.titleMedium,
+            ),
+            const SizedBox(height: 8),
+            Text(
+              AppLocalizations.of(
+                context,
+              ).approvalCodeExpires(_formatTime(approval.expiresAt)),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton.icon(
+            onPressed: () async {
+              await _clipboard.copyCode(approval.token);
+              if (dialogContext.mounted) {
+                ScaffoldMessenger.of(dialogContext).showSnackBar(
+                  SnackBar(
+                    content: Text(AppLocalizations.of(dialogContext).copied),
+                  ),
+                );
+              }
+            },
+            icon: const Icon(Icons.copy_outlined),
+            label: Text(AppLocalizations.of(context).copy),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: Text(AppLocalizations.of(context).done),
+          ),
+        ],
+      ),
+    );
+  });
+
+  Future<void> _enrollRecovery() => _guard(() async {
+    final values = await showDialog<(String, String)>(
+      context: context,
+      builder: (_) => const _RecoveryEnrollmentDialog(),
+    );
+    if (values == null || !mounted) return;
+    await rust.enrollRecoveryAccess(
+      password: values.$1,
+      recoveryPhrase: values.$2,
+    );
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(AppLocalizations.of(context).recoveryAccessEnabled),
+      ),
+    );
+  });
+
+  static String _formatTime(String raw) {
+    final parsed = DateTime.tryParse(raw);
+    if (parsed == null) return raw;
+    final value = parsed.toLocal();
+    return '${value.year}-${value.month.toString().padLeft(2, '0')}-'
+        '${value.day.toString().padLeft(2, '0')} '
+        '${value.hour.toString().padLeft(2, '0')}:'
+        '${value.minute.toString().padLeft(2, '0')}';
+  }
 
   Future<void> _deleteAccount() => _guard(() async {
     final password = await showDialog<String>(
@@ -197,7 +325,7 @@ class _DevicesPageState extends State<DevicesPage> {
           IconButton(
             icon: const Icon(Icons.refresh),
             tooltip: l10n.refresh,
-            onPressed: _busy ? null : _load,
+            onPressed: _busy ? null : _authorizeAndLoad,
           ),
         ],
       ),
@@ -216,7 +344,7 @@ class _DevicesPageState extends State<DevicesPage> {
           Align(
             alignment: Alignment.centerLeft,
             child: FilledButton.tonal(
-              onPressed: _load,
+              onPressed: _authorizeAndLoad,
               child: Text(l10n.tryAgain),
             ),
           ),
@@ -239,6 +367,33 @@ class _DevicesPageState extends State<DevicesPage> {
             style: TextStyle(color: colours.onSurfaceVariant),
           ),
         ),
+        ListTile(
+          leading: const Icon(Icons.phonelink_lock_outlined),
+          title: Text(l10n.approveNewDevice),
+          subtitle: Text(l10n.approveNewDeviceDescription),
+          onTap: _busy ? null : _createApproval,
+        ),
+        ListTile(
+          leading: const Icon(Icons.key_outlined),
+          title: Text(l10n.enableRecoverySignIn),
+          subtitle: Text(l10n.enableRecoverySignInDescription),
+          onTap: _busy ? null : _enrollRecovery,
+        ),
+        ListTile(
+          leading: const Icon(Icons.manage_search_outlined),
+          title: Text(l10n.securityActivity),
+          subtitle: Text(l10n.securityActivityDescription),
+          trailing: const Icon(Icons.chevron_right),
+          onTap: _busy
+              ? null
+              : () => Navigator.push(
+                  context,
+                  MaterialPageRoute<void>(
+                    builder: (_) => const SecurityActivityPage(),
+                  ),
+                ),
+        ),
+        const Divider(height: 24),
         for (final device in devices)
           _DeviceTile(
             device: device,
@@ -264,6 +419,118 @@ class _DevicesPageState extends State<DevicesPage> {
           onTap: _busy ? null : _deleteAccount,
         ),
         const SizedBox(height: 24),
+      ],
+    );
+  }
+}
+
+class _StepUpPasswordDialog extends StatefulWidget {
+  const _StepUpPasswordDialog({required this.action});
+
+  final String action;
+
+  @override
+  State<_StepUpPasswordDialog> createState() => _StepUpPasswordDialogState();
+}
+
+class _RecoveryEnrollmentDialog extends StatefulWidget {
+  const _RecoveryEnrollmentDialog();
+
+  @override
+  State<_RecoveryEnrollmentDialog> createState() =>
+      _RecoveryEnrollmentDialogState();
+}
+
+class _RecoveryEnrollmentDialogState extends State<_RecoveryEnrollmentDialog> {
+  final _password = TextEditingController();
+  final _recovery = TextEditingController();
+
+  @override
+  void dispose() {
+    _password.dispose();
+    _recovery.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context);
+    return AlertDialog(
+      icon: const Icon(Icons.key_outlined),
+      title: Text(l10n.enableRecoverySignIn),
+      content: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(l10n.enableRecoverySignInHelp),
+            const SizedBox(height: 16),
+            TextField(
+              controller: _password,
+              obscureText: true,
+              decoration: InputDecoration(labelText: l10n.accountPassword),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _recovery,
+              obscureText: true,
+              autocorrect: false,
+              enableSuggestions: false,
+              decoration: InputDecoration(
+                labelText: l10n.recoveryPhraseRequired,
+              ),
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: Text(l10n.cancel),
+        ),
+        FilledButton(
+          onPressed: () =>
+              Navigator.pop(context, (_password.text, _recovery.text.trim())),
+          child: Text(l10n.enable),
+        ),
+      ],
+    );
+  }
+}
+
+class _StepUpPasswordDialogState extends State<_StepUpPasswordDialog> {
+  final _password = TextEditingController();
+
+  @override
+  void dispose() {
+    _password.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context);
+    return AlertDialog(
+      icon: const Icon(Icons.password_outlined),
+      title: Text(widget.action),
+      content: TextField(
+        controller: _password,
+        autofocus: true,
+        obscureText: true,
+        decoration: InputDecoration(
+          labelText: l10n.accountPassword,
+          helperText: l10n.passwordRequiredForSecurityAction,
+        ),
+        onSubmitted: (value) => Navigator.pop(context, value),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: Text(l10n.cancel),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.pop(context, _password.text),
+          child: Text(l10n.continueLabel),
+        ),
       ],
     );
   }

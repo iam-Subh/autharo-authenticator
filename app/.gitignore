@@ -43,3 +43,6 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+
+# Per-project Firebase Android configuration. Install it during deployment.
+/android/app/google-services.json

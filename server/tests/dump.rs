@@ -75,6 +75,8 @@ async fn start_server() -> (SocketAddr, sqlx::PgPool) {
         db: db.clone(),
         server_key: b"test-server-key".to_vec(),
         fake_auth_hash: crypto::hash_auth_key(&[0u8; 32]).unwrap(),
+        passkeys: None,
+        push: None,
     });
 
     // Port 0: the operating system picks a free one, so a test run cannot
@@ -186,6 +188,7 @@ async fn the_database_dump_holds_no_plaintext_secret() {
         .json(&json!({
             "email": email,
             "auth_key": crypto::b64_encode(&auth_key),
+            "recovery_auth_key": crypto::b64_encode(&[0x77u8; 32]),
             "kdf_params": {"m": 65536, "t": 3, "p": 4},
             "client_salt": crypto::b64_encode(&[9u8; 16]),
             "password_slot": {
@@ -360,6 +363,7 @@ async fn prelogin_does_not_reveal_whether_an_account_exists() {
         .json(&json!({
             "email": real_email,
             "auth_key": crypto::b64_encode(&[1u8; 32]),
+            "recovery_auth_key": crypto::b64_encode(&[0x77u8; 32]),
             "kdf_params": {"m": 65536, "t": 3, "p": 4},
             "client_salt": crypto::b64_encode(&[2u8; 16]),
             "password_slot": slot,

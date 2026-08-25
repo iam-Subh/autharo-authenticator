@@ -127,8 +127,8 @@ fn authenticated_connection() -> Result<(String, SecretString)> {
     super::vault::with_meta_pub(|meta| {
         let base =
             super::sync::server_url(meta)?.ok_or_else(|| anyhow!("Choose a sync server first."))?;
-        let token = super::sync::access_token(meta)?
-            .ok_or_else(|| anyhow!("Sign in before you create a share."))?;
+        let token = super::sync::capability_token("share:write")?
+            .ok_or_else(|| anyhow!("Enter the account password to authorize sharing."))?;
         Ok((base, token))
     })
 }
@@ -142,16 +142,13 @@ fn send_authenticated(
     let first = client
         .send(request.clone())
         .map_err(|error| anyhow!("{error}"))?;
-    if first.status != 401 {
-        return Ok(first);
+    if first.status == 401 || first.status == 403 {
+        super::sync::clear_capabilities();
+        return Err(anyhow!(
+            "The temporary sharing authorization expired. Enter the password again."
+        ));
     }
-    if !super::sync::try_refresh()? {
-        return Err(anyhow!("This device has been signed out. Sign in again."));
-    }
-    let renewed = super::vault::with_meta_pub(super::sync::access_token)?
-        .ok_or_else(|| anyhow!("This device has been signed out."))?;
-    request.bearer = Some(renewed.expose().to_string());
-    client.send(request).map_err(|error| anyhow!("{error}"))
+    Ok(first)
 }
 
 fn parse_success<T: for<'de> Deserialize<'de>>(status: u16, body: &[u8]) -> Result<T> {

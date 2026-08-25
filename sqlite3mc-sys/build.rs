@@ -54,8 +54,18 @@ fn main() {
         .define("SQLITE_ENABLE_COLUMN_METADATA", "1")
         // The cipher configuration travels as URI parameters in some paths.
         .define("SQLITE_USE_URI", "1")
+        // The vault always selects ChaCha20 before it supplies the key. Do not
+        // compile unused database ciphers into every Android native library.
+        .define("WXSQLITE3_HAVE_CIPHER_AES_128_CBC", "0")
+        .define("WXSQLITE3_HAVE_CIPHER_AES_256_CBC", "0")
+        .define("WXSQLITE3_HAVE_CIPHER_CHACHA20", "1")
+        .define("WXSQLITE3_HAVE_CIPHER_SQLCIPHER", "0")
+        .define("WXSQLITE3_HAVE_CIPHER_RC4", "0")
+        .define("WXSQLITE3_HAVE_CIPHER_ASCON128", "0")
+        .define("WXSQLITE3_HAVE_CIPHER_AEGIS", "0")
         // Not wanted, and each one is attack surface in a file format parser.
         .define("SQLITE_OMIT_DEPRECATED", "1")
+        .define("SQLITE_OMIT_LOAD_EXTENSION", "1")
         .define("SQLITE_DQS", "0");
 
     // Android's Bionic has no `localtime_r` guard problem, but it does need

@@ -42,8 +42,11 @@ class FakeClock {
     final target = _now + elapsed;
 
     while (true) {
-      final due = _pending.where((entry) => !entry.cancelled && entry.at <= target).toList()
-        ..sort((a, b) => a.at.compareTo(b.at));
+      final due =
+          _pending
+              .where((entry) => !entry.cancelled && entry.at <= target)
+              .toList()
+            ..sort((a, b) => a.at.compareTo(b.at));
       if (due.isEmpty) break;
 
       final next = due.first;
@@ -117,6 +120,12 @@ void main() {
       // likely to forgive it being stale.
       scheduler.start();
       scheduler.onUnlocked();
+      expect(runner.runs, 2);
+    });
+
+    test('a push signal syncs', () {
+      scheduler.start();
+      scheduler.onPushSignal();
       expect(runner.runs, 2);
     });
 

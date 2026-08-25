@@ -6,6 +6,13 @@ plugins {
     id("dev.flutter.flutter-gradle-plugin")
 }
 
+// Firebase is optional until the production Android application is registered.
+// A developer can build and use the local application without Firebase
+// credentials. Adding this file activates the generated Firebase resources.
+if (file("google-services.json").exists()) {
+    apply(plugin = "com.google.gms.google-services")
+}
+
 val releasePropertiesFile = rootProject.file("key.properties")
 val releaseProperties = Properties().apply {
     if (releasePropertiesFile.exists()) {
@@ -68,10 +75,22 @@ android {
         release {
             // Never sign a production package with the shared debug key.
             signingConfig = signingConfigs.findByName("release")
+            // Remove Android and plugin code that the release application does
+            // not call. Resource shrinking requires code shrinking.
+            isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
             )
+        }
+    }
+
+    packaging {
+        jniLibs {
+            // Keep native libraries inside the installed APK. Android can map
+            // them directly and does not need a second extracted copy.
+            useLegacyPackaging = false
         }
     }
 }
@@ -87,6 +106,7 @@ flutter {
 }
 
 dependencies {
+    testImplementation("junit:junit:4.13.2")
     // FR-32. The vault's wrapping key can be bound to per-use authentication,
     // and a key bound that way can only be used through a BiometricPrompt
     // carrying the Cipher as a CryptoObject. `local_auth` pulls this in

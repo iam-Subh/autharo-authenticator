@@ -178,6 +178,31 @@ Future<RecoveryPhraseView> rotateRecoveryPhrase({required String password}) =>
 /// The email address of the sync account, or `None` on a local-only device.
 String? accountEmail() => RustLib.instance.api.crateApiVaultAccountEmail();
 
+/// Wraps the unlocked vault key with a WebAuthn PRF result.
+///
+/// The PRF result enters Rust. The raw vault key does not leave Rust.
+Future<PasskeyWrappedKeyView> createPasskeyWrappedKey({
+  required List<int> prfResult,
+}) => RustLib.instance.api.crateApiVaultCreatePasskeyWrappedKey(
+  prfResult: prfResult,
+);
+
+/// Opens the vault with a verified passkey response and its PRF result.
+///
+/// The server verifies the WebAuthn response before it returns the encrypted
+/// slot. This function only unwraps that slot. The raw vault key stays in Rust.
+Future<void> unlockWithPasskey({
+  required String vaultPath,
+  required List<int> prfResult,
+  required List<int> wrappedKey,
+  required List<int> nonce,
+}) => RustLib.instance.api.crateApiVaultUnlockWithPasskey(
+  vaultPath: vaultPath,
+  prfResult: prfResult,
+  wrappedKey: wrappedKey,
+  nonce: nonce,
+);
+
 /// Opens the vault with the account password (section 9.2.1).
 Future<void> unlockWithPassword({
   required String vaultPath,
@@ -1024,6 +1049,25 @@ class MigrationScanView {
           refused == other.refused &&
           alreadySeen == other.alreadySeen &&
           differentExport == other.differentExport;
+}
+
+/// The encrypted vault-key slot stored with one passkey credential.
+class PasskeyWrappedKeyView {
+  final Uint8List wrappedKey;
+  final Uint8List nonce;
+
+  const PasskeyWrappedKeyView({required this.wrappedKey, required this.nonce});
+
+  @override
+  int get hashCode => wrappedKey.hashCode ^ nonce.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is PasskeyWrappedKeyView &&
+          runtimeType == other.runtimeType &&
+          wrappedKey == other.wrappedKey &&
+          nonce == other.nonce;
 }
 
 /// The recovery phrase, returned once at sign-up and never stored (FR-55).

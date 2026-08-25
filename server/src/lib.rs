@@ -20,9 +20,12 @@
 //! something about the test rather than about the server.
 
 pub mod account;
+pub mod activity;
 pub mod auth;
 pub mod crypto;
 pub mod error;
+pub mod passkey;
+pub mod push;
 pub mod quota;
 pub mod ratelimit;
 pub mod share;
@@ -44,6 +47,8 @@ pub struct AppState {
     pub server_key: Vec<u8>,
     /// A valid Argon2 hash used to equalize unknown-account login work.
     pub fake_auth_hash: String,
+    pub passkeys: Option<passkey::PasskeyService>,
+    pub push: Option<Arc<dyn push::PushDispatcher>>,
 }
 
 pub type SharedState = Arc<AppState>;
@@ -54,13 +59,40 @@ pub fn router(state: SharedState) -> Router {
         .route("/v1/auth/prelogin", post(auth::prelogin))
         .route("/v1/auth/login", post(auth::login))
         .route("/v1/auth/refresh", post(auth::refresh))
+        .route("/v1/auth/elevate", post(auth::elevate))
+        .route(
+            "/v1/passkeys/register/start",
+            post(passkey::start_registration),
+        )
+        .route(
+            "/v1/passkeys/register/finish",
+            post(passkey::finish_registration),
+        )
+        .route(
+            "/v1/passkeys/authenticate/start",
+            post(passkey::start_authentication),
+        )
+        .route(
+            "/v1/passkeys/authenticate/finish",
+            post(passkey::finish_authentication),
+        )
         // Section 9.5. Grouped here rather than under /v1/account because a
         // user thinks of signing out as an authentication action, and the
         // route table is read by people as well as by clients.
         .route("/v1/auth/logout", post(account::sign_out))
         .route("/v1/auth/logout-all", post(account::sign_out_everywhere))
         .route("/v1/devices", get(account::list_devices))
+        .route(
+            "/v1/devices/push-token",
+            axum::routing::put(account::set_push_token).delete(account::clear_push_token),
+        )
         .route("/v1/devices/{id}", delete(account::revoke_device))
+        .route(
+            "/v1/device-approvals",
+            post(account::create_device_approval),
+        )
+        .route("/v1/recovery/enroll", post(account::enroll_recovery_access))
+        .route("/v1/security/activity", get(activity::list))
         .route("/v1/account", delete(account::delete_account))
         .route("/v1/vault/records", post(vault::push_records))
         .route("/v1/vault/changes", get(vault::pull_changes))

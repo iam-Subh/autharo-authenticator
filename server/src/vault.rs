@@ -22,6 +22,7 @@ use crate::SharedState;
 use crate::auth;
 use crate::crypto;
 use crate::error::{ApiError, ApiResult};
+use crate::push;
 use crate::quota;
 
 #[derive(Debug, Deserialize)]
@@ -64,7 +65,8 @@ pub async fn push_records(
     headers: HeaderMap,
     Json(request): Json<PushRequest>,
 ) -> ApiResult<Json<PushResponse>> {
-    let account_id = authenticate(&state, &headers).await?;
+    let session = authenticate(&state, &headers).await?;
+    let account_id = session.account_id;
     quota::check_batch_size(request.records.len())?;
 
     let mut identifiers = HashSet::with_capacity(request.records.len());
@@ -197,6 +199,10 @@ pub async fn push_records(
 
     transaction.commit().await?;
 
+    if !accepted.is_empty() {
+        push::notify_vault_changed(state.clone(), account_id, session.device_id).await;
+    }
+
     Ok(Json(PushResponse {
         accepted,
         conflicts,
@@ -241,7 +247,7 @@ pub async fn pull_changes(
     headers: HeaderMap,
     Query(query): Query<ChangesQuery>,
 ) -> ApiResult<Json<ChangesResponse>> {
-    let account_id = authenticate(&state, &headers).await?;
+    let account_id = authenticate(&state, &headers).await?.account_id;
     let limit = query.limit.clamp(1, quota::MAX_BATCH as i64);
 
     // Section 10.4's prune watermark. A cursor at or below it means the client
@@ -306,14 +312,14 @@ pub async fn pull_changes(
     }))
 }
 
-async fn authenticate(state: &SharedState, headers: &HeaderMap) -> ApiResult<Uuid> {
+async fn authenticate(state: &SharedState, headers: &HeaderMap) -> ApiResult<auth::Session> {
     let token = headers
         .get("authorization")
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "))
         .ok_or(ApiError::Unauthorized)?;
 
-    auth::account_for_token(&state.db, token).await
+    auth::session_for_token_with_scope(&state.db, token, auth::SCOPE_VAULT_SYNC).await
 }
 
 fn decode(value: &str) -> ApiResult<Vec<u8>> {

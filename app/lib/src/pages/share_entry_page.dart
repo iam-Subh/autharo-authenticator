@@ -4,6 +4,7 @@ import 'package:qr_flutter/qr_flutter.dart';
 import '../../l10n/generated/app_localizations.dart';
 import '../rust/api/share.dart' as share;
 import '../services/clipboard_service.dart';
+import '../services/security_elevation.dart';
 
 class ShareEntryPage extends StatefulWidget {
   const ShareEntryPage({super.key, required this.entryId, required this.title});
@@ -35,6 +36,12 @@ class _ShareEntryPageState extends State<ShareEntryPage> {
       _error = null;
     });
     try {
+      final authorized = await authorizeScope(
+        context,
+        scope: shareWriteScope,
+        action: AppLocalizations.of(context).shareAccount,
+      );
+      if (!authorized || !mounted) return;
       final created = await share.createEntryShare(
         id: widget.entryId,
         expiresInSeconds: _expirySeconds,

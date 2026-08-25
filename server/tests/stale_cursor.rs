@@ -59,6 +59,8 @@ async fn start_server() -> (SocketAddr, sqlx::PgPool) {
         db: db.clone(),
         server_key: b"test-server-key".to_vec(),
         fake_auth_hash: authserver::crypto::hash_auth_key(&[0u8; 32]).unwrap(),
+        passkeys: None,
+        push: None,
     });
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -95,6 +97,7 @@ async fn sign_up(client: &reqwest::Client, base: &str) -> (Uuid, String) {
         .json(&json!({
             "email": email,
             "auth_key": auth_key,
+            "recovery_auth_key": B64.encode([0x77u8; 32]),
             "kdf_params": { "m": 65536, "t": 3, "p": 4 },
             "client_salt": B64.encode([0x44u8; 16]),
             "password_slot": slot,
@@ -274,6 +277,7 @@ async fn a_refresh_token_renews_the_session() {
         .json(&json!({
             "email": email,
             "auth_key": auth_key,
+            "recovery_auth_key": B64.encode([0x77u8; 32]),
             "kdf_params": { "m": 65536, "t": 3, "p": 4 },
             "client_salt": B64.encode([0x44u8; 16]),
             "password_slot": slot,
@@ -376,6 +380,7 @@ async fn an_ordinary_conflict_is_still_409() {
     let body = json!({
         "email": email,
         "auth_key": B64.encode([0x33u8; 32]),
+        "recovery_auth_key": B64.encode([0x77u8; 32]),
         "kdf_params": { "m": 65536, "t": 3, "p": 4 },
         "client_salt": B64.encode([0x44u8; 16]),
         "password_slot": slot,

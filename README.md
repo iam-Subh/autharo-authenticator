@@ -10,10 +10,10 @@ sequence in section 18: each stage is finished before the next starts.
 | S1 — Core | TOTP, HOTP, Base32, the `otpauth://` parser, SQLite storage | **Done.** RFC 6238 and RFC 4226 vectors pass for SHA-1, SHA-256, and SHA-512 |
 | S2 — First platform | Android. Flutter UI, QR scan, manual entry, list, copy, application lock | **Done**, verified on a physical device |
 | S3 — Crypto | Vault key, key slots, Argon2id, XChaCha20-Poly1305, recovery key | **Done.** Device slot, record encryption, page encryption, password slot, recovery key |
-| S4 — Backend | API, PostgreSQL schema, key slots, quotas, enumeration resistance | **In progress.** Exit criterion met; sign-up UI built. No sync engine — that is S5 |
-| S5 — Sync | Sync engine, outbox, HLC, conflict resolution, prune watermark | **In progress.** Cycle, HLC with a drift bound, deferred HOTP reconcile, full re-sync, and a seeded property harness. Not yet wired into the app |
-| S6 — Other platforms | Remaining platforms, screen capture, tray and menu bar | Not started |
-| S7 — Passkeys | Android Credential Manager bridge, ceremony schema, domain association, PRF slot, fallback | **In progress.** Native bridge and schema are present; production domain and WebAuthn verification remain |
+| S4 — Backend | API, PostgreSQL schema, key slots, quotas, enumeration resistance | **Done for the Android target.** Account, session, device approval, activity, capability, and destructive-operation APIs are implemented |
+| S5 — Sync | Sync engine, outbox, HLC, conflict resolution, prune watermark, FCM change signals | **Android infrastructure done.** Live push delivery waits for the Firebase project files and server credentials |
+| S6 — Other platforms | Remaining platforms, screen capture, tray and menu bar | **Excluded from the current Android security scope** |
+| S7 — Passkeys | Android Credential Manager bridge, WebAuthn verification, PRF slot, fallback | **Infrastructure done.** Production activation waits for the final domain, package ID, signing fingerprint, and Digital Asset Links file |
 
 ## The lock releases the key, it does not hide the screen
 
@@ -354,11 +354,29 @@ metadata rows are deleted with SQLite `secure_delete` enabled. The next online
 operation also forces refresh-token rotation. The server then revokes the old
 pair, including copies recovered from an old journal or storage block.
 
+Persistent sessions have only `vault:sync` and `session:self`. They cannot
+read the security activity log, manage devices, or create a share. The client
+calls `POST /v1/auth/elevate` with the account password for those operations.
+The server returns one non-refreshable capability token with an exact scope:
+`security:read` or `share:write`. A capability token expires after five
+minutes. It is bound to the parent session and device. Revocation of either
+also revokes the capability. Android stores capability tokens in Rust memory
+only and clears them on lock, sign-out, device revocation, and expiry. A future
+password-change operation must use the same clear hook. Refresh cannot add a
+scope.
+
+New devices require approval from an existing device or a verified recovery
+phrase. A password alone does not approve a new device after the first device
+exists. The security activity log records device additions, approvals,
+revocations, recovery enrollment, refresh-token replay, and session
+termination.
+
 | Route | Does |
 |---|---|
 | `GET /v1/devices` | Lists every device, revoked ones included |
 | `DELETE /v1/devices/{id}` | Revokes one and ends its sessions in the same request |
 | `POST /v1/auth/logout` | Ends the calling session |
+| `POST /v1/auth/elevate` | Issues a five-minute capability for one protected scope |
 | `POST /v1/auth/logout-all` | Ends every session on the account |
 | `DELETE /v1/account` | Deletes the account and everything under it |
 
@@ -404,6 +422,13 @@ Migrations are numbered from `0001` and applied by sqlx at startup, embedded at
 compile time so a deployment cannot run against a schema it was not built for.
 `0002` adds the session table as its own step rather than an edit to `0001` —
 S7 will alter `key_slot` the same way.
+
+Apply new production migrations in order. `0007` adds device approval and the
+security activity log. `0008` removes elevated scopes from old sessions and
+adds capability sessions. `0009` adds verified passkey credentials. Existing
+accounts must enroll recovery access before recovery can approve a new device.
+Complete enrollment from an already approved device before you revoke that
+device.
 
 ### The exit criterion, and the test that nearly did not work
 
@@ -740,22 +765,59 @@ authentication cancellation, and Activity destruction.
 The old `wrap` and `unwrap` platform-channel methods no longer exist. The
 channel accepts only `wrapHandle` and `unwrapToHandle`.
 
-## Known gaps, deliberately
+## Android integrity policy
 
-- **No certificate pinning**, and the sync token has no scope limit. Both are
-  open from the security audit; see the S9 hardening list.
+The application offers Ignore, Warn, and Block policies. Warn is the default.
+The local detector reports test signing keys and known root indicators as
+separate findings. It reports unsupported checks as not evaluated. It never
+reports that a device is safe. Root detection can produce false positive and
+false negative results. The user can keep the warning policy or choose another
+policy. Play Integrity is not enabled. It requires the final Google Play
+application identity, request binding, and server-side verdict verification.
+
+## Android push synchronization
+
+Firebase Cloud Messaging (FCM) sends a generic vault-change signal. The push
+payload contains no account name, issuer, one-time code, vault record, or key.
+The Android client starts the normal authenticated sync cycle when it receives
+the supported signal. The vault remains locked until the user authenticates.
+
+The server binds each Firebase installation token to the current device and
+base session. Sign-out and device revocation remove that route. Temporary FCM
+errors do not remove a valid token. An FCM `UNREGISTERED` result removes it.
+
+The application builds without Firebase configuration. Push stays disabled in
+that build. See [Firebase push setup](docs/firebase-push.md) for activation.
+
+## Production transport security
+
+The Rust HTTPS client keeps normal certificate-chain, hostname, and expiry
+validation. Release builds also require two SHA-256 Subject Public Key
+Information (SPKI) pins for the configured production hostname. The two pins
+support certificate-key rotation. Debug builds can use an unpinned local
+server. An Android release build fails if this configuration is missing.
+
+See [Production security configuration](docs/production-security.md) for pin
+generation and rotation steps.
+
+## Known gaps and excluded work
 
 - **No trademark logo pack.** Every entry gets a colour and a letter derived
   from its issuer. The user can enable bundled service symbols or set an emoji.
   The application performs no online icon lookup. See `EntryAvatar`.
 
-- **Passkeys (FR-48 to FR-55) still need a production domain.** The Android
-  Credential Manager bridge, ceremony table, and `assetlinks.json` template
-  exist. Server verification and PRF vault-key wrapping stay disabled until
-  the relying-party domain and release signing certificate are final.
+- **Passkey production activation needs a production identity.** The server
+  verifies WebAuthn challenges, origin, relying-party ID, signatures,
+  counters, expiry, and replay. The Rust client wraps the vault key with the
+  PRF result. Password or recovery remains available when a provider omits the
+  PRF result. The UI stays disabled until the final domain, package ID,
+  signing fingerprint, and Digital Asset Links file exist.
 
-- **No push signalling (§10.5).** A device learns about a change on the next
-  scheduled cycle rather than immediately. Needs a Firebase project.
+- **Windows, macOS, and Linux secure storage are outside this scope.** This
+  work does not change their secret handling.
+
+- **Excluded product work:** Wear OS, watchOS, self-host installation
+  packages, and the backup command-line tool.
 
 ## Local workarounds
 
@@ -810,9 +872,10 @@ Costs build time and nothing else. See `app/android/gradle.properties`.
   wrapping key, and the wrapped vault key becomes permanently unopenable. That
   is inherent to a local-only vault, and it is why section 9.2.4 warns that a
   synced account can be restored and a local-only one cannot.
-- `flutter build apk` alone produces a universal APK that will exceed NFR-04's
-  40 MB. Use `--split-per-abi`, or `flutter build appbundle` for Play. A
-  `splits { abi { ... } }` block conflicts with Flutter's own `abiFilters`.
+- A debug or universal APK is not a release-size result. Release builds use R8,
+  resource shrinking, size-optimized Rust linking, and direct native-library
+  mapping. Use `--split-per-abi` for direct distribution. Use an Android App
+  Bundle for Play. See [Android package size](docs/android-package-size.md).
 - **`FLAG_SECURE` makes `adb screencap` return the app's frames blank.** That
   is section 9.4 working, not a hang — SurfaceFlinger reports every layer of
   the activity as `(Secure)`. Store screenshots need the flag temporarily

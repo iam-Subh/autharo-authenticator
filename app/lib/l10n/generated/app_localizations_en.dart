@@ -1810,4 +1810,174 @@ class AppLocalizationsEn extends AppLocalizations {
   @override
   String get automaticBackupPassphraseMissing =>
       'Automatic backup has no passphrase. Set it up again.';
+
+  @override
+  String get approveNewDevice => 'Approve a new device';
+
+  @override
+  String get approveNewDeviceDescription =>
+      'Create a single-use code that expires in 10 minutes. A new code replaces the old code.';
+
+  @override
+  String get deviceApprovalCode => 'Device approval code';
+
+  @override
+  String get deviceApprovalCodeHelp =>
+      'Enter this code on the new device. The code works once.';
+
+  @override
+  String approvalCodeExpires(String time) {
+    return 'Expires at $time';
+  }
+
+  @override
+  String get copy => 'Copy';
+
+  @override
+  String get copied => 'Copied';
+
+  @override
+  String get continueLabel => 'Continue';
+
+  @override
+  String get passwordRequiredForSecurityAction =>
+      'Enter the account password to permit this security action.';
+
+  @override
+  String get passwordRequiredForProtectedAction =>
+      'Enter the account password. Authorization remains active for five minutes.';
+
+  @override
+  String get deviceApprovalCodeOptional => 'Device approval code (optional)';
+
+  @override
+  String get deviceApprovalSignInHelp =>
+      'An existing device creates this code. The first device does not need one.';
+
+  @override
+  String get securityActivity => 'Security activity';
+
+  @override
+  String get securityActivityDescription =>
+      'Review device and session changes on this account.';
+
+  @override
+  String get noSecurityActivity => 'No security activity is available.';
+
+  @override
+  String get securityDeviceAdded => 'Device added';
+
+  @override
+  String get securityDeviceRemoved => 'Device removed';
+
+  @override
+  String get securityApprovalCreated => 'Device approval created';
+
+  @override
+  String get securityDeviceSignedOut => 'Device signed out';
+
+  @override
+  String get securityAllDevicesSignedOut => 'All devices signed out';
+
+  @override
+  String get securityTokenReuseDetected => 'Session token reuse detected';
+
+  @override
+  String get rootDetectedTitle => 'Root access detected';
+
+  @override
+  String get rootWarningDescription =>
+      'A rooted device can let other software read authenticator data. Continue only if you control this device.';
+
+  @override
+  String get rootBlockedDescription =>
+      'The current policy blocks vault access on a rooted device.';
+
+  @override
+  String get rootDetectionLimit =>
+      'Root detection uses device indicators. It can report a modified system incorrectly, and advanced root tools can bypass it.';
+
+  @override
+  String get rootCheckNotEvaluated =>
+      'The device modification check was not evaluated. This does not mean the device is safe.';
+
+  @override
+  String get changeRootPolicyToWarn => 'Change policy to Warn';
+
+  @override
+  String get ignoreRootWarning => 'Ignore this warning';
+
+  @override
+  String get rootPolicy => 'Rooted-device policy';
+
+  @override
+  String get rootPolicyIgnoreDescription => 'Do not warn or block.';
+
+  @override
+  String get rootPolicyWarnDescription =>
+      'Show a warning before the vault opens.';
+
+  @override
+  String get rootPolicyBlockDescription =>
+      'Block the vault until the policy changes.';
+
+  @override
+  String get ignore => 'Ignore';
+
+  @override
+  String get warn => 'Warn';
+
+  @override
+  String get block => 'Block';
+
+  @override
+  String get recoveryPhraseRequired => 'Recovery phrase';
+
+  @override
+  String get recoveryPhraseOptional => 'Recovery phrase (optional)';
+
+  @override
+  String get recoveryPhraseSyncRegistrationHelp =>
+      'Enter the 24 words to enable account recovery when no approved device is available.';
+
+  @override
+  String get recoveryPhraseSignInHelp =>
+      'Use this only when no existing device can create an approval code.';
+
+  @override
+  String get enterRecoveryPhraseForSync =>
+      'Enter the 24-word recovery phrase for this account.';
+
+  @override
+  String get enableRecoverySignIn => 'Enable recovery sign-in';
+
+  @override
+  String get enableRecoverySignInDescription =>
+      'Permit the recovery phrase when no approved device is available.';
+
+  @override
+  String get enableRecoverySignInHelp =>
+      'This updates accounts created by an older app. The app verifies the phrase locally. The phrase does not reach the server.';
+
+  @override
+  String get recoveryAccessEnabled => 'Recovery sign-in is enabled.';
+
+  @override
+  String get enable => 'Enable';
+
+  @override
+  String get securityRecoveryEnabled => 'Recovery sign-in enabled';
+
+  @override
+  String get rootIndicatorTestKeys =>
+      'The system image uses test signing keys.';
+
+  @override
+  String get rootIndicatorRootFiles => 'A root-management file is present.';
+
+  @override
+  String get rootIndicatorUnknown => 'The device reported a root indicator.';
+
+  @override
+  String get securityAccountRegistered => 'Sync account created';
 }

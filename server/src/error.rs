@@ -23,6 +23,21 @@ pub enum ApiError {
     #[error("authentication is required")]
     Unauthorized,
 
+    #[error("an existing device must approve this sign-in")]
+    DeviceApprovalRequired,
+
+    #[error("this session does not permit that action")]
+    InsufficientScope,
+    #[error("enter the account password to authorize this action")]
+    ElevationRequired,
+    #[error("the requested permission is not available")]
+    InvalidScope,
+    #[error("the temporary authorization has expired")]
+    CapabilityExpired,
+
+    #[error("{message}")]
+    FeatureUnavailable { message: String },
+
     #[error("{message}")]
     Conflict { message: String },
 
@@ -72,6 +87,14 @@ impl ApiError {
             Self::BadRequest { .. } => (StatusCode::BAD_REQUEST, "bad_request"),
             Self::InvalidCredentials => (StatusCode::UNAUTHORIZED, "invalid_credentials"),
             Self::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized"),
+            Self::DeviceApprovalRequired => (StatusCode::FORBIDDEN, "device_approval_required"),
+            Self::InsufficientScope => (StatusCode::FORBIDDEN, "insufficient_scope"),
+            Self::ElevationRequired => (StatusCode::FORBIDDEN, "elevation_required"),
+            Self::InvalidScope => (StatusCode::BAD_REQUEST, "invalid_scope"),
+            Self::CapabilityExpired => (StatusCode::UNAUTHORIZED, "capability_expired"),
+            Self::FeatureUnavailable { .. } => {
+                (StatusCode::SERVICE_UNAVAILABLE, "feature_unavailable")
+            }
             Self::Conflict { .. } => (StatusCode::CONFLICT, "conflict"),
             Self::CursorTooOld { .. } => (StatusCode::GONE, "cursor_too_old"),
             Self::RateLimited { .. } => (StatusCode::TOO_MANY_REQUESTS, "rate_limited"),

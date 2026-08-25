@@ -33,3 +33,21 @@ server/target/
 # Import fixtures fetched by scripts/fetch_import_fixtures.sh. Not committed:
 # they come from a GPL project and are downloadable on demand.
 .fixtures/
+
+# Firebase Cloud Messaging credentials.
+#
+# `google-services.json` ships inside the APK and is not a secret in the way a
+# server key is, but it names the project and does not belong in a public
+# repository. The service-account JSON that `gcp_auth` reads through
+# GOOGLE_APPLICATION_CREDENTIALS is a full send credential for the project: a
+# copy of it lets anyone push notifications to every device on the account.
+#
+# Listed before either file exists, because the failure mode is a single
+# `git add -A` on the day they arrive.
+google-services.json
+**/google-services.json
+GoogleService-Info.plist
+**/GoogleService-Info.plist
+*service-account*.json
+*serviceaccount*.json
+firebase-adminsdk-*.json

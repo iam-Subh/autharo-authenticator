@@ -23,6 +23,8 @@ use authcore::secret::SecretString;
 use authcore::session::{self, SessionClient, SessionError};
 use authcore::store::MetaStore;
 use authcore::time_offset::{self, Measurement};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use crate::http::ReqwestClient;
 #[cfg(any(target_os = "android", feature = "jni-host-check"))]
@@ -48,6 +50,19 @@ const ANDROID_TOKEN_STORE_V1_ROTATE: &[u8] = b"android_keystore_v1_rotate_legacy
 /// record that it did.
 const META_LAST_SUCCESS: &str = "sync.last_success_ms";
 const META_LAST_ERROR: &str = "sync.last_error";
+const SCOPE_SECURITY_READ: &str = "security:read";
+const SCOPE_SHARE_WRITE: &str = "share:write";
+const CAPABILITY_LIFETIME: Duration = Duration::from_secs(5 * 60);
+
+struct CachedCapability {
+    token: SecretString,
+    scopes: Vec<String>,
+    expires_at: Instant,
+}
+
+/// Elevated access is deliberately process-only. It is not encoded into
+/// `meta.db`, the Android token file, or Dart state.
+static CAPABILITY: Mutex<Option<CachedCapability>> = Mutex::new(None);
 
 /// Everything OFF-05 needs: three states and the time of the last success.
 ///
@@ -147,7 +162,11 @@ pub fn set_server_url(url: String) -> Result<()> {
 /// has no session, and trying again gets "already registered". If sign-in fails
 /// after a successful registration the error says so, and [`sign_in`] on its
 /// own is the way back.
-pub fn register_account(password: String, device_name: Option<String>) -> Result<()> {
+pub fn register_account(
+    password: String,
+    recovery_phrase: String,
+    device_name: Option<String>,
+) -> Result<()> {
     let (account, base) = crate::api::vault::with_meta_pub(|meta| {
         let account = account::load(meta)
             .map_err(|error| anyhow!("{error}"))?
@@ -162,10 +181,19 @@ pub fn register_account(password: String, device_name: Option<String>) -> Result
         .as_ref()
         .ok_or_else(|| anyhow!("This device has no password slot to register."))?;
     let auth_key = account::derive_auth_key(&password, slot).map_err(|error| anyhow!("{error}"))?;
+    // Verify that the phrase opens this local account before it becomes the
+    // server-side emergency device approval proof.
+    crate::api::vault::with_meta_pub(|meta| {
+        account::unlock_with_recovery(meta, &recovery_phrase)
+            .map(|_| ())
+            .map_err(|error| anyhow!("{error}"))
+    })?;
+    let recovery_auth_key =
+        account::derive_recovery_auth_key(&recovery_phrase).map_err(|error| anyhow!("{error}"))?;
 
     let client = SessionClient::new(ReqwestClient::new(), &base);
     client
-        .register(&account, &auth_key)
+        .register(&account, &auth_key, &recovery_auth_key)
         .map_err(|error| anyhow!("{error}"))?;
 
     let session = client
@@ -190,7 +218,13 @@ pub fn register_account(password: String, device_name: Option<String>) -> Result
 /// for a known one, so nothing here may treat a successful response as evidence
 /// the account exists. It does not — it derives a key and tries to sign in, and
 /// a wrong address and a wrong password fail identically.
-pub fn sign_in(email: String, password: String, device_name: Option<String>) -> Result<()> {
+pub fn sign_in(
+    email: String,
+    password: String,
+    device_name: Option<String>,
+    device_approval_token: Option<String>,
+    recovery_phrase: Option<String>,
+) -> Result<()> {
     let base = crate::api::vault::with_meta_pub(|meta| {
         text(meta, META_SERVER_URL)?.ok_or_else(|| anyhow!("Choose a sync server first."))
     })?;
@@ -219,9 +253,25 @@ pub fn sign_in(email: String, password: String, device_name: Option<String>) -> 
         },
     )
     .map_err(|error| anyhow!("{error}"))?;
+    let recovery_auth_key = recovery_phrase
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(account::derive_recovery_auth_key)
+        .transpose()
+        .map_err(|error| anyhow!("{error}"))?;
 
     let session = client
-        .login(&email, &auth_key, device_name.as_deref())
+        .login_with_approval(
+            &email,
+            &auth_key,
+            device_name.as_deref(),
+            device_approval_token
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty()),
+            recovery_auth_key.as_ref(),
+        )
         .map_err(|error| anyhow!("{error}"))?;
 
     let account = session::slots_for_account(&email, &prelogin, &session)
@@ -236,13 +286,41 @@ pub fn sign_in(email: String, password: String, device_name: Option<String>) -> 
     Ok(())
 }
 
-/// Forgets the session. The vault and its entries stay.
+/// Ends the server session, then removes the local session. The vault and its
+/// entries stay.
 ///
 /// Not a wipe: signing out of sync must not cost the user their codes. Wiping
 /// is [`crate::api::vault::wipe_device`], which is a different button with a
 /// different confirmation.
 pub fn sign_out() -> Result<()> {
+    with_account(|client, token| {
+        client.sign_out(token)?;
+        Ok(())
+    })?;
     crate::api::vault::with_meta_pub(clear_session)
+}
+
+/// Registers this Android installation for generic vault-change signals.
+///
+/// This Firebase registration token is not an account access token. The
+/// server cannot use it to read or modify the vault.
+pub fn set_push_token(token: String) -> Result<()> {
+    let token = token.trim();
+    if token.is_empty() || token.len() > 4096 || token.chars().any(char::is_whitespace) {
+        anyhow::bail!("The push registration token is invalid.");
+    }
+    with_account(|client, access_token| {
+        client.set_push_token(access_token, token)?;
+        Ok(())
+    })
+}
+
+/// Removes this device's push route while the base session is still valid.
+pub fn clear_push_token() -> Result<()> {
+    with_account(|client, access_token| {
+        client.clear_push_token(access_token)?;
+        Ok(())
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -263,7 +341,7 @@ pub struct DeviceView {
 
 /// Section 9.5: every device that has signed in to this account.
 pub fn list_devices() -> Result<Vec<DeviceView>> {
-    with_account(|client, token| {
+    with_scope(SCOPE_SECURITY_READ, |client, token| {
         Ok(client
             .devices(token)?
             .into_iter()
@@ -281,11 +359,19 @@ pub fn list_devices() -> Result<Vec<DeviceView>> {
 
 /// Cuts one device off. Its sessions end in the same request on the server.
 ///
-/// Revoking *this* device is allowed, and leaves the local tokens useless. The
-/// caller is expected to sign out locally afterwards — see the screen, which
-/// asks first.
-pub fn revoke_device(device_id: String) -> Result<u64> {
-    with_account(|client, token| Ok(client.revoke_device(token, &device_id)?))
+/// Revoking *this* device is allowed. The function removes its local session
+/// after the server confirms the revoke.
+pub fn revoke_device(device_id: String, password: String, current: bool) -> Result<u64> {
+    let auth_key = derive_stored_auth_key(&password)?;
+    elevate_with_auth(&auth_key, &[SCOPE_SECURITY_READ])?;
+    let ended = with_scope(SCOPE_SECURITY_READ, |client, token| {
+        Ok(client.revoke_device(token, &device_id, &auth_key)?)
+    })?;
+    clear_capabilities();
+    if current {
+        crate::api::vault::with_meta_pub(clear_session)?;
+    }
+    Ok(ended)
 }
 
 /// Ends every session on the account, including this one.
@@ -293,10 +379,80 @@ pub fn revoke_device(device_id: String) -> Result<u64> {
 /// The local tokens are cleared afterwards rather than left to fail on the next
 /// cycle. A device that believes it is signed in and gets a 401 every fifteen
 /// minutes is the silent-stop failure this project already fixed once.
-pub fn sign_out_everywhere() -> Result<u64> {
-    let ended = with_account(|client, token| Ok(client.sign_out_everywhere(token)?))?;
-    sign_out()?;
+pub fn sign_out_everywhere(password: String) -> Result<u64> {
+    let auth_key = derive_stored_auth_key(&password)?;
+    elevate_with_auth(&auth_key, &[SCOPE_SECURITY_READ])?;
+    let ended = with_scope(SCOPE_SECURITY_READ, |client, token| {
+        Ok(client.sign_out_everywhere(token, &auth_key)?)
+    })?;
+    crate::api::vault::with_meta_pub(clear_session)?;
     Ok(ended)
+}
+
+pub struct DeviceApprovalView {
+    pub token: String,
+    pub expires_at: String,
+}
+
+/// Creates one short-lived and single-use approval token.
+pub fn create_device_approval(password: String) -> Result<DeviceApprovalView> {
+    let auth_key = derive_stored_auth_key(&password)?;
+    elevate_with_auth(&auth_key, &[SCOPE_SECURITY_READ])?;
+    with_scope(SCOPE_SECURITY_READ, |client, token| {
+        let approval = client.create_device_approval(token, &auth_key)?;
+        Ok(DeviceApprovalView {
+            token: approval.token.expose().to_string(),
+            expires_at: approval.expires_at,
+        })
+    })
+}
+
+/// Enables recovery-phrase approval for an account created by an older app.
+pub fn enroll_recovery_access(password: String, recovery_phrase: String) -> Result<()> {
+    let auth_key = derive_stored_auth_key(&password)?;
+    elevate_with_auth(&auth_key, &[SCOPE_SECURITY_READ])?;
+    let recovery_slot = crate::api::vault::with_meta_pub(|meta| {
+        account::unlock_with_recovery(meta, &recovery_phrase)
+            .map_err(|error| anyhow!("{error}"))?;
+        account::load(meta)
+            .map_err(|error| anyhow!("{error}"))?
+            .map(|value| value.recovery_slot)
+            .ok_or_else(|| anyhow!("This device has no sync account."))
+    })?;
+    let recovery_auth_key =
+        account::derive_recovery_auth_key(&recovery_phrase).map_err(|error| anyhow!("{error}"))?;
+    with_scope(SCOPE_SECURITY_READ, |client, token| {
+        client.enroll_recovery_access(token, &auth_key, &recovery_auth_key, &recovery_slot)?;
+        Ok(())
+    })
+}
+
+pub struct SecurityEventView {
+    pub id: i64,
+    pub event_type: String,
+    pub created_at: String,
+    pub device_id: Option<String>,
+    pub device_name: Option<String>,
+    pub detail_json: String,
+}
+
+pub fn list_security_activity() -> Result<Vec<SecurityEventView>> {
+    with_scope(SCOPE_SECURITY_READ, |client, token| {
+        client
+            .security_activity(token)?
+            .into_iter()
+            .map(|event| {
+                Ok(SecurityEventView {
+                    id: event.id,
+                    event_type: event.event_type,
+                    created_at: event.created_at,
+                    device_id: event.device_id,
+                    device_name: event.device_name,
+                    detail_json: serde_json::to_string(&event.detail)?,
+                })
+            })
+            .collect()
+    })
 }
 
 /// Deletes the account on the server and signs this device out.
@@ -313,22 +469,116 @@ pub fn sign_out_everywhere() -> Result<u64> {
 /// authentication key the server verifies at sign-in. A stolen access token
 /// must not be enough to destroy an account.
 pub fn delete_account(password: String) -> Result<i64> {
-    let auth_key = crate::api::vault::with_meta_pub(|meta| {
+    let auth_key = derive_stored_auth_key(&password)?;
+    elevate_with_auth(&auth_key, &[SCOPE_SECURITY_READ])?;
+
+    let deleted = with_scope(SCOPE_SECURITY_READ, |client, token| {
+        Ok(client.delete_account(token, &auth_key)?)
+    })?;
+
+    // The tokens name an account that no longer exists. Leaving them would
+    // make every later cycle fail against a server that has nothing to say.
+    crate::api::vault::with_meta_pub(clear_session)?;
+    Ok(deleted)
+}
+
+fn derive_stored_auth_key(password: &str) -> Result<zeroize::Zeroizing<[u8; 32]>> {
+    crate::api::vault::with_meta_pub(|meta| {
         let account = authcore::account::load(meta)
             .map_err(|error| anyhow!("{error}"))?
             .ok_or_else(|| anyhow!("This device has no sync account."))?;
         let slot = account
             .password_slot
             .ok_or_else(|| anyhow!("This account has no password set."))?;
-        authcore::account::derive_auth_key(&password, &slot).map_err(|error| anyhow!("{error}"))
+        authcore::account::derive_auth_key(password, &slot).map_err(|error| anyhow!("{error}"))
+    })
+}
+
+/// Authorizes one or more interactive permission groups for five minutes.
+/// The returned server token stays inside Rust memory.
+pub fn elevate_session(password: String, scopes: Vec<String>) -> Result<()> {
+    let allowed = [SCOPE_SECURITY_READ, SCOPE_SHARE_WRITE];
+    if scopes.is_empty()
+        || scopes.len() > allowed.len()
+        || scopes
+            .iter()
+            .any(|scope| !allowed.contains(&scope.as_str()))
+    {
+        return Err(anyhow!("The requested permission is not available."));
+    }
+    let auth_key = derive_stored_auth_key(&password)?;
+    let references = scopes.iter().map(String::as_str).collect::<Vec<_>>();
+    elevate_with_auth(&auth_key, &references)
+}
+
+pub fn has_elevated_scope(scope: String) -> bool {
+    capability_token(&scope).ok().flatten().is_some()
+}
+
+fn elevate_with_auth(auth_key: &zeroize::Zeroizing<[u8; 32]>, scopes: &[&str]) -> Result<()> {
+    let capability = with_account(|client, token| Ok(client.elevate(token, auth_key, scopes)?))?;
+    let cached = CachedCapability {
+        token: capability.access_token,
+        scopes: capability.scopes,
+        expires_at: Instant::now() + CAPABILITY_LIFETIME,
+    };
+    *CAPABILITY
+        .lock()
+        .map_err(|_| anyhow!("The authorization cache is unavailable."))? = Some(cached);
+    Ok(())
+}
+
+pub(crate) fn clear_capabilities() {
+    if let Ok(mut capability) = CAPABILITY.lock() {
+        capability.take();
+    }
+}
+
+pub(crate) fn capability_token(scope: &str) -> Result<Option<SecretString>> {
+    let mut guard = CAPABILITY
+        .lock()
+        .map_err(|_| anyhow!("The authorization cache is unavailable."))?;
+    if guard
+        .as_ref()
+        .is_some_and(|value| value.expires_at <= Instant::now())
+    {
+        guard.take();
+    }
+    Ok(guard.as_ref().and_then(|value| {
+        value
+            .scopes
+            .iter()
+            .any(|candidate| candidate == scope)
+            .then(|| SecretString::new(value.token.expose()))
+    }))
+}
+
+fn with_scope<T>(
+    scope: &str,
+    call: impl Fn(&SessionClient<ReqwestClient>, &SecretString) -> Result<T>,
+) -> Result<T> {
+    let base = crate::api::vault::with_meta_pub(|meta| {
+        server_url(meta)?.ok_or_else(|| anyhow!("Choose a sync server first."))
     })?;
-
-    let deleted = with_account(|client, token| Ok(client.delete_account(token, &auth_key)?))?;
-
-    // The tokens name an account that no longer exists. Leaving them would
-    // make every later cycle fail against a server that has nothing to say.
-    sign_out()?;
-    Ok(deleted)
+    let token = capability_token(scope)?
+        .ok_or_else(|| anyhow!("Enter the account password to authorize this action."))?;
+    let client = SessionClient::new(ReqwestClient::new(), &base);
+    match call(&client, &token) {
+        Err(error)
+            if error.downcast_ref::<SessionError>().is_some_and(|inner| {
+                matches!(
+                    inner,
+                    SessionError::CapabilityExpired | SessionError::Unauthorized
+                )
+            }) =>
+        {
+            clear_capabilities();
+            Err(anyhow!(
+                "The temporary authorization expired. Enter the password again."
+            ))
+        }
+        result => result,
+    }
 }
 
 /// Runs one authenticated call, refreshing the session once if it has expired.
@@ -533,6 +783,7 @@ fn save_session(meta: &MetaStore, tokens: &SessionTokens) -> Result<()> {
 /// Kept `pub(crate)` so **Wipe this device** cannot leave a live session in the
 /// dedicated native store.
 pub(crate) fn clear_session(meta: &MetaStore) -> Result<()> {
+    clear_capabilities();
     #[cfg(any(target_os = "android", feature = "jni-host-check"))]
     {
         // Write the one-way marker before deleting anything. A process stop

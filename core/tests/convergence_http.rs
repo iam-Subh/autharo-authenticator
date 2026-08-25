@@ -103,6 +103,7 @@ impl HttpClient for ReqwestClient {
             Method::Get => self.inner.get(&request.url),
             Method::Post => self.inner.post(&request.url),
             Method::Delete => self.inner.delete(&request.url),
+            Method::Put => self.inner.put(&request.url),
         };
         if let Some(token) = &request.bearer {
             builder = builder.bearer_auth(token);
@@ -184,7 +185,7 @@ fn sign_up() -> SecretString {
     let auth_key = Zeroizing::new([0x33u8; 32]);
 
     client
-        .register(&account, &auth_key)
+        .register(&account, &auth_key, &Zeroizing::new([0x55u8; 32]))
         .expect("the harness needs a running server");
     client
         .login(&email, &auth_key, Some("convergence harness"))

@@ -153,7 +153,10 @@ mod libsodium_vectors {
     fn a_modified_byte_is_refused() {
         let raw = include_str!("fixtures/libsodium-secretstream-vectors.json");
         let root: serde_json::Value = serde_json::from_str(raw).unwrap();
-        let key: [u8; 32] = b64(root["key"].as_str().unwrap()).as_slice().try_into().unwrap();
+        let key: [u8; 32] = b64(root["key"].as_str().unwrap())
+            .as_slice()
+            .try_into()
+            .unwrap();
 
         let vector = &root["vectors"][20];
         let header = b64(vector["header"].as_str().unwrap());
@@ -169,6 +172,8 @@ mod libsodium_vectors {
 
     fn b64(text: &str) -> Vec<u8> {
         use base64::Engine;
-        base64::engine::general_purpose::STANDARD.decode(text).unwrap()
+        base64::engine::general_purpose::STANDARD
+            .decode(text)
+            .unwrap()
     }
 }

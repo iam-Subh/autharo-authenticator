@@ -7,8 +7,8 @@ use axum::Json;
 use axum::extract::{ConnectInfo, Path, State};
 use axum::http::HeaderMap;
 use chrono::{DateTime, Duration, Utc};
-use std::net::SocketAddr;
 use serde::{Deserialize, Serialize};
+use std::net::SocketAddr;
 use uuid::Uuid;
 
 use crate::SharedState;
@@ -182,5 +182,5 @@ async fn authenticate(state: &SharedState, headers: &HeaderMap) -> ApiResult<Uui
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "))
         .ok_or(ApiError::Unauthorized)?;
-    auth::account_for_token(&state.db, token).await
+    auth::account_for_token_with_scope(&state.db, token, auth::SCOPE_SHARE_WRITE).await
 }

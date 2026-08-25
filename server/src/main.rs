@@ -32,10 +32,14 @@ async fn main() -> anyhow::Result<()> {
 
     let fake_auth_hash = crypto::hash_auth_key(&[0u8; 32])
         .expect("the server must be able to create its login timing hash");
+    let passkeys = authserver::passkey::PasskeyService::from_environment()?;
+    let push = authserver::push::FcmDispatcher::from_environment().await?;
     let state: SharedState = Arc::new(AppState {
         db,
         server_key,
         fake_auth_hash,
+        passkeys,
+        push,
     });
     let address: SocketAddr = std::env::var("BIND")
         .unwrap_or_else(|_| "127.0.0.1:8080".to_string())

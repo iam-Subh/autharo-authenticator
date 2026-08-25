@@ -46,6 +46,7 @@ use crate::sync::{
 pub enum Method {
     Get,
     Post,
+    Put,
     /// Section 9.5's device revocation and account deletion.
     Delete,
 }
@@ -55,6 +56,7 @@ impl fmt::Display for Method {
         f.write_str(match self {
             Self::Get => "GET",
             Self::Post => "POST",
+            Self::Put => "PUT",
             Self::Delete => "DELETE",
         })
     }

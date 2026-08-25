@@ -697,16 +697,11 @@ mod tests {
     #[test]
     fn a_setup_request_does_not_print_its_key() {
         let request = begin_setup().unwrap();
-        let key: Vec<u8> = request.key_to_wrap().to_vec();
         let rendered = format!("{request:?}");
 
-        assert!(rendered.contains("redacted"));
-        for byte in key.iter().take(4) {
-            assert!(
-                !rendered.contains(&format!("{byte}")),
-                "Debug leaked key material"
-            );
-        }
+        // Use an exact allowlist. Comparing individual random bytes with the
+        // decimal digits in normal text makes the test fail by chance.
+        assert_eq!(rendered, "SetupRequest(keystore-v1, <redacted>)");
     }
 
     /// FR-35 counts consecutive failures, so a success must reset it.
