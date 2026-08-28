@@ -130,6 +130,7 @@ class _EventTile extends StatelessWidget {
   String _title(AppLocalizations l10n) => switch (event.eventType) {
     'device_added' => l10n.securityDeviceAdded,
     'account_registered' => l10n.securityAccountRegistered,
+    'identity_linked' => l10n.securityIdentityLinked,
     'device_revoked' => l10n.securityDeviceRemoved,
     'device_approval_created' => l10n.securityApprovalCreated,
     'signed_out' => l10n.securityDeviceSignedOut,

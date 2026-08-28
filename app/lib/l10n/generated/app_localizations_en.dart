@@ -1980,4 +1980,216 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get securityAccountRegistered => 'Sync account created';
+
+  @override
+  String get changeAccountPassword => 'Change account password';
+
+  @override
+  String get changeAccountPasswordDescription =>
+      'Replace the sync password and sign out other devices.';
+
+  @override
+  String get currentPassword => 'Current password';
+
+  @override
+  String get newPassword => 'New password';
+
+  @override
+  String get enterNewPasswordAgain => 'Enter the new password again';
+
+  @override
+  String get passwordChangeRevokesDevices =>
+      'This action signs out all other devices. Add each trusted device again with an approval code or the recovery phrase.';
+
+  @override
+  String get passwordChanged => 'The account password was changed.';
+
+  @override
+  String passwordChangeFailed(String error) {
+    return 'The password could not be changed: $error';
+  }
+
+  @override
+  String get renameDevice => 'Rename device';
+
+  @override
+  String get deviceName => 'Device name';
+
+  @override
+  String get deviceRenamed => 'The device was renamed.';
+
+  @override
+  String get forgotPassword => 'Forgot password?';
+
+  @override
+  String get resetAccountPassword => 'Reset account password';
+
+  @override
+  String get resetPasswordDescription =>
+      'Use the 24-word recovery phrase to set a new password. This action signs out all other devices.';
+
+  @override
+  String get passwordResetComplete => 'The account password was reset.';
+
+  @override
+  String get verifyEmailOwnership => 'Verify email ownership';
+
+  @override
+  String get verifyWithEmail => 'Verify with email';
+
+  @override
+  String get continueWithGoogle => 'Continue with Google';
+
+  @override
+  String get identityPassword => 'Email sign-in password';
+
+  @override
+  String get identityPasswordHelp =>
+      'Use a password that is different from the vault password. Firebase receives this password. Firebase never receives the vault password.';
+
+  @override
+  String get identityPasswordMustDiffer =>
+      'Use a different password for email sign-in and vault encryption.';
+
+  @override
+  String get identityPasswordTooShort =>
+      'Enter at least 6 characters for the email sign-in password.';
+
+  @override
+  String get emailVerificationSent =>
+      'A verification email was sent. Open the link, then select I verified my email.';
+
+  @override
+  String get iVerifiedMyEmail => 'I verified my email';
+
+  @override
+  String emailOwnershipVerified(String email) {
+    return 'Email ownership verified for $email.';
+  }
+
+  @override
+  String get verifyEmailBeforeSync =>
+      'Verify the account email before you turn on sync.';
+
+  @override
+  String get firebaseNotConfigured =>
+      'Firebase Authentication is not configured in this Android build.';
+
+  @override
+  String get verificationStillPending =>
+      'The email address is not verified yet.';
+
+  @override
+  String get identityEmailMismatch =>
+      'The verified email does not match this vault account.';
+
+  @override
+  String get errorInvalidCredentials =>
+      'The email address or password is not correct.';
+
+  @override
+  String get errorAccountConflict =>
+      'An account already exists for this email address.';
+
+  @override
+  String get errorServerUnavailable =>
+      'The sync server cannot be reached. Check the connection and server address.';
+
+  @override
+  String get errorInvalidServerResponse =>
+      'The sync server sent an invalid response.';
+
+  @override
+  String get errorSignedOut =>
+      'This device was signed out. Sign in again to continue synchronization.';
+
+  @override
+  String get errorDeviceApprovalRequired =>
+      'Approve this device from an existing device, or use the recovery phrase.';
+
+  @override
+  String get errorInsufficientScope =>
+      'This session does not permit that action. Sign in again.';
+
+  @override
+  String get errorElevationRequired =>
+      'Enter the account password to authorize this action.';
+
+  @override
+  String get errorInvalidScope => 'This permission is not available.';
+
+  @override
+  String get errorCapabilityExpired =>
+      'The temporary authorization expired. Enter the password again.';
+
+  @override
+  String get errorNotFound => 'The requested item was not found.';
+
+  @override
+  String get errorEmailVerificationRequired =>
+      'Verify the email address before account registration.';
+
+  @override
+  String get errorInvalidIdentity =>
+      'The email identity proof is invalid or expired. Verify the email again.';
+
+  @override
+  String get errorRateLimited =>
+      'Too many requests were made. Wait and try again.';
+
+  @override
+  String get errorQuotaExceeded => 'This account reached a server limit.';
+
+  @override
+  String get errorRequestTooLarge => 'The request is too large.';
+
+  @override
+  String get errorFeatureUnavailable =>
+      'This feature is not configured on the server.';
+
+  @override
+  String get errorServerInternal =>
+      'The server could not complete the request.';
+
+  @override
+  String get errorIdentityCredentials =>
+      'The email sign-in password is not correct.';
+
+  @override
+  String get errorIdentityEmail => 'Enter a valid email address.';
+
+  @override
+  String get errorIdentityWeakPassword =>
+      'Use a stronger email sign-in password.';
+
+  @override
+  String get errorIdentityNetwork =>
+      'Firebase Authentication cannot be reached. Check the connection.';
+
+  @override
+  String get errorIdentityDisabled => 'This email identity is disabled.';
+
+  @override
+  String get errorIdentityCanceled => 'Google sign-in was canceled.';
+
+  @override
+  String get linkVerifiedIdentity => 'Link verified identity';
+
+  @override
+  String get linkVerifiedIdentityRequired =>
+      'Verify email ownership for this existing account.';
+
+  @override
+  String linkVerifiedIdentityDescription(String email) {
+    return 'Verify ownership of $email. Enter the current vault password to authorize the link.';
+  }
+
+  @override
+  String get verifiedIdentity => 'Verified identity';
+
+  @override
+  String get securityIdentityLinked => 'Verified identity linked';
+
+  @override
+  String get errorUnknown => 'The operation could not be completed.';
 }

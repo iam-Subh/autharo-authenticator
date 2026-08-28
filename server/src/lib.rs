@@ -24,6 +24,7 @@ pub mod activity;
 pub mod auth;
 pub mod crypto;
 pub mod error;
+pub mod identity;
 pub mod passkey;
 pub mod push;
 pub mod quota;
@@ -35,7 +36,7 @@ use std::sync::Arc;
 
 use axum::Router;
 use axum::extract::DefaultBodyLimit;
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, post, put};
 
 /// Shared state. One pool, one server key.
 pub struct AppState {
@@ -49,6 +50,7 @@ pub struct AppState {
     pub fake_auth_hash: String,
     pub passkeys: Option<passkey::PasskeyService>,
     pub push: Option<Arc<dyn push::PushDispatcher>>,
+    pub identity: Option<Arc<identity::FirebaseIdentityVerifier>>,
 }
 
 pub type SharedState = Arc<AppState>;
@@ -58,6 +60,8 @@ pub fn router(state: SharedState) -> Router {
         .route("/v1/auth/register", post(auth::register))
         .route("/v1/auth/prelogin", post(auth::prelogin))
         .route("/v1/auth/login", post(auth::login))
+        .route("/v1/auth/recovery/start", post(auth::start_recovery))
+        .route("/v1/auth/recovery/finish", post(auth::finish_recovery))
         .route("/v1/auth/refresh", post(auth::refresh))
         .route("/v1/auth/elevate", post(auth::elevate))
         .route(
@@ -86,13 +90,21 @@ pub fn router(state: SharedState) -> Router {
             "/v1/devices/push-token",
             axum::routing::put(account::set_push_token).delete(account::clear_push_token),
         )
-        .route("/v1/devices/{id}", delete(account::revoke_device))
+        .route(
+            "/v1/devices/{id}",
+            put(account::rename_device).delete(account::revoke_device),
+        )
         .route(
             "/v1/device-approvals",
             post(account::create_device_approval),
         )
         .route("/v1/recovery/enroll", post(account::enroll_recovery_access))
         .route("/v1/security/activity", get(activity::list))
+        .route("/v1/account/password", put(account::change_password))
+        .route(
+            "/v1/account/identity",
+            get(account::identity_status).put(account::link_identity),
+        )
         .route("/v1/account", delete(account::delete_account))
         .route("/v1/vault/records", post(vault::push_records))
         .route("/v1/vault/changes", get(vault::pull_changes))

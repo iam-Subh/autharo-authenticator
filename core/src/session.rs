@@ -70,6 +70,8 @@ pub enum SessionError {
     InvalidScope,
     /// A password-authorized capability is no longer valid.
     CapabilityExpired,
+    /// A stable server error that does not need client control flow.
+    Remote { code: String, detail: String },
     /// A device that is not on this account, or no longer exists.
     NotFound { detail: String },
 }
@@ -77,36 +79,37 @@ pub enum SessionError {
 impl fmt::Display for SessionError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::InvalidCredentials => {
-                f.write_str("The email address or password is not correct.")
-            }
+            Self::InvalidCredentials => f.write_str(
+                "[invalid_credentials] The email address or password is not correct.",
+            ),
             Self::AlreadyRegistered => {
-                f.write_str("An account already exists for this email address.")
+                f.write_str("[conflict] An account already exists for this email address.")
             }
             Self::Transport { detail } => {
-                write!(f, "The sync server could not be reached: {detail}")
+                write!(f, "[transport] The sync server could not be reached: {detail}")
             }
             Self::Malformed { detail } => write!(
                 f,
-                "The sync server sent a response this app cannot read: {detail}"
+                "[invalid_response] The sync server sent a response this app cannot read: {detail}"
             ),
-            Self::Unauthorized => {
-                f.write_str("This device has been signed out. Sign in again to keep syncing.")
-            }
+            Self::Unauthorized => f.write_str(
+                "[unauthorized] This device has been signed out. Sign in again to keep syncing.",
+            ),
             Self::DeviceApprovalRequired => f.write_str(
-                "An existing device must approve this sign-in. Create an approval code on that device, then enter it here.",
+                "[device_approval_required] An existing device must approve this sign-in. Create an approval code on that device, then enter it here.",
             ),
             Self::InsufficientScope => {
-                f.write_str("This session does not permit that action. Sign in again.")
+                f.write_str("[insufficient_scope] This session does not permit that action. Sign in again.")
             }
             Self::ElevationRequired => {
-                f.write_str("Enter the account password to authorize this action.")
+                f.write_str("[elevation_required] Enter the account password to authorize this action.")
             }
-            Self::InvalidScope => f.write_str("This permission is not available."),
+            Self::InvalidScope => f.write_str("[invalid_scope] This permission is not available."),
             Self::CapabilityExpired => {
-                f.write_str("The temporary authorization expired. Enter the password again.")
+                f.write_str("[capability_expired] The temporary authorization expired. Enter the password again.")
             }
-            Self::NotFound { detail } => f.write_str(detail),
+            Self::NotFound { detail } => write!(f, "[not_found] {detail}"),
+            Self::Remote { code, detail } => write!(f, "[{code}] {detail}"),
         }
     }
 }
@@ -124,6 +127,13 @@ pub struct Session {
     /// server has never seen the key that opens it.
     pub password_slot: WrappedSlot,
     pub recovery_slot: WrappedSlot,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IdentityStatus {
+    pub linked: bool,
+    pub provider: Option<String>,
+    pub verified_email: Option<String>,
 }
 
 /// One wrapped copy of the vault key as the server stores it.
@@ -145,6 +155,13 @@ pub struct Renewal {
 pub struct Prelogin {
     pub client_salt: Vec<u8>,
     pub params: KdfParams,
+}
+
+#[derive(Debug)]
+pub struct RecoveryStart {
+    pub reset_token: SecretString,
+    pub recovery_slot: WrappedSlot,
+    pub expires_at: String,
 }
 
 /// The account endpoints, over an injected client.
@@ -242,6 +259,7 @@ impl<C: HttpClient> SessionClient<C> {
         account: &Account,
         auth_key: &Zeroizing<[u8; 32]>,
         recovery_auth_key: &Zeroizing<[u8; 32]>,
+        identity_token: Option<&str>,
     ) -> Result<()> {
         let slot = account
             .password_slot
@@ -250,7 +268,7 @@ impl<C: HttpClient> SessionClient<C> {
                 detail: "this account has no password slot to register".to_string(),
             })?;
 
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "email": account.email,
             "auth_key": b64_encode(auth_key.as_slice()),
             "recovery_auth_key": b64_encode(recovery_auth_key.as_slice()),
@@ -262,6 +280,9 @@ impl<C: HttpClient> SessionClient<C> {
                 &account.recovery_slot.nonce,
             ),
         });
+        if let Some(token) = identity_token {
+            body["identity_token"] = serde_json::Value::String(token.to_string());
+        }
 
         let response = self.send(Method::Post, "/v1/auth/register", Some(body))?;
         match response.status {
@@ -289,6 +310,60 @@ impl<C: HttpClient> SessionClient<C> {
         Ok(Prelogin {
             client_salt: decode(&value, "client_salt")?,
             params: params_from(&value["kdf_params"])?,
+        })
+    }
+
+    pub fn start_password_recovery(
+        &self,
+        email: &str,
+        recovery_auth_key: &Zeroizing<[u8; 32]>,
+    ) -> Result<RecoveryStart> {
+        let body = serde_json::json!({
+            "email": email,
+            "recovery_auth_key": b64_encode(recovery_auth_key.as_slice()),
+        });
+        let response = self.send(Method::Post, "/v1/auth/recovery/start", Some(body))?;
+        if response.status == 401 {
+            return Err(SessionError::InvalidCredentials);
+        }
+        let value = self.read(response)?;
+        Ok(RecoveryStart {
+            reset_token: token(&value, "reset_token")?,
+            recovery_slot: slot_from(&value["recovery_slot"])?,
+            expires_at: value
+                .get("expires_at")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("")
+                .to_string(),
+        })
+    }
+
+    pub fn finish_password_recovery(
+        &self,
+        reset_token: &SecretString,
+        new_auth_key: &Zeroizing<[u8; 32]>,
+        new_slot: &PasswordSlot,
+        device_name: Option<&str>,
+    ) -> Result<Session> {
+        let body = serde_json::json!({
+            "reset_token": reset_token.expose(),
+            "new_auth_key": b64_encode(new_auth_key.as_slice()),
+            "kdf_params": params_json(new_slot.params),
+            "client_salt": b64_encode(&new_slot.salt),
+            "password_slot": wrapped_json(&new_slot.wrapped_key, &new_slot.nonce),
+            "device_name": device_name,
+            "device_platform": std::env::consts::OS,
+        });
+        let response = self.send(Method::Post, "/v1/auth/recovery/finish", Some(body))?;
+        if response.status == 401 {
+            return Err(SessionError::InvalidCredentials);
+        }
+        let value = self.read(response)?;
+        Ok(Session {
+            access_token: token(&value, "access_token")?,
+            refresh_token: token(&value, "refresh_token")?,
+            password_slot: slot_from(&value["password_slot"])?,
+            recovery_slot: slot_from(&value["recovery_slot"])?,
         })
     }
 
@@ -391,6 +466,28 @@ impl<C: HttpClient> SessionClient<C> {
         list.iter().map(DeviceSummary::from_json).collect()
     }
 
+    pub fn rename_device(
+        &self,
+        access_token: &SecretString,
+        device_id: &str,
+        name: &str,
+    ) -> Result<()> {
+        let response = self.send_auth(
+            Method::Put,
+            &format!("/v1/devices/{device_id}"),
+            access_token,
+            Some(serde_json::json!({ "name": name })),
+        )?;
+        match response.status {
+            200..=299 => Ok(()),
+            401 => Err(SessionError::Unauthorized),
+            404 => Err(SessionError::NotFound {
+                detail: "That active device is not on this account.".to_string(),
+            }),
+            status => Err(self.failure(status, &response.body)),
+        }
+    }
+
     /// Registers the current Firebase installation token for this device.
     /// The token routes a generic signal only. It is not an access token.
     pub fn set_push_token(&self, access_token: &SecretString, token: &str) -> Result<()> {
@@ -408,6 +505,57 @@ impl<C: HttpClient> SessionClient<C> {
         let response =
             self.send_auth(Method::Delete, "/v1/devices/push-token", access_token, None)?;
         self.read(response).map(|_| ())
+    }
+
+    pub fn identity_status(&self, access_token: &SecretString) -> Result<IdentityStatus> {
+        let response = self.send_auth(Method::Get, "/v1/account/identity", access_token, None)?;
+        let value = self.read(response)?;
+        Ok(IdentityStatus {
+            linked: value
+                .get("linked")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
+            provider: value
+                .get("provider")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string),
+            verified_email: value
+                .get("verified_email")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string),
+        })
+    }
+
+    pub fn link_identity(
+        &self,
+        access_token: &SecretString,
+        auth_key: &Zeroizing<[u8; 32]>,
+        identity_token: &str,
+    ) -> Result<IdentityStatus> {
+        let response = self.send_auth(
+            Method::Put,
+            "/v1/account/identity",
+            access_token,
+            Some(serde_json::json!({
+                "auth_key": b64_encode(auth_key.as_slice()),
+                "identity_token": identity_token,
+            })),
+        )?;
+        let value = self.read(response)?;
+        Ok(IdentityStatus {
+            linked: value
+                .get("linked")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
+            provider: value
+                .get("provider")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string),
+            verified_email: value
+                .get("verified_email")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string),
+        })
     }
 
     /// Cuts one device off: its sessions end in the same request.
@@ -554,6 +702,36 @@ impl<C: HttpClient> SessionClient<C> {
         }
     }
 
+    /// Replaces the account password and returns a new base session.
+    ///
+    /// The replacement slot contains ciphertext only. The server revokes all
+    /// older sessions and devices before it returns this token pair.
+    pub fn change_password(
+        &self,
+        access_token: &SecretString,
+        current_auth_key: &Zeroizing<[u8; 32]>,
+        new_auth_key: &Zeroizing<[u8; 32]>,
+        new_slot: &PasswordSlot,
+    ) -> Result<Renewal> {
+        let body = serde_json::json!({
+            "current_auth_key": b64_encode(current_auth_key.as_slice()),
+            "new_auth_key": b64_encode(new_auth_key.as_slice()),
+            "kdf_params": params_json(new_slot.params),
+            "client_salt": b64_encode(&new_slot.salt),
+            "password_slot": wrapped_json(&new_slot.wrapped_key, &new_slot.nonce),
+        });
+        let value = self.read(self.send_auth(
+            Method::Put,
+            "/v1/account/password",
+            access_token,
+            Some(body),
+        )?)?;
+        Ok(Renewal {
+            access_token: token(&value, "access_token")?,
+            refresh_token: token(&value, "refresh_token")?,
+        })
+    }
+
     pub fn security_activity(
         &self,
         access_token: &SecretString,
@@ -686,6 +864,7 @@ impl<C: HttpClient> SessionClient<C> {
             .ok()
             .and_then(|value| value.get("error")?.as_str().map(str::to_string));
         match code.as_deref() {
+            Some("invalid_credentials") => return SessionError::InvalidCredentials,
             Some("device_approval_required") => return SessionError::DeviceApprovalRequired,
             Some("insufficient_scope") => return SessionError::InsufficientScope,
             Some("elevation_required") => return SessionError::ElevationRequired,
@@ -693,12 +872,21 @@ impl<C: HttpClient> SessionClient<C> {
             Some("capability_expired") => return SessionError::CapabilityExpired,
             _ => {}
         }
-        let text = String::from_utf8_lossy(body).trim().to_string();
+        let value = serde_json::from_slice::<serde_json::Value>(body).ok();
+        let detail = value
+            .as_ref()
+            .and_then(|value| value.get("message"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("The server refused the request.")
+            .to_string();
+        if let Some(code) = code {
+            return SessionError::Remote { code, detail };
+        }
         if status == 401 {
             return SessionError::InvalidCredentials;
         }
         SessionError::Transport {
-            detail: format!("the server returned {status}: {text}"),
+            detail: format!("the server returned status {status}"),
         }
     }
 }
@@ -866,7 +1054,7 @@ mod tests {
 
         let auth_key = Zeroizing::new([0xABu8; 32]);
         session
-            .register(&account(), &auth_key, &Zeroizing::new([0xCDu8; 32]))
+            .register(&account(), &auth_key, &Zeroizing::new([0xCDu8; 32]), None)
             .unwrap();
 
         let body = client.last();
@@ -911,6 +1099,27 @@ mod tests {
     }
 
     #[test]
+    fn registration_sends_the_verified_identity_token_when_present() {
+        let client = FakeClient::answering(200, r#"{"account_id":"x"}"#);
+        let session = SessionClient::new(&client, "https://example.invalid");
+
+        session
+            .register(
+                &account(),
+                &Zeroizing::new([0xABu8; 32]),
+                &Zeroizing::new([0xCDu8; 32]),
+                Some("firebase-id-token"),
+            )
+            .unwrap();
+
+        let body = client.last();
+        assert_eq!(body["identity_token"], "firebase-id-token");
+        assert!(body.get("vault_key").is_none());
+        assert!(body.get("password").is_none());
+        assert!(body.get("recovery_phrase").is_none());
+    }
+
+    #[test]
     fn the_kdf_parameters_travel_so_another_device_can_reproduce_the_key() {
         let client = FakeClient::answering(200, r#"{"account_id":"x"}"#);
         let session = SessionClient::new(&client, "https://example.invalid");
@@ -919,6 +1128,7 @@ mod tests {
                 &account(),
                 &Zeroizing::new([0u8; 32]),
                 &Zeroizing::new([1u8; 32]),
+                None,
             )
             .unwrap();
 
@@ -938,6 +1148,7 @@ mod tests {
                 &account(),
                 &Zeroizing::new([0u8; 32]),
                 &Zeroizing::new([1u8; 32]),
+                None,
             )
             .unwrap_err();
         assert!(matches!(error, SessionError::AlreadyRegistered));
@@ -1128,5 +1339,83 @@ mod tests {
             },
         };
         assert!(slots_for_account("x@example.invalid", &prelogin, &session).is_err());
+    }
+
+    #[test]
+    fn changing_a_password_sends_only_proofs_and_wrapped_material() {
+        let client = FakeClient::answering(
+            200,
+            r#"{"access_token":"new-access","refresh_token":"new-refresh"}"#,
+        );
+        let session = SessionClient::new(&client, "https://example.invalid");
+        let slot = PasswordSlot {
+            salt: [9; 16],
+            params: KdfParams::default(),
+            wrapped_key: vec![3; 48],
+            nonce: vec![4; 24],
+        };
+
+        let result = session
+            .change_password(
+                &SecretString::new("capability"),
+                &Zeroizing::new([1; 32]),
+                &Zeroizing::new([2; 32]),
+                &slot,
+            )
+            .unwrap();
+
+        assert_eq!(result.access_token.expose(), "new-access");
+        assert_eq!(result.refresh_token.expose(), "new-refresh");
+        let seen = client.seen.borrow();
+        let request = seen.last().unwrap();
+        assert_eq!(request.method, Method::Put);
+        assert_eq!(request.url, "https://example.invalid/v1/account/password");
+        assert_eq!(request.bearer.as_deref(), Some("capability"));
+        drop(seen);
+        let body = client.last();
+        assert_eq!(body["current_auth_key"], b64_encode(&[1; 32]));
+        assert_eq!(body["new_auth_key"], b64_encode(&[2; 32]));
+        assert_eq!(body["client_salt"], b64_encode(&[9; 16]));
+        assert_eq!(body["password_slot"]["wrapped_key"], b64_encode(&[3; 48]));
+        assert!(body.get("password").is_none());
+        assert!(body.get("vault_key").is_none());
+    }
+
+    #[test]
+    fn recovery_start_sends_a_derived_proof_not_the_phrase() {
+        let body = format!(
+            r#"{{"reset_token":"reset","expires_at":"soon","recovery_slot":{{"wrapped_key":"{}","nonce":"{}"}}}}"#,
+            b64_encode(&[5; 48]),
+            b64_encode(&[6; 24]),
+        );
+        let client = FakeClient::answering(200, &body);
+        let session = SessionClient::new(&client, "https://example.invalid");
+
+        let result = session
+            .start_password_recovery("rupsa@example.invalid", &Zeroizing::new([7; 32]))
+            .unwrap();
+
+        assert_eq!(result.reset_token.expose(), "reset");
+        assert_eq!(result.recovery_slot.wrapped_key, vec![5; 48]);
+        let sent = client.last();
+        assert_eq!(sent["recovery_auth_key"], b64_encode(&[7; 32]));
+        assert!(sent.get("recovery_phrase").is_none());
+    }
+
+    #[test]
+    fn renaming_a_device_uses_the_elevated_token() {
+        let client = FakeClient::answering(204, "{}");
+        let session = SessionClient::new(&client, "https://example.invalid");
+        session
+            .rename_device(&SecretString::new("capability"), "device-id", "Pixel 10")
+            .unwrap();
+
+        let seen = client.seen.borrow();
+        let request = seen.last().unwrap();
+        assert_eq!(request.method, Method::Put);
+        assert_eq!(request.url, "https://example.invalid/v1/devices/device-id");
+        assert_eq!(request.bearer.as_deref(), Some("capability"));
+        drop(seen);
+        assert_eq!(client.last()["name"], "Pixel 10");
     }
 }

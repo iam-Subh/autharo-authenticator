@@ -52,8 +52,16 @@ static PENDING_OPEN: Mutex<Option<OpenRequest>> = Mutex::new(None);
 /// everything else, so it lives exactly as long as the unlocked session.
 static CURRENT_KEY: Mutex<Option<VaultKey>> = Mutex::new(None);
 
+/// A recovery slot prepared for confirmation but not committed.
+///
+/// It contains ciphertext only. It stays process-local so a cancelled screen
+/// or application lock cannot change the accepted recovery phrase.
+static PENDING_RECOVERY_SLOT: Mutex<Option<account::RecoverySlot>> = Mutex::new(None);
+
 const BIOMETRIC_WRAPPED_KEY: &str = "device.biometric.wrapped_key";
 const BIOMETRIC_NONCE: &str = "device.biometric.nonce";
+#[cfg(not(any(target_os = "android", feature = "jni-host-check")))]
+const VAULT_PAGE_KEY: &str = "vault.page_key.v1";
 
 /// Converts a protected value into the platform representation.
 ///
@@ -109,6 +117,19 @@ pub(crate) fn with_meta_pub<T>(f: impl FnOnce(&MetaStore) -> Result<T>) -> Resul
     with_meta(f)
 }
 
+/// Returns the unlocked vault key to another Rust module.
+///
+/// This value never enters Dart or the Android method channel. Account-slot
+/// maintenance uses it inside the Rust library only.
+pub(crate) fn current_vault_key() -> Result<VaultKey> {
+    CURRENT_KEY
+        .lock()
+        .map_err(|_| lock_poisoned())?
+        .as_ref()
+        .cloned()
+        .ok_or_else(|| anyhow!("Unlock the vault before changing account security."))
+}
+
 fn with_meta<T>(f: impl FnOnce(&MetaStore) -> Result<T>) -> Result<T> {
     if let Some(vault) = VAULT.lock().map_err(|_| lock_poisoned())?.as_ref() {
         return f(vault.store().meta());
@@ -125,7 +146,7 @@ fn with_meta<T>(f: impl FnOnce(&MetaStore) -> Result<T>) -> Result<T> {
 /// If a vault is already open this locks it first, because the metadata file
 /// cannot be in two places at once. Re-opening over an open vault is what an
 /// unlock after a lock timeout looks like, so it has to work rather than fail.
-fn take_meta() -> Result<MetaStore> {
+pub(crate) fn take_meta() -> Result<MetaStore> {
     if let Some(meta) = META.lock().map_err(|_| lock_poisoned())?.take() {
         return Ok(meta);
     }
@@ -135,6 +156,67 @@ fn take_meta() -> Result<MetaStore> {
         .take()
         .ok_or_else(|| anyhow!("The metadata file is not open."))?;
     Ok(vault.into_store().into_meta())
+}
+
+pub(crate) fn restore_meta(meta: MetaStore) -> Result<()> {
+    *META.lock().map_err(|_| lock_poisoned())? = Some(meta);
+    Ok(())
+}
+
+pub(crate) fn metadata_is_open() -> Result<bool> {
+    if VAULT.lock().map_err(|_| lock_poisoned())?.is_some() {
+        return Ok(true);
+    }
+    Ok(META.lock().map_err(|_| lock_poisoned())?.is_some())
+}
+
+pub(crate) fn page_key(_meta: &MetaStore) -> Result<String> {
+    #[cfg(any(target_os = "android", feature = "jni-host-check"))]
+    {
+        let mut bytes = crate::session_store::read_or_create_page_key()?;
+        let key = bytes
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        bytes.fill(0);
+        Ok(key)
+    }
+
+    #[cfg(not(any(target_os = "android", feature = "jni-host-check")))]
+    {
+        let bytes = _meta
+            .get(VAULT_PAGE_KEY)?
+            .ok_or_else(|| anyhow!("Unlock the vault once before background synchronization."))?;
+        let key = String::from_utf8(bytes).context("The vault page key is not valid text")?;
+        if key.len() != 64 || !key.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            anyhow::bail!("The vault page key is damaged.");
+        }
+        Ok(key)
+    }
+}
+
+fn ensure_page_key(meta: &MetaStore) -> Result<String> {
+    #[cfg(any(target_os = "android", feature = "jni-host-check"))]
+    {
+        page_key(meta)
+    }
+
+    #[cfg(not(any(target_os = "android", feature = "jni-host-check")))]
+    {
+        if meta.get(VAULT_PAGE_KEY)?.is_some() {
+            return page_key(meta);
+        }
+        let mut bytes = [0u8; 32];
+        getrandom::fill(&mut bytes)
+            .map_err(|error| anyhow!("random generation failed: {error}"))?;
+        let key = bytes
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        bytes.fill(0);
+        meta.set(VAULT_PAGE_KEY, key.as_bytes())?;
+        Ok(key)
+    }
 }
 
 /// How many records are waiting to reach the server.
@@ -624,8 +706,9 @@ pub fn rotate_recovery_phrase(password: String) -> Result<RecoveryPhraseView> {
             ));
         }
 
-        let phrase =
-            account::rotate_recovery_phrase(meta, &live).map_err(|error| anyhow!("{error}"))?;
+        let (slot, phrase) =
+            account::prepare_recovery_rotation(&live).map_err(|error| anyhow!("{error}"))?;
+        *PENDING_RECOVERY_SLOT.lock().map_err(|_| lock_poisoned())? = Some(slot);
 
         let confirm_indices = phrase
             .indices_to_confirm()
@@ -639,6 +722,44 @@ pub fn rotate_recovery_phrase(password: String) -> Result<RecoveryPhraseView> {
             confirm_indices,
         })
     })
+}
+
+/// Returns the pending slot after the supplied phrase proves that it opens
+/// the current vault key.
+pub(crate) fn pending_recovery_slot(phrase: &str) -> Result<account::RecoverySlot> {
+    let slot = PENDING_RECOVERY_SLOT
+        .lock()
+        .map_err(|_| lock_poisoned())?
+        .as_ref()
+        .cloned()
+        .ok_or_else(|| anyhow!("No recovery-phrase change is waiting for confirmation."))?;
+    let live = current_vault_key()?;
+    let candidate = account::Account {
+        email: account_email()?.unwrap_or_default(),
+        password_slot: None,
+        recovery_slot: slot.clone(),
+    };
+    let opened = account::unlock_with_recovery_from_account(&candidate, phrase)
+        .map_err(|error| anyhow!("{error}"))?;
+    if opened.expose() != live.expose() {
+        anyhow::bail!("The recovery phrase does not match the pending key slot.");
+    }
+    Ok(slot)
+}
+
+pub(crate) fn commit_pending_recovery_slot(slot: &account::RecoverySlot) -> Result<()> {
+    with_meta(|meta| {
+        let mut local_account = account::load(meta)
+            .map_err(|error| anyhow!("{error}"))?
+            .ok_or_else(|| anyhow!("This device has no sync account."))?;
+        local_account.recovery_slot = slot.clone();
+        account::save(meta, &local_account).map_err(|error| anyhow!("{error}"))
+    })?;
+    PENDING_RECOVERY_SLOT
+        .lock()
+        .map_err(|_| lock_poisoned())?
+        .take();
+    Ok(())
 }
 
 /// The email address of the sync account, or `None` on a local-only device.
@@ -834,7 +955,16 @@ fn open_vault_with_key(vault_path: &str, meta: MetaStore, key: VaultKey) -> Resu
     // Two layers, two keys, both HKDF subkeys of the vault key. SQLCipher
     // covers the file — the schema, the row count, the timestamps — and the
     // record cipher covers each payload inside it.
-    let store = Store::open(vault_path, meta, Some(&key.sqlcipher_key()))
+    // The page key protects database structure and ciphertext at rest. It is
+    // not the record key. Android Keystore stores it outside metadata. A
+    // locked sync process can move authenticated record ciphertext without
+    // opening an OTP payload.
+    // Existing installations migrate once from the former vault-derived page
+    // key. The new key is stored first, so a crash before rekey can retry with
+    // the old key and a crash after rekey can use the new key.
+    let page_key = ensure_page_key(&meta)?;
+    let previous_page_key = key.sqlcipher_key();
+    let store = Store::open_with_key_migration(vault_path, meta, &page_key, &previous_page_key)
         .context("The vault could not be opened")?;
     let mut vault = Vault::open(store, XChaChaCipher::new(&key))?;
 
@@ -871,6 +1001,10 @@ fn open_vault_with_key(vault_path: &str, meta: MetaStore, key: VaultKey) -> Resu
 pub fn lock_vault() -> Result<()> {
     cancel_pending_keystore_operations();
     crate::api::sync::clear_capabilities();
+    PENDING_RECOVERY_SLOT
+        .lock()
+        .map_err(|_| lock_poisoned())?
+        .take();
     #[cfg(any(target_os = "android", feature = "jni-host-check"))]
     crate::vault_key_bridge::clear_pending_secrets();
 
@@ -900,6 +1034,10 @@ pub fn is_vault_open() -> bool {
 pub fn wipe_device() -> Result<()> {
     cancel_pending_keystore_operations();
     crate::api::sync::clear_capabilities();
+    PENDING_RECOVERY_SLOT
+        .lock()
+        .map_err(|_| lock_poisoned())?
+        .take();
     #[cfg(any(target_os = "android", feature = "jni-host-check"))]
     crate::vault_key_bridge::clear_pending_secrets();
 
@@ -922,6 +1060,8 @@ pub fn wipe_device() -> Result<()> {
     // automatic wipe can occur before Dart regains control.
     meta.set(META_WIPE_CLEANUP_REQUIRED, b"1")?;
     *META.lock().map_err(|_| lock_poisoned())? = Some(meta);
+    #[cfg(any(target_os = "android", feature = "jni-host-check"))]
+    crate::session_store::clear_page_key()?;
     Ok(())
 }
 

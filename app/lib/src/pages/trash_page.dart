@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../../l10n/generated/app_localizations.dart';
 import '../rust/api/vault.dart' as rust;
+import '../services/localized_error.dart';
 import '../vault_controller.dart';
 
 class TrashPage extends StatefulWidget {
@@ -96,9 +97,11 @@ class _TrashPageState extends State<TrashPage> {
 
   void _showError(Object error) {
     if (!mounted) return;
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(SnackBar(content: Text(error.toString())));
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(localizedError(AppLocalizations.of(context), error)),
+      ),
+    );
   }
 
   String _retentionText(rust.TrashEntryView entry) {
@@ -125,7 +128,10 @@ class _TrashPageState extends State<TrashPage> {
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                Text(error.toString(), textAlign: TextAlign.center),
+                Text(
+                  localizedError(AppLocalizations.of(context), error),
+                  textAlign: TextAlign.center,
+                ),
                 const SizedBox(height: 16),
                 FilledButton(
                   onPressed: _load,

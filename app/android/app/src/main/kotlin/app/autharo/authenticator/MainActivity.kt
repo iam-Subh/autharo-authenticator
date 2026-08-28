@@ -1,4 +1,4 @@
-package dev.authcore.authenticator
+package app.autharo.authenticator
 
 import android.app.Activity
 import android.content.ClipData
@@ -50,16 +50,17 @@ import io.flutter.plugin.common.MethodChannel
  */
 class MainActivity : FlutterFragmentActivity() {
     private companion object {
-        const val CHANNEL = "dev.authcore.authenticator/keystore"
-        const val CLOCK_CHANNEL = "dev.authcore.authenticator/clock"
-        const val SCREEN_CAPTURE_CHANNEL = "dev.authcore.authenticator/screen_capture"
-        const val APPEARANCE_CHANNEL = "dev.authcore.authenticator/appearance"
-        const val CLIPBOARD_CHANNEL = "dev.authcore.authenticator/clipboard"
+        const val CHANNEL = "app.autharo.authenticator/keystore"
+        const val CLOCK_CHANNEL = "app.autharo.authenticator/clock"
+        const val SCREEN_CAPTURE_CHANNEL = "app.autharo.authenticator/screen_capture"
+        const val APPEARANCE_CHANNEL = "app.autharo.authenticator/appearance"
+        const val CLIPBOARD_CHANNEL = "app.autharo.authenticator/clipboard"
         const val AUTOMATIC_BACKUP_CHANNEL =
-            "dev.authcore.authenticator/automatic_backup"
-        const val HOME_WIDGET_CHANNEL = "dev.authcore.authenticator/home_widget"
-        const val PASSKEY_CHANNEL = "dev.authcore.authenticator/passkey"
-        const val DEVICE_INTEGRITY_CHANNEL = "dev.authcore.authenticator/device_integrity"
+            "app.autharo.authenticator/automatic_backup"
+        const val HOME_WIDGET_CHANNEL = "app.autharo.authenticator/home_widget"
+        const val PASSKEY_CHANNEL = "app.autharo.authenticator/passkey"
+        const val DEVICE_INTEGRITY_CHANNEL = "app.autharo.authenticator/device_integrity"
+        const val DEVICE_IDENTITY_CHANNEL = "app.autharo.authenticator/device_identity"
         const val CHOOSE_BACKUP_DIRECTORY = 7001
         const val SECURITY_PREFERENCES = "security_preferences"
         const val BLOCK_SCREENSHOTS = "block_screenshots"
@@ -73,10 +74,6 @@ class MainActivity : FlutterFragmentActivity() {
     private lateinit var passkeyBridge: PasskeyCredentialBridge
 
     override fun onCreate(savedInstanceState: Bundle?) {
-        // Install the native token store before Flutter starts Dart code. Sync
-        // credentials then travel only between Rust and this Kotlin object.
-        NativeSessionBridge.installTokenStore(SyncTokenStore(applicationContext))
-
         // Apply the stored choice before Flutter creates its first frame. The
         // default is true, so an existing installation stays protected until
         // the user explicitly permits screenshots.
@@ -124,6 +121,33 @@ class MainActivity : FlutterFragmentActivity() {
                         null
                     }
                     result.success(colour)
+                }
+                else -> result.notImplemented()
+            }
+        }
+
+        MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            DEVICE_IDENTITY_CHANNEL,
+        ).setMethodCallHandler { call, result ->
+            when (call.method) {
+                "description" -> {
+                    val manufacturer = Build.MANUFACTURER.trim()
+                    val model = Build.MODEL.trim()
+                    val name = if (
+                        manufacturer.isNotEmpty() &&
+                        !model.startsWith(manufacturer, ignoreCase = true)
+                    ) {
+                        "$manufacturer $model"
+                    } else {
+                        model
+                    }.trim().take(100)
+                    result.success(
+                        mapOf(
+                            "name" to name.ifEmpty { "Android device" },
+                            "platform" to "android",
+                        ),
+                    )
                 }
                 else -> result.notImplemented()
             }

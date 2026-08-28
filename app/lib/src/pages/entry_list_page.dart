@@ -13,6 +13,7 @@ import 'import_help_page.dart';
 import 'import_migration_page.dart';
 import '../services/list_sort.dart';
 import '../services/sync_controller.dart';
+import '../services/localized_error.dart';
 import '../ui/code_display.dart';
 import '../ui/entry_avatar.dart';
 import '../ui/folder_bar.dart';
@@ -196,12 +197,8 @@ class _EntryListPageState extends State<EntryListPage> {
 
   /// The core's errors are written for the user, so they are shown as-is rather
   /// than replaced with a generic failure message.
-  static String _message(Object error) {
-    final text = error.toString();
-    return text.startsWith('Exception: ')
-        ? text.substring('Exception: '.length)
-        : text;
-  }
+  String _message(Object error) =>
+      localizedError(AppLocalizations.of(context), error);
 
   void _toggleSelection(String id) {
     setState(() {
@@ -952,7 +949,9 @@ class _EntryListPageState extends State<EntryListPage> {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
-            AppLocalizations.of(context).sharedAccountImportFailed('$error'),
+            AppLocalizations.of(context).sharedAccountImportFailed(
+              localizedError(AppLocalizations.of(context), error),
+            ),
           ),
         ),
       );

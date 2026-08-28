@@ -27,7 +27,7 @@ class AutomaticBackupStatus {
 /// Storage Access Framework. The app keeps the newest seven files.
 class AutomaticBackupService {
   static const _channel = MethodChannel(
-    'dev.authcore.authenticator/automatic_backup',
+    'app.autharo.authenticator/automatic_backup',
   );
   static const _storage = FlutterSecureStorage();
   static const _enabledKey = 'automatic_backup.enabled';

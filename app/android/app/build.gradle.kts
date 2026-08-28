@@ -21,7 +21,7 @@ val releaseProperties = Properties().apply {
 }
 
 android {
-    namespace = "dev.authcore.authenticator"
+    namespace = "app.autharo.authenticator"
     compileSdk = flutter.compileSdkVersion
     // Pinned rather than inherited: the Rust core is cross-compiled against
     // this NDK, so a Flutter upgrade that moves the default would silently
@@ -58,10 +58,9 @@ android {
     }
 
     defaultConfig {
-        // NOTE: this identity is provisional. It is the Play listing identity
-        // and it must appear in assetlinks.json for the S7 passkey work, so
-        // settle it before either of those.
-        applicationId = "dev.authcore.authenticator"
+        // This is the final Android and Play listing identity. Keep it in sync
+        // with Firebase and the Digital Asset Links configuration.
+        applicationId = "app.autharo.authenticator"
         // PRD section 7: Android 8.0 (API 26). Passkey sign-in needs API 28 at
         // runtime, but the application still installs and runs on API 26 and
         // falls back to the password method there.

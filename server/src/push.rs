@@ -121,13 +121,9 @@ fn message_payload(registration_token: &str) -> serde_json::Value {
                 "type": "vault_changed",
                 "schema": "1"
             },
-            "notification": {
-                "title": "Authenticator update available",
-                "body": "Open Authenticator to synchronize your encrypted vault."
-            },
             "android": {
                 "collapse_key": "vault-sync",
-                "priority": "normal",
+                "priority": "high",
                 "ttl": "3600s"
             }
         }
@@ -218,12 +214,13 @@ mod tests {
     }
 
     #[test]
-    fn notification_payload_contains_no_vault_or_account_data() {
+    fn data_only_payload_contains_no_vault_or_account_data() {
         let payload = message_payload("route-token");
         let message = payload["message"].as_object().unwrap();
         let mut keys = message.keys().map(String::as_str).collect::<Vec<_>>();
         keys.sort_unstable();
-        assert_eq!(keys, ["android", "data", "notification", "token"]);
+        assert_eq!(keys, ["android", "data", "token"]);
+        assert_eq!(message["android"]["priority"], "high");
         assert_eq!(
             message["data"],
             json!({ "type": "vault_changed", "schema": "1" })

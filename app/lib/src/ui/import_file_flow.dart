@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import '../../l10n/generated/app_localizations.dart';
 import '../rust/api/vault.dart' as rust;
 import '../services/bounded_file_reader.dart';
+import '../services/localized_error.dart';
 import 'import_report_dialog.dart';
 
 const _maximumImportBytes = 32 * 1024 * 1024;
@@ -68,7 +69,9 @@ Future<void> importFromFile(
   try {
     detected = rust.detectImportFile(text: text);
   } catch (error) {
-    if (context.mounted) _say(context, '$error');
+    if (context.mounted) {
+      _say(context, localizedError(AppLocalizations.of(context), error));
+    }
     return;
   }
 
@@ -89,7 +92,9 @@ Future<void> importFromFile(
       nowMs: DateTime.now().millisecondsSinceEpoch,
     );
   } catch (error) {
-    if (context.mounted) _say(context, '$error');
+    if (context.mounted) {
+      _say(context, localizedError(AppLocalizations.of(context), error));
+    }
     return;
   }
 

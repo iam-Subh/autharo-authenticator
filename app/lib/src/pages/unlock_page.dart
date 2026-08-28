@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../../l10n/generated/app_localizations.dart';
 import '../services/vault_session.dart';
+import '../services/localized_error.dart';
 
 /// The unlock screen (FR-31, FR-32, FR-35).
 ///
@@ -164,15 +165,8 @@ class _UnlockPageState extends State<UnlockPage> {
   static bool _isCancellation(Object error) =>
       error.toString().contains('authentication_cancelled');
 
-  static String _message(Object error) {
-    final text = error.toString();
-    for (final prefix in ['Exception: ', 'AnyhowException(', 'Bad state: ']) {
-      if (text.startsWith(prefix)) {
-        return text.substring(prefix.length).replaceAll(RegExp(r'\)$'), '');
-      }
-    }
-    return text;
-  }
+  String _message(Object error) =>
+      localizedError(AppLocalizations.of(context), error);
 
   @override
   Widget build(BuildContext context) {

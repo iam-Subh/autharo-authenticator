@@ -1,4 +1,4 @@
-package dev.authcore.authenticator
+package app.autharo.authenticator
 
 import android.os.Build
 import android.security.keystore.KeyGenParameterSpec
@@ -43,6 +43,9 @@ object VaultKeystore {
     private const val PROVIDER = "AndroidKeyStore"
     // Kept for vaults written before authenticated wrapping used versioned
     // aliases. Those ciphertexts have no alias header.
+    // Keep these legacy alias values after the application-ID rename. The
+    // alias is stored inside existing wrapped-key ciphertext. Changing it
+    // would make an existing local vault unreadable.
     private const val ALIAS = "dev.authcore.authenticator.vault_wrap_key"
     private const val ALIAS_PREFIX = "dev.authcore.authenticator.vault_wrap_key."
     private val WRAPPED_MAGIC = byteArrayOf(0x41, 0x4b, 0x53, 0x31) // AKS1

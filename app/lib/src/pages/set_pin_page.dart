@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 
 import '../../l10n/generated/app_localizations.dart';
 import '../services/vault_session.dart';
+import '../services/localized_error.dart';
 import '../ui/form_page.dart';
 
 /// Sets, changes, or removes the application lock PIN (FR-31).
@@ -119,7 +120,7 @@ class _SetPinPageState extends State<SetPinPage> {
     } catch (error) {
       if (!mounted) return;
       setState(() {
-        _error = error.toString();
+        _error = localizedError(AppLocalizations.of(context), error);
         _busy = false;
       });
     }
@@ -153,7 +154,7 @@ class _SetPinPageState extends State<SetPinPage> {
     } catch (error) {
       if (!mounted) return;
       setState(() {
-        _error = error.toString();
+        _error = localizedError(AppLocalizations.of(context), error);
         _busy = false;
       });
     }

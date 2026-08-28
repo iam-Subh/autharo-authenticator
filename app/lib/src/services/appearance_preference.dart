@@ -39,7 +39,7 @@ class AppearancePreference {
   static const _languageKey = 'ui.language';
   static const _storage = FlutterSecureStorage();
   static const _channel = MethodChannel(
-    'dev.authcore.authenticator/appearance',
+    'app.autharo.authenticator/appearance',
   );
 
   static final theme = ValueNotifier<AppThemeChoice>(AppThemeChoice.system);

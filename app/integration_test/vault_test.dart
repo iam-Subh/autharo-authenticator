@@ -52,7 +52,7 @@ void main() {
         fail(
           'This device has a PIN on its vault, so the tests cannot open it. '
           'Either remove the PIN in Settings, or reinstall the app with '
-          '"adb uninstall dev.authcore.authenticator". Reinstalling destroys '
+          '"adb uninstall app.autharo.authenticator". Reinstalling destroys '
           'the codes on the device, so export a backup first if any of them '
           'matter.',
         );

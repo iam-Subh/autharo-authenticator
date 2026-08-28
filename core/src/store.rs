@@ -419,6 +419,31 @@ impl Store {
         Self::from_connection(vault, meta, sqlcipher_key)
     }
 
+    /// Opens a page-encrypted vault with a replacement key and, when needed,
+    /// migrates an older key in place.
+    ///
+    /// The metadata is kept outside the connection attempt. This is required
+    /// because a failed key check must not consume the only open metadata
+    /// handle before the fallback key can be tried.
+    pub fn open_with_key_migration(
+        path: &str,
+        meta: MetaStore,
+        current_key: &str,
+        previous_key: &str,
+    ) -> Result<Self> {
+        let current = Connection::open(path)?;
+        match apply_encryption(&current, current_key) {
+            Ok(()) => Self::from_keyed_connection(current, meta),
+            Err(_) => {
+                drop(current);
+                let previous = Connection::open(path)?;
+                apply_encryption(&previous, previous_key)?;
+                rekey_connection(&previous, current_key)?;
+                Self::from_keyed_connection(previous, meta)
+            }
+        }
+    }
+
     pub fn open_in_memory(meta: MetaStore) -> Result<Self> {
         Self::from_connection(Connection::open_in_memory()?, meta, None)
     }
@@ -432,6 +457,10 @@ impl Store {
             apply_encryption(&vault, key)?;
         }
 
+        Self::from_keyed_connection(vault, meta)
+    }
+
+    fn from_keyed_connection(vault: Connection, meta: MetaStore) -> Result<Self> {
         // Foreign keys are off by default in SQLite, and the outbox references
         // the entry table.
         vault.pragma_update(None, "foreign_keys", true)?;
@@ -710,6 +739,25 @@ impl Store {
     pub fn set_time_offset_seconds(&self, offset: i64) -> Result<()> {
         self.meta.set_time_offset_seconds(offset)
     }
+}
+
+fn rekey_connection(vault: &Connection, key: &str) -> Result<()> {
+    if key.len() != 64 || !key.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(StoreError::InvalidValue {
+            detail: "the vault page key must contain 64 hexadecimal characters".to_string(),
+        });
+    }
+    vault.execute_batch(&format!("PRAGMA hexrekey = '{key}';"))?;
+    vault
+        .query_row("SELECT count(*) FROM sqlite_master", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .map_err(|_| {
+            StoreError::Database(rusqlite::Error::InvalidPath(
+                "the vault could not be read after page-key migration".into(),
+            ))
+        })?;
+    Ok(())
 }
 
 /// Turns on page encryption for this connection (section 12.1).

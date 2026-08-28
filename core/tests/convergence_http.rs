@@ -185,7 +185,7 @@ fn sign_up() -> SecretString {
     let auth_key = Zeroizing::new([0x33u8; 32]);
 
     client
-        .register(&account, &auth_key, &Zeroizing::new([0x55u8; 32]))
+        .register(&account, &auth_key, &Zeroizing::new([0x55u8; 32]), None)
         .expect("the harness needs a running server");
     client
         .login(&email, &auth_key, Some("convergence harness"))

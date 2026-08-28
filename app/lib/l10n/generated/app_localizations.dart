@@ -3499,6 +3499,360 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Sync account created'**
   String get securityAccountRegistered;
+
+  /// No description provided for @changeAccountPassword.
+  ///
+  /// In en, this message translates to:
+  /// **'Change account password'**
+  String get changeAccountPassword;
+
+  /// No description provided for @changeAccountPasswordDescription.
+  ///
+  /// In en, this message translates to:
+  /// **'Replace the sync password and sign out other devices.'**
+  String get changeAccountPasswordDescription;
+
+  /// No description provided for @currentPassword.
+  ///
+  /// In en, this message translates to:
+  /// **'Current password'**
+  String get currentPassword;
+
+  /// No description provided for @newPassword.
+  ///
+  /// In en, this message translates to:
+  /// **'New password'**
+  String get newPassword;
+
+  /// No description provided for @enterNewPasswordAgain.
+  ///
+  /// In en, this message translates to:
+  /// **'Enter the new password again'**
+  String get enterNewPasswordAgain;
+
+  /// No description provided for @passwordChangeRevokesDevices.
+  ///
+  /// In en, this message translates to:
+  /// **'This action signs out all other devices. Add each trusted device again with an approval code or the recovery phrase.'**
+  String get passwordChangeRevokesDevices;
+
+  /// No description provided for @passwordChanged.
+  ///
+  /// In en, this message translates to:
+  /// **'The account password was changed.'**
+  String get passwordChanged;
+
+  /// No description provided for @passwordChangeFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'The password could not be changed: {error}'**
+  String passwordChangeFailed(String error);
+
+  /// No description provided for @renameDevice.
+  ///
+  /// In en, this message translates to:
+  /// **'Rename device'**
+  String get renameDevice;
+
+  /// No description provided for @deviceName.
+  ///
+  /// In en, this message translates to:
+  /// **'Device name'**
+  String get deviceName;
+
+  /// No description provided for @deviceRenamed.
+  ///
+  /// In en, this message translates to:
+  /// **'The device was renamed.'**
+  String get deviceRenamed;
+
+  /// No description provided for @forgotPassword.
+  ///
+  /// In en, this message translates to:
+  /// **'Forgot password?'**
+  String get forgotPassword;
+
+  /// No description provided for @resetAccountPassword.
+  ///
+  /// In en, this message translates to:
+  /// **'Reset account password'**
+  String get resetAccountPassword;
+
+  /// No description provided for @resetPasswordDescription.
+  ///
+  /// In en, this message translates to:
+  /// **'Use the 24-word recovery phrase to set a new password. This action signs out all other devices.'**
+  String get resetPasswordDescription;
+
+  /// No description provided for @passwordResetComplete.
+  ///
+  /// In en, this message translates to:
+  /// **'The account password was reset.'**
+  String get passwordResetComplete;
+
+  /// No description provided for @verifyEmailOwnership.
+  ///
+  /// In en, this message translates to:
+  /// **'Verify email ownership'**
+  String get verifyEmailOwnership;
+
+  /// No description provided for @verifyWithEmail.
+  ///
+  /// In en, this message translates to:
+  /// **'Verify with email'**
+  String get verifyWithEmail;
+
+  /// No description provided for @continueWithGoogle.
+  ///
+  /// In en, this message translates to:
+  /// **'Continue with Google'**
+  String get continueWithGoogle;
+
+  /// No description provided for @identityPassword.
+  ///
+  /// In en, this message translates to:
+  /// **'Email sign-in password'**
+  String get identityPassword;
+
+  /// No description provided for @identityPasswordHelp.
+  ///
+  /// In en, this message translates to:
+  /// **'Use a password that is different from the vault password. Firebase receives this password. Firebase never receives the vault password.'**
+  String get identityPasswordHelp;
+
+  /// No description provided for @identityPasswordMustDiffer.
+  ///
+  /// In en, this message translates to:
+  /// **'Use a different password for email sign-in and vault encryption.'**
+  String get identityPasswordMustDiffer;
+
+  /// No description provided for @identityPasswordTooShort.
+  ///
+  /// In en, this message translates to:
+  /// **'Enter at least 6 characters for the email sign-in password.'**
+  String get identityPasswordTooShort;
+
+  /// No description provided for @emailVerificationSent.
+  ///
+  /// In en, this message translates to:
+  /// **'A verification email was sent. Open the link, then select I verified my email.'**
+  String get emailVerificationSent;
+
+  /// No description provided for @iVerifiedMyEmail.
+  ///
+  /// In en, this message translates to:
+  /// **'I verified my email'**
+  String get iVerifiedMyEmail;
+
+  /// No description provided for @emailOwnershipVerified.
+  ///
+  /// In en, this message translates to:
+  /// **'Email ownership verified for {email}.'**
+  String emailOwnershipVerified(String email);
+
+  /// No description provided for @verifyEmailBeforeSync.
+  ///
+  /// In en, this message translates to:
+  /// **'Verify the account email before you turn on sync.'**
+  String get verifyEmailBeforeSync;
+
+  /// No description provided for @firebaseNotConfigured.
+  ///
+  /// In en, this message translates to:
+  /// **'Firebase Authentication is not configured in this Android build.'**
+  String get firebaseNotConfigured;
+
+  /// No description provided for @verificationStillPending.
+  ///
+  /// In en, this message translates to:
+  /// **'The email address is not verified yet.'**
+  String get verificationStillPending;
+
+  /// No description provided for @identityEmailMismatch.
+  ///
+  /// In en, this message translates to:
+  /// **'The verified email does not match this vault account.'**
+  String get identityEmailMismatch;
+
+  /// No description provided for @errorInvalidCredentials.
+  ///
+  /// In en, this message translates to:
+  /// **'The email address or password is not correct.'**
+  String get errorInvalidCredentials;
+
+  /// No description provided for @errorAccountConflict.
+  ///
+  /// In en, this message translates to:
+  /// **'An account already exists for this email address.'**
+  String get errorAccountConflict;
+
+  /// No description provided for @errorServerUnavailable.
+  ///
+  /// In en, this message translates to:
+  /// **'The sync server cannot be reached. Check the connection and server address.'**
+  String get errorServerUnavailable;
+
+  /// No description provided for @errorInvalidServerResponse.
+  ///
+  /// In en, this message translates to:
+  /// **'The sync server sent an invalid response.'**
+  String get errorInvalidServerResponse;
+
+  /// No description provided for @errorSignedOut.
+  ///
+  /// In en, this message translates to:
+  /// **'This device was signed out. Sign in again to continue synchronization.'**
+  String get errorSignedOut;
+
+  /// No description provided for @errorDeviceApprovalRequired.
+  ///
+  /// In en, this message translates to:
+  /// **'Approve this device from an existing device, or use the recovery phrase.'**
+  String get errorDeviceApprovalRequired;
+
+  /// No description provided for @errorInsufficientScope.
+  ///
+  /// In en, this message translates to:
+  /// **'This session does not permit that action. Sign in again.'**
+  String get errorInsufficientScope;
+
+  /// No description provided for @errorElevationRequired.
+  ///
+  /// In en, this message translates to:
+  /// **'Enter the account password to authorize this action.'**
+  String get errorElevationRequired;
+
+  /// No description provided for @errorInvalidScope.
+  ///
+  /// In en, this message translates to:
+  /// **'This permission is not available.'**
+  String get errorInvalidScope;
+
+  /// No description provided for @errorCapabilityExpired.
+  ///
+  /// In en, this message translates to:
+  /// **'The temporary authorization expired. Enter the password again.'**
+  String get errorCapabilityExpired;
+
+  /// No description provided for @errorNotFound.
+  ///
+  /// In en, this message translates to:
+  /// **'The requested item was not found.'**
+  String get errorNotFound;
+
+  /// No description provided for @errorEmailVerificationRequired.
+  ///
+  /// In en, this message translates to:
+  /// **'Verify the email address before account registration.'**
+  String get errorEmailVerificationRequired;
+
+  /// No description provided for @errorInvalidIdentity.
+  ///
+  /// In en, this message translates to:
+  /// **'The email identity proof is invalid or expired. Verify the email again.'**
+  String get errorInvalidIdentity;
+
+  /// No description provided for @errorRateLimited.
+  ///
+  /// In en, this message translates to:
+  /// **'Too many requests were made. Wait and try again.'**
+  String get errorRateLimited;
+
+  /// No description provided for @errorQuotaExceeded.
+  ///
+  /// In en, this message translates to:
+  /// **'This account reached a server limit.'**
+  String get errorQuotaExceeded;
+
+  /// No description provided for @errorRequestTooLarge.
+  ///
+  /// In en, this message translates to:
+  /// **'The request is too large.'**
+  String get errorRequestTooLarge;
+
+  /// No description provided for @errorFeatureUnavailable.
+  ///
+  /// In en, this message translates to:
+  /// **'This feature is not configured on the server.'**
+  String get errorFeatureUnavailable;
+
+  /// No description provided for @errorServerInternal.
+  ///
+  /// In en, this message translates to:
+  /// **'The server could not complete the request.'**
+  String get errorServerInternal;
+
+  /// No description provided for @errorIdentityCredentials.
+  ///
+  /// In en, this message translates to:
+  /// **'The email sign-in password is not correct.'**
+  String get errorIdentityCredentials;
+
+  /// No description provided for @errorIdentityEmail.
+  ///
+  /// In en, this message translates to:
+  /// **'Enter a valid email address.'**
+  String get errorIdentityEmail;
+
+  /// No description provided for @errorIdentityWeakPassword.
+  ///
+  /// In en, this message translates to:
+  /// **'Use a stronger email sign-in password.'**
+  String get errorIdentityWeakPassword;
+
+  /// No description provided for @errorIdentityNetwork.
+  ///
+  /// In en, this message translates to:
+  /// **'Firebase Authentication cannot be reached. Check the connection.'**
+  String get errorIdentityNetwork;
+
+  /// No description provided for @errorIdentityDisabled.
+  ///
+  /// In en, this message translates to:
+  /// **'This email identity is disabled.'**
+  String get errorIdentityDisabled;
+
+  /// No description provided for @errorIdentityCanceled.
+  ///
+  /// In en, this message translates to:
+  /// **'Google sign-in was canceled.'**
+  String get errorIdentityCanceled;
+
+  /// No description provided for @linkVerifiedIdentity.
+  ///
+  /// In en, this message translates to:
+  /// **'Link verified identity'**
+  String get linkVerifiedIdentity;
+
+  /// No description provided for @linkVerifiedIdentityRequired.
+  ///
+  /// In en, this message translates to:
+  /// **'Verify email ownership for this existing account.'**
+  String get linkVerifiedIdentityRequired;
+
+  /// No description provided for @linkVerifiedIdentityDescription.
+  ///
+  /// In en, this message translates to:
+  /// **'Verify ownership of {email}. Enter the current vault password to authorize the link.'**
+  String linkVerifiedIdentityDescription(String email);
+
+  /// No description provided for @verifiedIdentity.
+  ///
+  /// In en, this message translates to:
+  /// **'Verified identity'**
+  String get verifiedIdentity;
+
+  /// No description provided for @securityIdentityLinked.
+  ///
+  /// In en, this message translates to:
+  /// **'Verified identity linked'**
+  String get securityIdentityLinked;
+
+  /// No description provided for @errorUnknown.
+  ///
+  /// In en, this message translates to:
+  /// **'The operation could not be completed.'**
+  String get errorUnknown;
 }
 
 class _AppLocalizationsDelegate

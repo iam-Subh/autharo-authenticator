@@ -1,4 +1,4 @@
-package dev.authcore.authenticator;
+package app.autharo.authenticator;
 
 /** Transfers vault secrets between Rust and Kotlin without using Dart. */
 public final class NativeVaultBridge {

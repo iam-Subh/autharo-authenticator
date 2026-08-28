@@ -8,7 +8,7 @@ import 'package:flutter/services.dart';
 /// only random one-time handles and wrapped ciphertext.
 class VaultKeystore {
   static const MethodChannel _channel = MethodChannel(
-    'dev.authcore.authenticator/keystore',
+    'app.autharo.authenticator/keystore',
   );
 
   /// True when this device already holds a wrapping key.

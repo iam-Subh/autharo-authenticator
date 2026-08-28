@@ -1,4 +1,4 @@
-package dev.authcore.authenticator
+package app.autharo.authenticator
 
 import android.os.Build
 import java.io.File

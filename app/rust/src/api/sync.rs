@@ -19,9 +19,10 @@
 use anyhow::{anyhow, Context, Result};
 use authcore::account;
 use authcore::backoff;
+use authcore::hlc::HlcClock;
 use authcore::secret::SecretString;
 use authcore::session::{self, SessionClient, SessionError};
-use authcore::store::MetaStore;
+use authcore::store::{MetaStore, Store};
 use authcore::time_offset::{self, Measurement};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -63,6 +64,7 @@ struct CachedCapability {
 /// Elevated access is deliberately process-only. It is not encoded into
 /// `meta.db`, the Android token file, or Dart state.
 static CAPABILITY: Mutex<Option<CachedCapability>> = Mutex::new(None);
+static SYNC_RUN: Mutex<()> = Mutex::new(());
 
 /// Everything OFF-05 needs: three states and the time of the last success.
 ///
@@ -166,6 +168,7 @@ pub fn register_account(
     password: String,
     recovery_phrase: String,
     device_name: Option<String>,
+    identity_token: String,
 ) -> Result<()> {
     let (account, base) = crate::api::vault::with_meta_pub(|meta| {
         let account = account::load(meta)
@@ -193,7 +196,12 @@ pub fn register_account(
 
     let client = SessionClient::new(ReqwestClient::new(), &base);
     client
-        .register(&account, &auth_key, &recovery_auth_key)
+        .register(
+            &account,
+            &auth_key,
+            &recovery_auth_key,
+            Some(identity_token.trim()),
+        )
         .map_err(|error| anyhow!("{error}"))?;
 
     let session = client
@@ -286,6 +294,71 @@ pub fn sign_in(
     Ok(())
 }
 
+/// Resets a forgotten password by proving possession of the recovery phrase.
+///
+/// This operation is for a device that can already open the local vault. The
+/// recovered server slot must contain the same vault key. This check prevents
+/// an account from replacing the key of unrelated local entries.
+pub fn recover_account_password(
+    email: String,
+    recovery_phrase: String,
+    new_password: String,
+    device_name: Option<String>,
+) -> Result<()> {
+    if new_password.chars().count() < 10 {
+        anyhow::bail!("The new password must have at least 10 characters.");
+    }
+    let base = crate::api::vault::with_meta_pub(|meta| {
+        text(meta, META_SERVER_URL)?.ok_or_else(|| anyhow!("Choose a sync server first."))
+    })?;
+    let recovery_auth_key =
+        account::derive_recovery_auth_key(&recovery_phrase).map_err(|error| anyhow!("{error}"))?;
+    let client = SessionClient::new(ReqwestClient::new(), &base);
+    let start = client
+        .start_password_recovery(&email, &recovery_auth_key)
+        .map_err(|error| anyhow!("{error}"))?;
+    let candidate = account::Account {
+        email: email.trim().to_string(),
+        password_slot: None,
+        recovery_slot: account::RecoverySlot {
+            wrapped_key: start.recovery_slot.wrapped_key.clone(),
+            nonce: start.recovery_slot.nonce.clone(),
+        },
+    };
+    let recovered_key = account::unlock_with_recovery_from_account(&candidate, &recovery_phrase)
+        .map_err(|error| anyhow!("{error}"))?;
+    let live_key = crate::api::vault::current_vault_key()?;
+    if recovered_key.expose() != live_key.expose() {
+        anyhow::bail!(
+            "The recovery phrase belongs to a different vault. Use it on the device that owns that account."
+        );
+    }
+    let new_slot = account::wrap_with_password(&new_password, &live_key)
+        .map_err(|error| anyhow!("{error}"))?;
+    let new_auth_key =
+        account::derive_auth_key(&new_password, &new_slot).map_err(|error| anyhow!("{error}"))?;
+    let session = client
+        .finish_password_recovery(
+            &start.reset_token,
+            &new_auth_key,
+            &new_slot,
+            device_name.as_deref(),
+        )
+        .map_err(|error| anyhow!("{error}"))?;
+    let local_account = account::Account {
+        email: email.trim().to_string(),
+        password_slot: Some(new_slot),
+        recovery_slot: account::RecoverySlot {
+            wrapped_key: session.recovery_slot.wrapped_key.clone(),
+            nonce: session.recovery_slot.nonce.clone(),
+        },
+    };
+    crate::api::vault::with_meta_pub(|meta| {
+        account::save(meta, &local_account).map_err(|error| anyhow!("{error}"))
+    })?;
+    store_session(&session)
+}
+
 /// Ends the server session, then removes the local session. The vault and its
 /// entries stay.
 ///
@@ -339,6 +412,37 @@ pub struct DeviceView {
     pub revoked: bool,
 }
 
+pub struct IdentityStatusView {
+    pub linked: bool,
+    pub provider: Option<String>,
+    pub verified_email: Option<String>,
+}
+
+pub fn identity_status() -> Result<IdentityStatusView> {
+    with_account(|client, token| {
+        let value = client.identity_status(token)?;
+        Ok(IdentityStatusView {
+            linked: value.linked,
+            provider: value.provider,
+            verified_email: value.verified_email,
+        })
+    })
+}
+
+pub fn link_identity(password: String, identity_token: String) -> Result<IdentityStatusView> {
+    let auth_key = derive_stored_auth_key(&password)?;
+    elevate_with_auth(&auth_key, &[SCOPE_SECURITY_READ])?;
+    let value = with_scope(SCOPE_SECURITY_READ, |client, token| {
+        Ok(client.link_identity(token, &auth_key, identity_token.trim())?)
+    })?;
+    clear_capabilities();
+    Ok(IdentityStatusView {
+        linked: value.linked,
+        provider: value.provider,
+        verified_email: value.verified_email,
+    })
+}
+
 /// Section 9.5: every device that has signed in to this account.
 pub fn list_devices() -> Result<Vec<DeviceView>> {
     with_scope(SCOPE_SECURITY_READ, |client, token| {
@@ -354,6 +458,17 @@ pub fn list_devices() -> Result<Vec<DeviceView>> {
                 revoked: device.revoked,
             })
             .collect())
+    })
+}
+
+pub fn rename_device(device_id: String, name: String) -> Result<()> {
+    let name = name.trim();
+    if name.is_empty() || name.len() > 100 || name.chars().any(char::is_control) {
+        anyhow::bail!("Enter a valid device name.");
+    }
+    with_scope(SCOPE_SECURITY_READ, |client, token| {
+        client.rename_device(token, &device_id, name)?;
+        Ok(())
     })
 }
 
@@ -425,6 +540,88 @@ pub fn enroll_recovery_access(password: String, recovery_phrase: String) -> Resu
         client.enroll_recovery_access(token, &auth_key, &recovery_auth_key, &recovery_slot)?;
         Ok(())
     })
+}
+
+/// Commits a recovery phrase that the user has confirmed.
+///
+/// For a synchronized account, the server update completes before local
+/// metadata changes. A network failure therefore leaves the old phrase valid
+/// on both sides. A local-only account commits the prepared slot directly.
+pub fn commit_recovery_phrase(password: String, recovery_phrase: String) -> Result<()> {
+    let pending = crate::api::vault::pending_recovery_slot(&recovery_phrase)?;
+    let has_session = crate::api::vault::with_meta_pub(session_is_stored)?;
+
+    if has_session {
+        let auth_key = derive_stored_auth_key(&password)?;
+        elevate_with_auth(&auth_key, &[SCOPE_SECURITY_READ])?;
+        let recovery_auth_key = account::derive_recovery_auth_key(&recovery_phrase)
+            .map_err(|error| anyhow!("{error}"))?;
+        with_scope(SCOPE_SECURITY_READ, |client, token| {
+            client.enroll_recovery_access(token, &auth_key, &recovery_auth_key, &pending)?;
+            Ok(())
+        })?;
+        clear_capabilities();
+    }
+
+    crate::api::vault::commit_pending_recovery_slot(&pending)
+}
+
+/// Replaces the sync-account password without changing the vault key.
+///
+/// The new slot is prepared in Rust from the unlocked vault key. The server
+/// receives only the wrapped key, public KDF parameters, and authentication
+/// proofs. After the server commits, this device stores the new slot and the
+/// only new session. The server revokes every older session and other device.
+pub fn change_account_password(current_password: String, new_password: String) -> Result<()> {
+    if new_password.chars().count() < 10 {
+        anyhow::bail!("The new password must have at least 10 characters.");
+    }
+
+    let live_key = crate::api::vault::current_vault_key()?;
+    let mut local_account = crate::api::vault::with_meta_pub(|meta| {
+        let local_account = account::load(meta)
+            .map_err(|error| anyhow!("{error}"))?
+            .ok_or_else(|| anyhow!("This device has no sync account."))?;
+        text(meta, META_SERVER_URL)?.ok_or_else(|| anyhow!("Choose a sync server first."))?;
+        Ok(local_account)
+    })?;
+    let current_slot = local_account
+        .password_slot
+        .as_ref()
+        .ok_or_else(|| anyhow!("This account has no password slot."))?;
+    let proven = account::unlock_with_password_from_account(&local_account, &current_password)
+        .map_err(|error| anyhow!("{error}"))?;
+    if proven.expose() != live_key.expose() {
+        anyhow::bail!("The current password does not open this vault.");
+    }
+    let current_auth_key = account::derive_auth_key(&current_password, current_slot)
+        .map_err(|error| anyhow!("{error}"))?;
+    let new_slot = account::wrap_with_password(&new_password, &live_key)
+        .map_err(|error| anyhow!("{error}"))?;
+    let new_auth_key =
+        account::derive_auth_key(&new_password, &new_slot).map_err(|error| anyhow!("{error}"))?;
+
+    elevate_with_auth(&current_auth_key, &[SCOPE_SECURITY_READ])?;
+    let renewal = with_scope(SCOPE_SECURITY_READ, |client, token| {
+        client
+            .change_password(token, &current_auth_key, &new_auth_key, &new_slot)
+            .map_err(|error| anyhow!("{error}"))
+    })?;
+    clear_capabilities();
+
+    local_account.password_slot = Some(new_slot);
+    crate::api::vault::with_meta_pub(|meta| {
+        account::save(meta, &local_account).map_err(|error| anyhow!("{error}"))?;
+        save_session(
+            meta,
+            &SessionTokens {
+                access: renewal.access_token,
+                refresh: renewal.refresh_token,
+            },
+        )
+    })?;
+
+    Ok(())
 }
 
 pub struct SecurityEventView {
@@ -952,6 +1149,13 @@ pub struct SyncRunView {
 /// only correct answer is a full re-sync, so there is nothing for the user to
 /// decide.
 pub fn sync_now(force: bool) -> Result<SyncRunView> {
+    let _guard = SYNC_RUN
+        .lock()
+        .map_err(|_| anyhow!("The synchronization lock was poisoned by an earlier failure."))?;
+    sync_now_inner(force)
+}
+
+fn sync_now_inner(force: bool) -> Result<SyncRunView> {
     let now_ms = now_ms();
 
     // OFF-06. A user pressing the button is never made to wait: they can see
@@ -1044,6 +1248,162 @@ pub fn sync_now(force: bool) -> Result<SyncRunView> {
     })?;
 
     outcome
+}
+
+/// Runs an Android background cycle without opening an OTP payload.
+///
+/// The page key opens the database structure. Each record remains encrypted
+/// with the vault key. This function can compare timestamps and transfer
+/// ciphertext, but it cannot generate or display an OTP code.
+pub fn sync_in_background(meta_path: String, vault_path: String) -> Result<SyncRunView> {
+    let _guard = SYNC_RUN
+        .lock()
+        .map_err(|_| anyhow!("The synchronization lock was poisoned by an earlier failure."))?;
+
+    if !crate::api::vault::metadata_is_open()? {
+        crate::api::vault::open_meta(meta_path.clone())?;
+    }
+    if crate::api::vault::is_vault_open() {
+        return sync_now_inner(false);
+    }
+
+    let now_ms = now_ms();
+    let schedule = crate::api::vault::with_meta_pub(|meta| {
+        backoff::load(meta).map_err(|error| anyhow!("{error}"))
+    })?;
+    if !schedule.is_due(now_ms) {
+        return Ok(SyncRunView {
+            pulled: 0,
+            applied: 0,
+            pushed: 0,
+            conflicts: 0,
+            counters_corrected: 0,
+            needs_sign_in: false,
+            skipped_by_backoff: true,
+            retry_in_ms: schedule.wait_ms(now_ms) as i64,
+        });
+    }
+
+    rotate_migrated_session_if_needed()?;
+    let (base, token) = crate::api::vault::with_meta_pub(|meta| {
+        let base = server_url(meta)?.ok_or_else(|| anyhow!("Choose a sync server first."))?;
+        let token = access_token(meta)?.ok_or_else(|| anyhow!("Sign in to sync this device."))?;
+        Ok((base, token))
+    })?;
+    let mut transport =
+        authcore::transport::ServerTransport::new(ReqwestClient::new(), &base, token);
+    let mut outcome = run_locked_cycle(&meta_path, &vault_path, &mut transport, now_ms);
+
+    if matches!(&outcome, Ok(run) if run.needs_sign_in) && try_refresh()? {
+        let token = crate::api::vault::with_meta_pub(|meta| {
+            access_token(meta)?.ok_or_else(|| anyhow!("the renewed session was not stored"))
+        })?;
+        transport.set_token(token);
+        outcome = run_locked_cycle(&meta_path, &vault_path, &mut transport, now_ms);
+    }
+
+    record_clock_measurement(&transport)?;
+    let verdict = match &outcome {
+        Ok(run) if run.needs_sign_in => Err("this device has been signed out".to_string()),
+        Ok(_) => Ok(()),
+        Err(error) => Err(error.to_string()),
+    };
+    record_outcome(verdict.clone())?;
+    crate::api::vault::with_meta_pub(|meta| {
+        match &verdict {
+            Ok(()) => backoff::record_success(meta).map_err(|error| anyhow!("{error}"))?,
+            Err(_) => {
+                backoff::record_failure(meta, now_ms, jitter())
+                    .map_err(|error| anyhow!("{error}"))?;
+            }
+        }
+        Ok(())
+    })?;
+    outcome
+}
+
+fn run_locked_cycle(
+    meta_path: &str,
+    vault_path: &str,
+    transport: &mut authcore::transport::ServerTransport<ReqwestClient>,
+    now_ms: u64,
+) -> Result<SyncRunView> {
+    let meta = crate::api::vault::take_meta()?;
+    let page_key = crate::api::vault::page_key(&meta)?;
+    let mut store = match Store::open(vault_path, meta, Some(&page_key)) {
+        Ok(store) => store,
+        Err(error) => {
+            let reopened = MetaStore::open(meta_path)
+                .map_err(|open_error| anyhow!("{error}; metadata reopen failed: {open_error}"))?;
+            crate::api::vault::restore_meta(reopened)?;
+            return Err(anyhow!("{error}"));
+        }
+    };
+    let result = run_locked_store(&mut store, transport, now_ms);
+    crate::api::vault::restore_meta(store.into_meta())?;
+    result
+}
+
+fn run_locked_store(
+    store: &mut Store,
+    transport: &mut authcore::transport::ServerTransport<ReqwestClient>,
+    now_ms: u64,
+) -> Result<SyncRunView> {
+    use authcore::sync::SyncError;
+
+    let device = store.device_id().map_err(|error| anyhow!("{error}"))?;
+    let highest = store
+        .list(true)
+        .map_err(|error| anyhow!("{error}"))?
+        .into_iter()
+        .map(|record| record.hlc)
+        .max();
+    let mut clock = match highest {
+        Some(last) => HlcClock::resume(device, last),
+        None => HlcClock::new(device),
+    };
+
+    let cycle = match authcore::sync::run_cycle(store, &mut clock, transport, now_ms) {
+        Ok(cycle) => cycle,
+        Err(SyncError::CursorTooOld) => {
+            let applied = authcore::sync::full_resync(store, &mut clock, transport, now_ms)
+                .map_err(|error| anyhow!("{error}"))?;
+            return Ok(SyncRunView {
+                pulled: applied as u32,
+                applied: applied as u32,
+                pushed: 0,
+                conflicts: 0,
+                counters_corrected: 0,
+                needs_sign_in: false,
+                skipped_by_backoff: false,
+                retry_in_ms: 0,
+            });
+        }
+        Err(SyncError::Unauthorized) => {
+            return Ok(SyncRunView {
+                pulled: 0,
+                applied: 0,
+                pushed: 0,
+                conflicts: 0,
+                counters_corrected: 0,
+                needs_sign_in: true,
+                skipped_by_backoff: false,
+                retry_in_ms: 0,
+            });
+        }
+        Err(error) => return Err(anyhow!("{error}")),
+    };
+
+    Ok(SyncRunView {
+        pulled: cycle.pulled as u32,
+        applied: cycle.applied as u32,
+        pushed: cycle.pushed as u32,
+        conflicts: cycle.conflicts as u32,
+        counters_corrected: 0,
+        needs_sign_in: false,
+        skipped_by_backoff: false,
+        retry_in_ms: 0,
+    })
 }
 
 /// One cycle, without the session handling around it.

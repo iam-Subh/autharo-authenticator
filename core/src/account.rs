@@ -291,7 +291,7 @@ pub fn create_account(
 /// user has been shown a phrase that was not stored.
 pub fn rotate_recovery_phrase(meta: &MetaStore, vault_key: &VaultKey) -> Result<RecoveryPhrase> {
     let mut account = load(meta)?.ok_or(AccountError::EmailRequired)?;
-    let (recovery_slot, phrase) = build_recovery_slot(vault_key)?;
+    let (recovery_slot, phrase) = prepare_recovery_rotation(vault_key)?;
 
     // Saved first. Returning the phrase and then failing to store the slot
     // would leave the user holding 24 words that open nothing, with every
@@ -300,6 +300,16 @@ pub fn rotate_recovery_phrase(meta: &MetaStore, vault_key: &VaultKey) -> Result<
     save(meta, &account)?;
 
     Ok(phrase)
+}
+
+/// Builds a recovery slot and phrase without changing metadata.
+///
+/// A synchronized client uses this operation for a two-phase rotation. It
+/// updates the server first and saves this slot locally only after the server
+/// commits. This prevents the phone and server from accepting different
+/// recovery phrases after a network failure.
+pub fn prepare_recovery_rotation(vault_key: &VaultKey) -> Result<(RecoverySlot, RecoveryPhrase)> {
+    build_recovery_slot(vault_key)
 }
 
 /// Derives the password slot's KEK and wraps the vault key (section 9.2.1).
@@ -322,6 +332,17 @@ fn build_password_slot(password: &str, vault_key: &VaultKey) -> Result<PasswordS
         wrapped_key: sealed.ciphertext,
         nonce: sealed.nonce,
     })
+}
+
+/// Builds a replacement password slot around the current vault key.
+///
+/// This function does not change local metadata. The caller can send the
+/// ciphertext and public derivation parameters to the account server first.
+/// It can then save the slot only after the server commits the password
+/// change. The raw vault key and the password-derived wrapping key stay in
+/// Rust memory.
+pub fn wrap_with_password(password: &str, vault_key: &VaultKey) -> Result<PasswordSlot> {
+    build_password_slot(password, vault_key)
 }
 
 /// Generates the recovery key and wraps the vault key with it (section 9.2.3).
@@ -389,7 +410,18 @@ pub fn derive_recovery_auth_key(phrase: &str) -> Result<Zeroizing<[u8; KEY_LEN]>
 /// Unwraps the vault key with the account password.
 pub fn unlock_with_password(meta: &MetaStore, password: &str) -> Result<VaultKey> {
     let account = load(meta)?.ok_or(AccountError::NoAccount)?;
-    let slot = account.password_slot.ok_or(AccountError::NoAccount)?;
+    unlock_with_password_from_account(&account, password)
+}
+
+/// Opens an account's password slot without reading or changing metadata.
+///
+/// Password replacement uses this function to prove the current password
+/// before it prepares a replacement slot.
+pub fn unlock_with_password_from_account(account: &Account, password: &str) -> Result<VaultKey> {
+    let slot = account
+        .password_slot
+        .as_ref()
+        .ok_or(AccountError::NoAccount)?;
 
     let master = pin::derive_kek(password, &slot.salt, slot.params)?;
     let kek = expand(&master, INFO_KEK);
@@ -412,7 +444,11 @@ pub fn unlock_with_password(meta: &MetaStore, password: &str) -> Result<VaultKey
 /// rather than as a wrong vault.
 pub fn unlock_with_recovery(meta: &MetaStore, phrase: &str) -> Result<VaultKey> {
     let account = load(meta)?.ok_or(AccountError::NoAccount)?;
+    unlock_with_recovery_from_account(&account, phrase)
+}
 
+/// Opens an account's recovery slot without reading or changing metadata.
+pub fn unlock_with_recovery_from_account(account: &Account, phrase: &str) -> Result<VaultKey> {
     let mnemonic = Mnemonic::parse_in(Language::English, phrase.trim()).map_err(|error| {
         AccountError::BadRecoveryPhrase {
             detail: error.to_string(),

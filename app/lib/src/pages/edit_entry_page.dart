@@ -5,6 +5,7 @@ import '../../l10n/generated/app_localizations.dart';
 import '../rust/api/vault.dart' as rust;
 import '../services/custom_icon_data.dart';
 import '../services/bounded_file_reader.dart';
+import '../services/localized_error.dart';
 import '../services/service_icon_matcher.dart';
 import '../ui/entry_avatar.dart';
 import '../ui/form_page.dart';
@@ -129,7 +130,11 @@ class _EditEntryPageState extends State<EditEntryPage> {
       );
       if (mounted) Navigator.of(context).pop();
     } catch (error) {
-      if (mounted) setState(() => _problem = '$error');
+      if (mounted) {
+        setState(
+          () => _problem = localizedError(AppLocalizations.of(context), error),
+        );
+      }
     } finally {
       if (mounted) setState(() => _busy = false);
     }

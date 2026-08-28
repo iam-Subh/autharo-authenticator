@@ -19,12 +19,11 @@ The server sends this fixed data only:
 }
 ```
 
-The notification text says that an encrypted-vault update is available. Do
-not add an issuer, account name, one-time code, secret, vault record, or
+Do not add an issuer, account name, one-time code, secret, vault record, or
 ciphertext to the FCM payload.
 
 The message is a signal. The client uses the authenticated sync API to get the
-encrypted changes. The vault remains locked until the user authenticates.
+encrypted changes. Entry payloads remain locked until the user authenticates.
 
 ## Values you must provide
 
@@ -45,7 +44,7 @@ the hosting provider's secret storage.
 1. Open the [Firebase console](https://console.firebase.google.com/).
 2. Create a project on the Spark plan.
 3. Add an Android application.
-4. Use `dev.authcore.authenticator` as the Android package name.
+4. Use `app.autharo.authenticator` as the Android package name.
 5. Confirm this package name before release. Firebase binds the file to it.
 6. Download `google-services.json`.
 7. Put the file at `app/android/app/google-services.json`.
@@ -77,23 +76,28 @@ the server stops at startup and reports the configuration error.
 Use two physical Android devices with different sync device sessions.
 
 1. Install the Firebase-configured application on both devices.
-2. Sign in to the same sync account on both devices.
-3. Allow notifications on both devices.
+2. Open and unlock the application on both devices.
+3. Sign in to the same sync account on both devices. Notification permission is not required.
 4. Add or change an entry on device A.
-5. Confirm that device B receives the generic update notification.
-6. Open and unlock device B.
-7. Confirm that the normal encrypted sync obtains the change.
+5. Leave device B locked and move the application to the background.
+6. Confirm that the background handler obtains the encrypted change.
+7. Open and unlock device B. Confirm that the new entry is present.
 8. Sign out device B.
 9. Change an entry on device A again.
 10. Confirm that device B no longer receives account update signals.
 
 Also test device revocation. Revocation must remove the stored FCM route.
 
-## Current limits
+## Background execution
 
-The implementation does not perform a background vault merge while the vault
-is locked. Android shows the generic notification. Opening and unlocking the
-application starts the authenticated sync cycle.
+The server sends a data-only message with Android high priority. The handler
+runs one bounded cycle. It does not display a notification. The cycle opens
+the page-encrypted database with a separate Android Keystore key. Every entry
+payload remains encrypted with the unavailable vault key.
+
+Android can delay or stop background work. A force-stop from Android settings
+prevents FCM delivery until the user opens the application again. Foreground
+startup and the 15-minute foreground timer remain fallback triggers.
 
 The implementation does not add Firebase credentials to the repository. It
 does not run on iOS, Windows, macOS, or Linux.

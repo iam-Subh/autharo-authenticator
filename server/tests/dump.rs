@@ -77,6 +77,7 @@ async fn start_server() -> (SocketAddr, sqlx::PgPool) {
         fake_auth_hash: crypto::hash_auth_key(&[0u8; 32]).unwrap(),
         passkeys: None,
         push: None,
+        identity: None,
     });
 
     // Port 0: the operating system picks a free one, so a test run cannot

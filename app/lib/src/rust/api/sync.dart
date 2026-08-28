@@ -6,7 +6,7 @@
 import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `access_token`, `capability_token`, `check_scheme`, `clear_capabilities`, `clear_session`, `derive_stored_auth_key`, `elevate_with_auth`, `is_unauthorized`, `jitter`, `legacy_session`, `legacy_token`, `load_session`, `now_ms`, `record_clock_measurement`, `record_outcome`, `remove_legacy_session`, `rotate_migrated_session_if_needed`, `run_one_cycle`, `save_session`, `server_url`, `session_is_stored`, `store_session`, `text`, `tracing_http_warning`, `try_refresh`, `with_account`, `with_scope`
+// These functions are ignored because they are not marked as `pub`: `access_token`, `capability_token`, `check_scheme`, `clear_capabilities`, `clear_session`, `derive_stored_auth_key`, `elevate_with_auth`, `is_unauthorized`, `jitter`, `legacy_session`, `legacy_token`, `load_session`, `now_ms`, `record_clock_measurement`, `record_outcome`, `remove_legacy_session`, `rotate_migrated_session_if_needed`, `run_locked_cycle`, `run_locked_store`, `run_one_cycle`, `save_session`, `server_url`, `session_is_stored`, `store_session`, `sync_now_inner`, `text`, `tracing_http_warning`, `try_refresh`, `with_account`, `with_scope`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `CachedCapability`
 
 /// Reads the sync status without touching the network.
@@ -31,10 +31,12 @@ Future<void> registerAccount({
   required String password,
   required String recoveryPhrase,
   String? deviceName,
+  required String identityToken,
 }) => RustLib.instance.api.crateApiSyncRegisterAccount(
   password: password,
   recoveryPhrase: recoveryPhrase,
   deviceName: deviceName,
+  identityToken: identityToken,
 );
 
 /// Signs in on a device that does not hold the account yet.
@@ -61,6 +63,23 @@ Future<void> signIn({
   recoveryPhrase: recoveryPhrase,
 );
 
+/// Resets a forgotten password by proving possession of the recovery phrase.
+///
+/// This operation is for a device that can already open the local vault. The
+/// recovered server slot must contain the same vault key. This check prevents
+/// an account from replacing the key of unrelated local entries.
+Future<void> recoverAccountPassword({
+  required String email,
+  required String recoveryPhrase,
+  required String newPassword,
+  String? deviceName,
+}) => RustLib.instance.api.crateApiSyncRecoverAccountPassword(
+  email: email,
+  recoveryPhrase: recoveryPhrase,
+  newPassword: newPassword,
+  deviceName: deviceName,
+);
+
 /// Ends the server session, then removes the local session. The vault and its
 /// entries stay.
 ///
@@ -80,9 +99,26 @@ Future<void> setPushToken({required String token}) =>
 Future<void> clearPushToken() =>
     RustLib.instance.api.crateApiSyncClearPushToken();
 
+Future<IdentityStatusView> identityStatus() =>
+    RustLib.instance.api.crateApiSyncIdentityStatus();
+
+Future<IdentityStatusView> linkIdentity({
+  required String password,
+  required String identityToken,
+}) => RustLib.instance.api.crateApiSyncLinkIdentity(
+  password: password,
+  identityToken: identityToken,
+);
+
 /// Section 9.5: every device that has signed in to this account.
 Future<List<DeviceView>> listDevices() =>
     RustLib.instance.api.crateApiSyncListDevices();
+
+Future<void> renameDevice({required String deviceId, required String name}) =>
+    RustLib.instance.api.crateApiSyncRenameDevice(
+      deviceId: deviceId,
+      name: name,
+    );
 
 /// Cuts one device off. Its sessions end in the same request on the server.
 ///
@@ -117,6 +153,33 @@ Future<void> enrollRecoveryAccess({
 }) => RustLib.instance.api.crateApiSyncEnrollRecoveryAccess(
   password: password,
   recoveryPhrase: recoveryPhrase,
+);
+
+/// Commits a recovery phrase that the user has confirmed.
+///
+/// For a synchronized account, the server update completes before local
+/// metadata changes. A network failure therefore leaves the old phrase valid
+/// on both sides. A local-only account commits the prepared slot directly.
+Future<void> commitRecoveryPhrase({
+  required String password,
+  required String recoveryPhrase,
+}) => RustLib.instance.api.crateApiSyncCommitRecoveryPhrase(
+  password: password,
+  recoveryPhrase: recoveryPhrase,
+);
+
+/// Replaces the sync-account password without changing the vault key.
+///
+/// The new slot is prepared in Rust from the unlocked vault key. The server
+/// receives only the wrapped key, public KDF parameters, and authentication
+/// proofs. After the server commits, this device stores the new slot and the
+/// only new session. The server revokes every older session and other device.
+Future<void> changeAccountPassword({
+  required String currentPassword,
+  required String newPassword,
+}) => RustLib.instance.api.crateApiSyncChangeAccountPassword(
+  currentPassword: currentPassword,
+  newPassword: newPassword,
 );
 
 Future<List<SecurityEventView>> listSecurityActivity() =>
@@ -163,6 +226,19 @@ Future<bool> hasElevatedScope({required String scope}) =>
 /// decide.
 Future<SyncRunView> syncNow({required bool force}) =>
     RustLib.instance.api.crateApiSyncSyncNow(force: force);
+
+/// Runs an Android background cycle without opening an OTP payload.
+///
+/// The page key opens the database structure. Each record remains encrypted
+/// with the vault key. This function can compare timestamps and transfer
+/// ciphertext, but it cannot generate or display an OTP code.
+Future<SyncRunView> syncInBackground({
+  required String metaPath,
+  required String vaultPath,
+}) => RustLib.instance.api.crateApiSyncSyncInBackground(
+  metaPath: metaPath,
+  vaultPath: vaultPath,
+);
 
 class DeviceApprovalView {
   final String token;
@@ -223,6 +299,31 @@ class DeviceView {
           lastSeen == other.lastSeen &&
           current == other.current &&
           revoked == other.revoked;
+}
+
+class IdentityStatusView {
+  final bool linked;
+  final String? provider;
+  final String? verifiedEmail;
+
+  const IdentityStatusView({
+    required this.linked,
+    this.provider,
+    this.verifiedEmail,
+  });
+
+  @override
+  int get hashCode =>
+      linked.hashCode ^ provider.hashCode ^ verifiedEmail.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is IdentityStatusView &&
+          runtimeType == other.runtimeType &&
+          linked == other.linked &&
+          provider == other.provider &&
+          verifiedEmail == other.verifiedEmail;
 }
 
 class SecurityEventView {

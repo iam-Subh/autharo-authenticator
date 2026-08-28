@@ -11,7 +11,7 @@ sequence in section 18: each stage is finished before the next starts.
 | S2 — First platform | Android. Flutter UI, QR scan, manual entry, list, copy, application lock | **Done**, verified on a physical device |
 | S3 — Crypto | Vault key, key slots, Argon2id, XChaCha20-Poly1305, recovery key | **Done.** Device slot, record encryption, page encryption, password slot, recovery key |
 | S4 — Backend | API, PostgreSQL schema, key slots, quotas, enumeration resistance | **Done for the Android target.** Account, session, device approval, activity, capability, and destructive-operation APIs are implemented |
-| S5 — Sync | Sync engine, outbox, HLC, conflict resolution, prune watermark, FCM change signals | **Android infrastructure done.** Live push delivery waits for the Firebase project files and server credentials |
+| S5 — Sync | Sync engine, outbox, HLC, conflict resolution, prune watermark, FCM change signals | **Done in code for Android.** Live FCM delivery waits for the Firebase project files and server credentials |
 | S6 — Other platforms | Remaining platforms, screen capture, tray and menu bar | **Excluded from the current Android security scope** |
 | S7 — Passkeys | Android Credential Manager bridge, WebAuthn verification, PRF slot, fallback | **Infrastructure done.** Production activation waits for the final domain, package ID, signing fingerprint, and Digital Asset Links file |
 
@@ -76,8 +76,10 @@ though no sync account exists. The chain is:
 ```
 Android Keystore key (non-exportable, StrongBox where present)
   wraps -> vault key (256-bit, generated on first run)
-             |- HKDF "record"    -> XChaCha20-Poly1305 over each entry payload
-             \- HKDF "database"  -> derived, ready, and currently unused
+             \- HKDF "record" -> XChaCha20-Poly1305 over each entry payload
+
+Android Keystore background key
+  wraps -> random database page key -> SQLite3MC ChaCha20 page encryption
 ```
 
 Section 12.1 defines two layers doing different jobs, and is explicit that one
@@ -86,11 +88,13 @@ is not a substitute for the other:
 | Layer | Protects | Status |
 |---|---|---|
 | Record encryption (XChaCha20-Poly1305, §9.3) | The secret, the issuer, the account name | **Linked and verified on-device.** Mandatory |
-| Database encryption (§12.1) | The row structure: entry count, change times, the device identifier in each HLC | **Not linked.** Defence in depth; see below |
+| Database encryption (§12.1) | The row structure: entry count, change times, the device identifier in each HLC | **Linked.** Android Keystore protects the page key |
 
-Neither subkey is the vault key and neither is the other, so a weakness in one
-construction stays there. The second key is derived and unused rather than
-absent, so linking a library is a dependency change, not a redesign.
+The page key is separate from the vault key. Background sync can open the
+database structure and move authenticated ciphertext. It cannot decrypt an
+issuer, account name, OTP secret, note, tag, or custom icon. Dart receives
+neither key. The first foreground unlock migrates an older vault-derived page
+key with `PRAGMA hexrekey`. The migration preserves existing records.
 
 ### Database library: SQLite3 Multiple Ciphers
 
@@ -138,95 +142,6 @@ plaintext vault on the test device and deleted it, along with `meta.db` and the
 device slot inside it. That is the intended behaviour and it is why the first
 device run after the switch showed failures partway through: the vault the
 earlier tests had opened no longer existed. Runs after it are stable.
-
-### The timeout measures sleep, not taps
-
-FR-33 requires a monotonic clock that counts across device sleep. Three clocks
-were available and only one is correct:
-
-| Clock | Why not |
-|---|---|
-| Wall clock (`DateTime.now`) | The user can set it backwards, which would hold the vault open |
-| `CLOCK_MONOTONIC` (Dart's `Stopwatch`) | Stops during deep sleep. A phone in a pocket overnight returns as though no time passed |
-| **`SystemClock.elapsedRealtime()`** (`CLOCK_BOOTTIME`) | Counts through both. Chosen |
-
-It resets to zero on reboot, so a reading *lower* than the stored one is
-treated as expired — a reboot cannot mean less time passed.
-
-FR-33a puts the policy in `meta.db`, which is the unencrypted file, because the
-application has to know whether it may open without asking *before* it opens
-anything. A setting that reset at every start would do nothing.
-
-FR-33a in 0.10 makes this explicit: the file holds the *whole* lock policy —
-the timeout, FR-34's background flag, and any later lock option — and no secret
-and no vault content.
-
-## The vault is now encrypted at rest
-
-Section 9.2.4's device slot is built, so a local-only vault is encrypted even
-though no sync account exists. The chain is:
-
-```
-Android Keystore key (non-exportable, StrongBox where present)
-  wraps -> vault key (256-bit, generated on first run)
-             |- HKDF "record"    -> XChaCha20-Poly1305 over each entry payload
-             \- HKDF "database"  -> derived, ready, and currently unused
-```
-
-Section 12.1 defines two layers doing different jobs, and is explicit that one
-is not a substitute for the other:
-
-| Layer | Protects | Status |
-|---|---|---|
-| Record encryption (XChaCha20-Poly1305, §9.3) | The secret, the issuer, the account name | **Linked and verified on-device.** Mandatory |
-| Database encryption (§12.1) | The row structure: entry count, change times, the device identifier in each HLC | **Not linked.** Defence in depth; see below |
-
-Neither subkey is the vault key and neither is the other, so a weakness in one
-construction stays there. The second key is derived and unused rather than
-absent, so linking a library is a dependency change, not a redesign.
-
-### Database encryption is not linked
-
-Section 12.1 asks that the chosen library and the reason be recorded here. The
-honest record is that there is no page-encrypting build linked today, and the
-reason is worth writing down because it was not obvious.
-
-SQLCipher (`bundled-sqlcipher-vendored-openssl`) was linked and **working on
-the host**: `core/tests/store.rs` asserted on the file's bytes and confirmed no
-`SQLite format 3` header and a file that refused to open unkeyed or under a
-wrong key. Getting there needed Strawberry Perl, since OpenSSL's `Configure` is
-a Perl program that Git Bash's cut-down Perl cannot run.
-
-It was then removed, because **it cannot cross-compile to Android from
-Windows**. OpenSSL's `android-arm64` configuration wants a compiler named
-`aarch64-linux-android-clang`; the Windows NDK ships
-`aarch64-linux-android26-clang.cmd`, and `Configure` exits 255. Android is the
-platform that ships, so a database layer that only works on the development
-host is not the layer section 12.1 is asking for.
-
-Worse, the failure was quiet. Cargokit's error did not fail the gradle build,
-so the APK was packaged with the **previous** `librust_lib_authenticator.so` and
-reported success. See "Verify the build" below for what now catches that.
-
-**The way back is SQLite3 Multiple Ciphers**, which section 12.1 names: it
-carries its own crypto, needs no OpenSSL and therefore no Perl, and supports
-ChaCha20, which the core already uses. No `rusqlite`-compatible crate wraps it
-today, so it means vendoring the amalgamation and compiling it with `cc` — but
-`cc` already cross-compiles cleanly with the NDK clang cargokit configures,
-which is exactly the step OpenSSL fails at.
-
-What this costs meanwhile, from section 12.1's table: the entry count, the
-change times, and the device identifier inside each HLC are visible in
-`vault.db`. **No secret, issuer, or account name is** — the record layer is
-mandatory, is linked, and is verified on-device by reading the file back off
-the phone's flash. Section 12.1: "The database layer is defence in depth. Ship
-it, but do not block the record layer on it."
-
-`VaultKey::sqlcipher_key` and `Store::open`'s key parameter are kept, so
-relinking is a dependency change rather than a redesign.
-`core/tests/store.rs` asserts the gap rather than hiding it: one test fails the
-moment the file stops having a plain SQLite header, which is the signal to
-invert it.
 
 ## The account slots
 
@@ -406,6 +321,11 @@ destroy — kept only to be stolen later.
 
 ## The server (S4)
 
+The repository includes a Render Blueprint and a multi-stage server container.
+See [Render deployment](docs/render-deployment.md). The Blueprint uses the
+external Neon database and requests its pooled connection string as a secret.
+It does not create a temporary Render PostgreSQL database.
+
 Axum over PostgreSQL 16, per section 14.2. `server/` is its own crate, run
 against a development database in Docker:
 
@@ -428,7 +348,8 @@ security activity log. `0008` removes elevated scopes from old sessions and
 adds capability sessions. `0009` adds verified passkey credentials. Existing
 accounts must enroll recovery access before recovery can approve a new device.
 Complete enrollment from an already approved device before you revoke that
-device.
+device. `0010` adds device-bound FCM routes. `0011` adds short-lived recovery
+reset ceremonies.
 
 ### The exit criterion, and the test that nearly did not work
 
@@ -650,8 +571,8 @@ scripts/
 
 Requires Rust 1.98+, Flutter 3.44+, and the Android SDK with NDK 28.2.
 
-No Perl is needed. It was, briefly, while SQLCipher was linked; see "Database
-encryption is not linked" for why that came back out.
+No Perl is needed. SQLite3 Multiple Ciphers provides database page encryption
+without OpenSSL.
 
 One command runs every gate below, and is the one to use:
 
@@ -775,19 +696,45 @@ false negative results. The user can keep the warning policy or choose another
 policy. Play Integrity is not enabled. It requires the final Google Play
 application identity, request binding, and server-side verdict verification.
 
+## Account password and recovery
+
+An authenticated device can replace the account password. The server updates
+the encrypted password slot, revokes older sessions and other devices, and
+returns one new base session to the requesting device.
+
+A forgotten-password reset uses a ten-minute, one-time recovery ceremony. The
+client sends a proof derived from the 24-word phrase. The phrase does not cross
+the network. A recovery-phrase rotation updates the server before it commits
+local metadata. A network failure therefore leaves the old phrase valid on
+both sides.
+
+New device records use the Android manufacturer and model by default. The user
+can rename any active device from the device-management screen.
+
+Google and verified-email registration use Firebase Authentication. The
+server verifies the token signature, issuer, audience, expiry, subject, and
+verified email. Existing accounts use a password-authorized identity-link
+operation. The identity token does not encrypt the vault. See
+[Google and email authentication](docs/google-and-email-authentication.md).
+
 ## Android push synchronization
 
 Firebase Cloud Messaging (FCM) sends a generic vault-change signal. The push
 payload contains no account name, issuer, one-time code, vault record, or key.
-The Android client starts the normal authenticated sync cycle when it receives
-the supported signal. The vault remains locked until the user authenticates.
+The Android client registers a top-level FCM background handler. A data-only
+signal starts one bounded authenticated sync cycle. The database page key
+comes from Android Keystore through JNI. The cycle transfers record
+ciphertext and compares Hybrid Logical Clock (HLC) timestamps. The vault key
+remains absent. HOTP conflict reconciliation waits for the next unlock.
 
 The server binds each Firebase installation token to the current device and
 base session. Sign-out and device revocation remove that route. Temporary FCM
 errors do not remove a valid token. An FCM `UNREGISTERED` result removes it.
 
-The application builds without Firebase configuration. Push stays disabled in
-that build. See [Firebase push setup](docs/firebase-push.md) for activation.
+The application builds without Firebase configuration. Push and identity
+verification stay disabled in that build. A release server requires
+`FIREBASE_AUTH_PROJECT_ID`. See [Firebase push setup](docs/firebase-push.md)
+for activation.
 
 ## Production transport security
 
@@ -858,9 +805,9 @@ Costs build time and nothing else. See `app/android/gradle.properties`.
 
 ## Notes carried forward
 
-- **`applicationId` is `dev.authcore.authenticator` and is provisional.** It is
-  the Play listing identity and must appear in `assetlinks.json` for S7. Cheap
-  to change now, painful after either.
+- **`applicationId` is `app.autharo.authenticator` and is final.** It is the
+  Firebase and Play listing identity. It must also appear in
+  `assetlinks.json` for passkeys.
 - **The stage S2 plaintext database is discarded, not migrated.** Development
   data only, and a migration would have to read every plaintext secret and
   rewrite it, leaving plaintext in the old file's free pages if it failed part

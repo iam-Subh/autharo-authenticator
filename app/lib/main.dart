@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
+import 'package:firebase_messaging/firebase_messaging.dart';
 
 import 'l10n/generated/app_localizations.dart';
 import 'src/pages/entry_list_page.dart';
@@ -26,6 +27,7 @@ import 'src/vault_controller.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
+  FirebaseMessaging.onBackgroundMessage(firebaseMessagingBackgroundHandler);
   runApp(const AuthenticatorApp());
 }
 

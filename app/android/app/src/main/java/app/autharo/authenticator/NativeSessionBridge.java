@@ -1,4 +1,4 @@
-package dev.authcore.authenticator;
+package app.autharo.authenticator;
 
 /** Installs the Kotlin token store directly into the Rust library. */
 public final class NativeSessionBridge {

@@ -117,7 +117,7 @@ mod android {
     /// starts Dart code. The global reference holds an application context,
     /// not an Activity, so an Activity recreation does not invalidate it.
     #[unsafe(no_mangle)]
-    pub extern "system" fn Java_dev_authcore_authenticator_NativeSessionBridge_installTokenStore(
+    pub extern "system" fn Java_app_autharo_authenticator_NativeSessionBridge_installTokenStore(
         mut env: JNIEnv,
         _class: JClass,
         store: JObject,
@@ -198,6 +198,40 @@ mod android {
         })
     }
 
+    pub(crate) fn read_or_create_page_key() -> Result<Vec<u8>> {
+        with_store(|env, store| {
+            let value = env
+                .call_method(store, "readOrCreatePageKey", "()[B", &[])
+                .context("The Android token store could not read the vault page key")?
+                .l()
+                .context("The Android token store returned an invalid vault page key")?;
+            if value.is_null() {
+                return Err(anyhow!(
+                    "The Android token store returned no vault page key."
+                ));
+            }
+            let array = JByteArray::from(value);
+            let bytes = env
+                .convert_byte_array(&array)
+                .context("The Android token store returned unreadable page-key bytes")?;
+            let zeros = vec![0_i8; bytes.len()];
+            env.set_byte_array_region(&array, 0, &zeros)
+                .context("The Android page-key buffer could not be cleared")?;
+            if bytes.len() != 32 {
+                return Err(anyhow!("The Android vault page key has an invalid length."));
+            }
+            Ok(bytes)
+        })
+    }
+
+    pub(crate) fn clear_page_key() -> Result<()> {
+        with_store(|env, store| {
+            env.call_method(store, "clearPageKey", "()V", &[])
+                .context("The Android token store could not clear the vault page key")?;
+            Ok(())
+        })
+    }
+
     fn with_store<T>(
         operation: impl FnOnce(&mut JNIEnv<'_>, &JObject<'_>) -> Result<T>,
     ) -> Result<T> {
@@ -215,7 +249,10 @@ mod android {
 }
 
 #[cfg(any(target_os = "android", feature = "jni-host-check"))]
-pub(crate) use android::{clear_session, has_session, read_session, write_session};
+pub(crate) use android::{
+    clear_page_key, clear_session, has_session, read_or_create_page_key, read_session,
+    write_session,
+};
 
 #[cfg(test)]
 mod tests {

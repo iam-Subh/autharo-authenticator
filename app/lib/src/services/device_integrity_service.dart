@@ -23,7 +23,7 @@ class DeviceIntegrityResult {
 
 class DeviceIntegrityService {
   static const _channel = MethodChannel(
-    'dev.authcore.authenticator/device_integrity',
+    'app.autharo.authenticator/device_integrity',
   );
 
   static final policy = ValueNotifier(RootPolicy.warn);

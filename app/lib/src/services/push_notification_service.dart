@@ -4,8 +4,34 @@ import 'dart:io';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/foundation.dart';
+import 'package:path_provider/path_provider.dart';
 
 import '../rust/api/sync.dart' as rust;
+import '../rust/frb_generated.dart';
+
+/// Handles a data-only FCM signal when Android starts a background isolate.
+///
+/// The sync engine reads and writes encrypted records only. It does not open
+/// the vault key or generate an OTP code. Android can stop work that exceeds
+/// its background execution limit, so one bounded sync cycle runs here.
+@pragma('vm:entry-point')
+Future<void> firebaseMessagingBackgroundHandler(RemoteMessage message) async {
+  if (!PushNotificationService.isVaultChangeSignal(message.data)) return;
+  try {
+    await Firebase.initializeApp();
+    await RustLib.init();
+    final directory = await getApplicationSupportDirectory();
+    await rust.syncInBackground(
+      metaPath: '${directory.path}/meta.db',
+      vaultPath: '${directory.path}/vault.db',
+    );
+  } catch (error) {
+    // The foreground status records normal server failures. A missing local
+    // account or an incomplete page-key migration is safe to retry after the
+    // next unlock.
+    debugPrint('Background synchronization did not complete: $error');
+  }
+}
 
 /// Receives privacy-safe Firebase Cloud Messaging (FCM) change signals.
 ///
@@ -73,19 +99,8 @@ class PushNotificationService {
       return;
     }
 
-    var settings = await messaging.getNotificationSettings();
-    if (settings.authorizationStatus == AuthorizationStatus.notDetermined) {
-      settings = await messaging.requestPermission(
-        alert: true,
-        badge: false,
-        sound: false,
-      );
-    }
-    if (settings.authorizationStatus != AuthorizationStatus.authorized &&
-        settings.authorizationStatus != AuthorizationStatus.provisional) {
-      return;
-    }
-
+    // Data-only vault-change messages do not display a notification. Android
+    // notification permission must not control background synchronization.
     await messaging.setAutoInitEnabled(true);
     final token = await messaging.getToken();
     if (token != null) await _register(token);

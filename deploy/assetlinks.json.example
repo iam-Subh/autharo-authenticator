@@ -6,7 +6,7 @@
     ],
     "target": {
       "namespace": "android_app",
-      "package_name": "dev.authcore.authenticator",
+      "package_name": "app.autharo.authenticator",
       "sha256_cert_fingerprints": [
         "REPLACE_WITH_RELEASE_SIGNING_CERTIFICATE_SHA256"
       ]

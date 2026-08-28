@@ -24,6 +24,7 @@ use crate::{AppState, SharedState};
 const ACCESS_TTL_MINUTES: i64 = 15;
 const REFRESH_TTL_DAYS: i64 = 30;
 const CAPABILITY_TTL_MINUTES: i64 = 5;
+const RECOVERY_RESET_TTL_MINUTES: i64 = 10;
 
 /// Bound all Argon2 work. Each permit can use about 19 MiB. Login and account
 /// deletion need the same bound as registration.
@@ -45,7 +46,7 @@ pub const SCOPE_VAULT_SYNC: &str = "vault:sync";
 pub const SCOPE_SECURITY_READ: &str = "security:read";
 pub const SCOPE_SHARE_WRITE: &str = "share:write";
 pub const SCOPE_SESSION_SELF: &str = "session:self";
-const DEFAULT_SCOPES: [&str; 2] = [SCOPE_VAULT_SYNC, SCOPE_SESSION_SELF];
+pub(crate) const DEFAULT_SCOPES: [&str; 2] = [SCOPE_VAULT_SYNC, SCOPE_SESSION_SELF];
 
 const ELEVATED_SCOPES: [&str; 2] = [SCOPE_SECURITY_READ, SCOPE_SHARE_WRITE];
 
@@ -78,6 +79,10 @@ pub struct WrappedSlot {
 #[derive(Debug, Deserialize)]
 pub struct RegisterRequest {
     pub email: String,
+    /// A fresh Firebase ID token. A release server verifies its signature,
+    /// project, expiry, subject, and email ownership before it creates an
+    /// account. Development builds can omit it when Firebase is not set.
+    pub identity_token: Option<String>,
     /// The client's authentication key. Hashed on arrival and never stored as
     /// it is (section 9.2.1 step 5).
     pub auth_key: String,
@@ -122,6 +127,25 @@ pub async fn register(
         ratelimit::REGISTRATIONS_PER_ADDRESS_PER_HOUR,
     )
     .await?;
+
+    // Apply the address limit before token verification. Token verification
+    // can fetch public keys and use CPU for signature verification.
+    let verified_identity = if let Some(verifier) = &state.identity {
+        let token = request
+            .identity_token
+            .as_deref()
+            .ok_or(ApiError::EmailVerificationRequired)?;
+        match verifier.verify(token).await {
+            Ok(identity) if crypto::normalise_email(&identity.email) == email => Some(identity),
+            Ok(_) => return Err(ApiError::InvalidIdentity),
+            Err(crate::identity::IdentityError::EmailNotVerified) => {
+                return Err(ApiError::EmailVerificationRequired);
+            }
+            Err(_) => return Err(ApiError::InvalidIdentity),
+        }
+    } else {
+        None
+    };
 
     let auth_key = decode(&request.auth_key, "auth_key")?;
     if auth_key.len() != AUTH_KEY_BYTES {
@@ -172,6 +196,26 @@ pub async fn register(
         return Err(ApiError::Conflict {
             message: "An account already exists for that address.".to_string(),
         });
+    }
+
+    if let Some(identity) = verified_identity {
+        let inserted_identity = sqlx::query(
+            "INSERT INTO account_identity
+               (account_id, provider, subject, verified_email)
+             VALUES ($1, $2, $3, $4)
+             ON CONFLICT (subject) DO NOTHING",
+        )
+        .bind(account_id)
+        .bind(identity.provider)
+        .bind(identity.subject)
+        .bind(email.clone())
+        .execute(&mut *transaction)
+        .await?;
+        if inserted_identity.rows_affected() == 0 {
+            return Err(ApiError::Conflict {
+                message: "This verified identity is linked to another account.".to_string(),
+            });
+        }
     }
 
     sqlx::query(
@@ -321,6 +365,266 @@ pub async fn prelogin(
 /// real account would plausibly have been created with.
 fn default_kdf_params() -> serde_json::Value {
     serde_json::json!({ "m": 65536, "t": 3, "p": 4 })
+}
+
+// ---------------------------------------------------------------------------
+// Forgotten-password recovery
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+pub struct StartRecoveryRequest {
+    pub email: String,
+    pub recovery_auth_key: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct StartRecoveryResponse {
+    pub reset_token: String,
+    pub recovery_slot: WrappedSlot,
+    pub expires_at: DateTime<Utc>,
+}
+
+/// Verifies the recovery phrase proof and creates one short-lived reset token.
+pub async fn start_recovery(
+    State(state): State<SharedState>,
+    ConnectInfo(socket): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Json(request): Json<StartRecoveryRequest>,
+) -> ApiResult<Json<StartRecoveryResponse>> {
+    let email = crypto::normalise_email(&request.email);
+    if !valid_email_input(&email) {
+        return Err(ApiError::InvalidCredentials);
+    }
+    let address = ratelimit::client_address(&headers, socket);
+    ratelimit::record_and_check(&state.db, &format!("recovery:{email}"), Some(address)).await?;
+    let candidate = decode(&request.recovery_auth_key, "recovery_auth_key")?;
+    if candidate.len() != AUTH_KEY_BYTES {
+        return Err(ApiError::InvalidCredentials);
+    }
+
+    let row = sqlx::query_as::<_, (Uuid, Option<String>, Vec<u8>, Vec<u8>)>(
+        "SELECT a.id, k.auth_hash, k.wrapped_key, k.wrap_nonce
+           FROM account a
+           JOIN key_slot k ON k.account_id = a.id AND k.type = 'recovery'
+          WHERE a.email = $1",
+    )
+    .bind(&email)
+    .fetch_optional(&state.db)
+    .await?;
+    let verification_hash = row
+        .as_ref()
+        .and_then(|(_, hash, _, _)| hash.clone())
+        .unwrap_or_else(|| state.fake_auth_hash.clone());
+    let verified = verify_auth_key_limited(candidate, verification_hash).await?;
+    let Some((account_id, Some(_), wrapped_key, nonce)) = row else {
+        return Err(ApiError::InvalidCredentials);
+    };
+    if !verified {
+        return Err(ApiError::InvalidCredentials);
+    }
+
+    let reset_token = crypto::random_token();
+    let expires_at = Utc::now() + chrono::Duration::minutes(RECOVERY_RESET_TTL_MINUTES);
+    let mut transaction = state.db.begin().await?;
+    sqlx::query("DELETE FROM recovery_reset WHERE account_id = $1 OR expires_at <= now()")
+        .bind(account_id)
+        .execute(&mut *transaction)
+        .await?;
+    sqlx::query(
+        "INSERT INTO recovery_reset (id, account_id, token_hash, expires_at)
+         VALUES ($1, $2, $3, $4)",
+    )
+    .bind(Uuid::new_v4())
+    .bind(account_id)
+    .bind(token_hash(&reset_token))
+    .bind(expires_at)
+    .execute(&mut *transaction)
+    .await?;
+    activity::record_in_transaction(
+        &mut transaction,
+        account_id,
+        None,
+        "password_recovery_started",
+        serde_json::json!({ "expires_at": expires_at }),
+    )
+    .await?;
+    transaction.commit().await?;
+
+    Ok(Json(StartRecoveryResponse {
+        reset_token,
+        recovery_slot: WrappedSlot {
+            wrapped_key: crypto::b64_encode(&wrapped_key),
+            nonce: crypto::b64_encode(&nonce),
+        },
+        expires_at,
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct FinishRecoveryRequest {
+    pub reset_token: String,
+    pub new_auth_key: String,
+    pub kdf_params: serde_json::Value,
+    pub client_salt: String,
+    pub password_slot: WrappedSlot,
+    pub device_name: Option<String>,
+    pub device_platform: Option<String>,
+}
+
+/// Replaces the password after a successful recovery proof.
+pub async fn finish_recovery(
+    State(state): State<SharedState>,
+    ConnectInfo(socket): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Json(request): Json<FinishRecoveryRequest>,
+) -> ApiResult<Json<LoginResponse>> {
+    ratelimit::record_address_endpoint(
+        &state.db,
+        "recovery_finish",
+        ratelimit::client_address(&headers, socket),
+        ratelimit::PER_ADDRESS_PER_HOUR,
+    )
+    .await?;
+    if request.reset_token.is_empty() || request.reset_token.len() > MAX_TOKEN_BYTES {
+        return Err(ApiError::InvalidCredentials);
+    }
+    if request
+        .device_name
+        .as_ref()
+        .is_some_and(|value| value.is_empty() || value.len() > MAX_DEVICE_NAME_BYTES)
+        || request
+            .device_platform
+            .as_ref()
+            .is_some_and(|value| value.is_empty() || value.len() > MAX_PLATFORM_BYTES)
+    {
+        return Err(ApiError::BadRequest {
+            message: "The device description is invalid.".to_string(),
+        });
+    }
+    let new_auth_key = decode(&request.new_auth_key, "new_auth_key")?;
+    if new_auth_key.len() != AUTH_KEY_BYTES {
+        return Err(ApiError::BadRequest {
+            message: "The new authentication key must be 256 bits.".to_string(),
+        });
+    }
+    let client_salt = decode(&request.client_salt, "client_salt")?;
+    if client_salt.len() != 16 {
+        return Err(ApiError::BadRequest {
+            message: "The new salt must be 128 bits.".to_string(),
+        });
+    }
+    validate_kdf_params(&request.kdf_params)?;
+    let password_slot = decode_slot(&request.password_slot, "password_slot")?;
+    validate_slot(&password_slot, "password_slot")?;
+    let new_auth_hash = hash_auth_key_limited(new_auth_key).await?;
+
+    let mut transaction = state.db.begin().await?;
+    let row = sqlx::query_as::<_, (Uuid,)>(
+        "DELETE FROM recovery_reset
+          WHERE token_hash = $1 AND expires_at > now()
+          RETURNING account_id",
+    )
+    .bind(token_hash(&request.reset_token))
+    .fetch_optional(&mut *transaction)
+    .await?;
+    let Some((account_id,)) = row else {
+        return Err(ApiError::InvalidCredentials);
+    };
+    sqlx::query("SELECT id FROM account WHERE id = $1 FOR UPDATE")
+        .bind(account_id)
+        .fetch_one(&mut *transaction)
+        .await?;
+    let changed = sqlx::query(
+        "UPDATE key_slot
+            SET auth_hash = $1, kdf_params = $2, client_salt = $3,
+                wrapped_key = $4, wrap_nonce = $5, last_used = now()
+          WHERE account_id = $6 AND type = 'password'",
+    )
+    .bind(new_auth_hash)
+    .bind(&request.kdf_params)
+    .bind(&client_salt)
+    .bind(&password_slot.0)
+    .bind(&password_slot.1)
+    .bind(account_id)
+    .execute(&mut *transaction)
+    .await?
+    .rows_affected();
+    if changed != 1 {
+        return Err(ApiError::InvalidCredentials);
+    }
+    sqlx::query("UPDATE session SET revoked = TRUE WHERE account_id = $1 AND NOT revoked")
+        .bind(account_id)
+        .execute(&mut *transaction)
+        .await?;
+    sqlx::query(
+        "UPDATE device SET revoked = TRUE, push_token = NULL
+          WHERE account_id = $1 AND NOT revoked",
+    )
+    .bind(account_id)
+    .execute(&mut *transaction)
+    .await?;
+
+    let device_id = Uuid::new_v4();
+    let device_name = request.device_name.as_deref().unwrap_or("Android device");
+    let device_platform = request.device_platform.as_deref().unwrap_or("android");
+    sqlx::query(
+        "INSERT INTO device (id, account_id, name, platform, last_seen)
+         VALUES ($1, $2, $3, $4, now())",
+    )
+    .bind(device_id)
+    .bind(account_id)
+    .bind(device_name)
+    .bind(device_platform)
+    .execute(&mut *transaction)
+    .await?;
+    let tokens = Tokens::new();
+    let session_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO session
+           (id, family_id, account_id, device_id, access_hash, refresh_hash,
+            access_expires_at, refresh_expires_at, scopes)
+         VALUES ($1, $1, $2, $3, $4, $5, $6, $7, $8)",
+    )
+    .bind(session_id)
+    .bind(account_id)
+    .bind(device_id)
+    .bind(token_hash(&tokens.access))
+    .bind(token_hash(&tokens.refresh))
+    .bind(tokens.access_expires_at)
+    .bind(tokens.refresh_expires_at)
+    .bind(DEFAULT_SCOPES.to_vec())
+    .execute(&mut *transaction)
+    .await?;
+    let recovery = sqlx::query_as::<_, (Vec<u8>, Vec<u8>)>(
+        "SELECT wrapped_key, wrap_nonce FROM key_slot
+          WHERE account_id = $1 AND type = 'recovery'",
+    )
+    .bind(account_id)
+    .fetch_one(&mut *transaction)
+    .await?;
+    activity::record_in_transaction(
+        &mut transaction,
+        account_id,
+        Some(device_id),
+        "password_recovered",
+        serde_json::json!({ "other_devices_revoked": true }),
+    )
+    .await?;
+    transaction.commit().await?;
+
+    Ok(Json(LoginResponse {
+        access_token: tokens.access,
+        refresh_token: tokens.refresh,
+        access_expires_at: tokens.access_expires_at,
+        password_slot: WrappedSlot {
+            wrapped_key: crypto::b64_encode(&password_slot.0),
+            nonce: crypto::b64_encode(&password_slot.1),
+        },
+        recovery_slot: WrappedSlot {
+            wrapped_key: crypto::b64_encode(&recovery.0),
+            nonce: crypto::b64_encode(&recovery.1),
+        },
+    }))
 }
 
 /// Sleeps until `floor` has elapsed since `started`.
@@ -795,7 +1099,7 @@ pub(crate) struct Tokens {
 }
 
 impl Tokens {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             access: crypto::random_token(),
             refresh: crypto::random_token(),
@@ -1030,7 +1334,7 @@ pub(crate) fn validate_slot(slot: &(Vec<u8>, Vec<u8>), field: &str) -> ApiResult
     Ok(())
 }
 
-fn validate_kdf_params(value: &serde_json::Value) -> ApiResult<()> {
+pub(crate) fn validate_kdf_params(value: &serde_json::Value) -> ApiResult<()> {
     let field = |name: &str| value.get(name).and_then(serde_json::Value::as_u64);
     let valid = matches!(field("m"), Some(KDF_MEMORY_MIN_KIB..=KDF_MEMORY_MAX_KIB))
         && matches!(field("t"), Some(1..=KDF_ITERATIONS_MAX))

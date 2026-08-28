@@ -504,6 +504,36 @@ fn an_encrypted_vault_will_not_open_without_its_key() {
     assert_eq!(store.get("e1").unwrap().unwrap().ciphertext, b"body");
 }
 
+#[test]
+fn page_key_migration_preserves_records_and_retires_the_old_key() {
+    let paths = Paths::new();
+    let old = VaultKey::from_slice(&[8u8; 32]).unwrap().sqlcipher_key();
+    let new = "09".repeat(32);
+    {
+        let meta = MetaStore::open(&paths.meta).unwrap();
+        let mut store = Store::open(&paths.vault, meta, Some(&old)).unwrap();
+        store
+            .write_local(
+                &record("kept", Hlc::new(1000, 0, DEVICE), b"ciphertext"),
+                None,
+            )
+            .unwrap();
+    }
+
+    let meta = MetaStore::open(&paths.meta).unwrap();
+    let migrated = Store::open_with_key_migration(&paths.vault, meta, &new, &old).unwrap();
+    assert_eq!(
+        migrated.get("kept").unwrap().unwrap().ciphertext,
+        b"ciphertext"
+    );
+    drop(migrated);
+
+    let meta = MetaStore::open(&paths.meta).unwrap();
+    assert!(Store::open(&paths.vault, meta, Some(&old)).is_err());
+    let meta = MetaStore::open(&paths.meta).unwrap();
+    assert!(Store::open(&paths.vault, meta, Some(&new)).is_ok());
+}
+
 /// The transparent-open hazard from the other side: a plaintext file left by
 /// an earlier build must not be silently adopted and written into.
 #[test]

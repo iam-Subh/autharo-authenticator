@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../../l10n/generated/app_localizations.dart';
 import '../rust/api/vault.dart' as rust;
 import '../services/vault_session.dart';
+import '../services/localized_error.dart';
 import '../vault_controller.dart';
 import 'create_account_page.dart';
 import 'import_help_page.dart';
@@ -79,7 +80,13 @@ class _WelcomePageState extends State<WelcomePage> {
       if (mounted) {
         ScaffoldMessenger.of(context)
           ..clearSnackBars()
-          ..showSnackBar(SnackBar(content: Text('$error')));
+          ..showSnackBar(
+            SnackBar(
+              content: Text(
+                localizedError(AppLocalizations.of(context), error),
+              ),
+            ),
+          );
       }
     } finally {
       if (mounted) setState(() => _busy = false);

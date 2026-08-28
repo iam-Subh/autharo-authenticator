@@ -5,7 +5,9 @@ import 'package:flutter/material.dart';
 import '../../l10n/generated/app_localizations.dart';
 import '../rust/api/sync.dart' as rust;
 import '../services/sync_controller.dart';
+import '../services/localized_error.dart';
 import 'sync_sign_in_page.dart';
+import 'link_identity_page.dart';
 
 /// **Settings → Sync**: where a device is joined to an account, and where
 /// OFF-05's status is shown in full.
@@ -24,6 +26,7 @@ class SyncPage extends StatefulWidget {
 class _SyncPageState extends State<SyncPage> {
   int? _deviceCount;
   Object? _deviceCountError;
+  rust.IdentityStatusView? _identity;
 
   @override
   void initState() {
@@ -49,9 +52,16 @@ class _SyncPageState extends State<SyncPage> {
         setState(() {
           _deviceCount = null;
           _deviceCountError = null;
+          _identity = null;
         });
       }
       return;
+    }
+    rust.IdentityStatusView? identity;
+    try {
+      identity = await rust.identityStatus();
+    } catch (_) {
+      // Identity enrollment must not block the existing sync dashboard.
     }
     try {
       final devices = await rust.listDevices();
@@ -59,10 +69,14 @@ class _SyncPageState extends State<SyncPage> {
       setState(() {
         _deviceCount = devices.where((device) => !device.revoked).length;
         _deviceCountError = null;
+        _identity = identity;
       });
     } catch (error) {
       if (!mounted) return;
-      setState(() => _deviceCountError = error);
+      setState(() {
+        _deviceCountError = error;
+        _identity = identity;
+      });
     }
   }
 
@@ -79,7 +93,7 @@ class _SyncPageState extends State<SyncPage> {
     if (!mounted || problem == null) return;
     final message = problem.needsSignIn
         ? AppLocalizations.of(context).syncSessionExpired
-        : problem.detail!;
+        : localizedError(AppLocalizations.of(context), problem.detail!);
     ScaffoldMessenger.of(
       context,
     ).showSnackBar(SnackBar(content: Text(message)));
@@ -169,6 +183,19 @@ class _SyncPageState extends State<SyncPage> {
               title: Text(l10n.server),
               subtitle: Text(status.serverUrl ?? l10n.notSet),
             ),
+            if (_identity != null && !_identity!.linked)
+              ListTile(
+                leading: const Icon(Icons.mark_email_unread_outlined),
+                title: Text(l10n.linkVerifiedIdentity),
+                subtitle: Text(l10n.linkVerifiedIdentityRequired),
+                onTap: () => _open(LinkIdentityPage(email: status.email ?? '')),
+              )
+            else if (_identity?.linked == true)
+              ListTile(
+                leading: const Icon(Icons.verified_user_outlined),
+                title: Text(l10n.verifiedIdentity),
+                subtitle: Text(_identity!.verifiedEmail ?? status.email ?? ''),
+              ),
             ListTile(
               leading: widget.controller.busy
                   ? const SizedBox(
@@ -251,7 +278,7 @@ class _SyncDashboard extends StatelessWidget {
             if (status.lastError != null) ...[
               const SizedBox(height: 8),
               Text(
-                status.lastError!,
+                localizedError(l10n, status.lastError!),
                 style: TextStyle(color: Theme.of(context).colorScheme.error),
               ),
             ],
@@ -330,7 +357,9 @@ class _StatusTile extends StatelessWidget {
       }),
       // The reason, not just the state. "Not connected" alone leaves the user
       // guessing whether it is their network, the server, or the app.
-      subtitle: status.lastError == null ? null : Text(status.lastError!),
+      subtitle: status.lastError == null
+          ? null
+          : Text(localizedError(l10n, status.lastError!)),
     );
   }
 }

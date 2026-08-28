@@ -14,7 +14,7 @@ class HomeWidgetStatus {
 /// never receives an OTP secret or code.
 class HomeWidgetService {
   static const _channel = MethodChannel(
-    'dev.authcore.authenticator/home_widget',
+    'app.autharo.authenticator/home_widget',
   );
 
   Future<HomeWidgetStatus> status() async {

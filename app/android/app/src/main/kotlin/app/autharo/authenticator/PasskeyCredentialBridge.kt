@@ -1,4 +1,4 @@
-package dev.authcore.authenticator
+package app.autharo.authenticator
 
 import androidx.credentials.CreatePublicKeyCredentialRequest
 import androidx.credentials.CreatePublicKeyCredentialResponse

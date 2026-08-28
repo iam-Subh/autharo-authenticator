@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../../l10n/generated/app_localizations.dart';
 import '../rust/api/vault.dart' as rust;
+import '../services/localized_error.dart';
 import '../services/vault_session.dart';
 import '../ui/form_page.dart';
 import 'recovery_key_page.dart';
@@ -137,15 +138,8 @@ class _CreateAccountPageState extends State<CreateAccountPage> {
     }
   }
 
-  static String _message(Object error) {
-    final text = error.toString();
-    for (final prefix in ['AnyhowException(', 'Exception: ']) {
-      if (text.startsWith(prefix)) {
-        return text.substring(prefix.length).replaceAll(RegExp(r'\)$'), '');
-      }
-    }
-    return text;
-  }
+  String _message(Object error) =>
+      localizedError(AppLocalizations.of(context), error);
 
   @override
   Widget build(BuildContext context) {

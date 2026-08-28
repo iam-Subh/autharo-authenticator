@@ -1,0 +1,23 @@
+services:
+  - type: web
+    name: autharo-api
+    runtime: docker
+    plan: free
+    region: frankfurt
+    rootDir: server
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /v1/health
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+      - key: SERVER_KEY
+        generateValue: true
+      - key: FIREBASE_AUTH_PROJECT_ID
+        value: autharo-auth-prod
+      - key: DATABASE_MAX_CONNECTIONS
+        value: "5"
+      - key: RUST_LOG
+        value: info
+      - key: TRUSTED_PROXY_CIDRS
+        value: 10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,fc00::/7

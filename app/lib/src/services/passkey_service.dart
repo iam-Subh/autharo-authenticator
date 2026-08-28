@@ -31,7 +31,7 @@ class PasskeyAuthenticationResponse {
 }
 
 class PasskeyService {
-  static const _channel = MethodChannel('dev.authcore.authenticator/passkey');
+  static const _channel = MethodChannel('app.autharo.authenticator/passkey');
 
   Future<PasskeyRegistrationResponse> create(String requestJson) async {
     final response = await _channel.invokeMethod<String>('create', {

@@ -63,7 +63,7 @@ class ClipboardService {
 /// Android can then suppress the clipboard preview and reduce history exposure.
 class SensitiveClipboard {
   static const MethodChannel _channel = MethodChannel(
-    'dev.authcore.authenticator/clipboard',
+    'app.autharo.authenticator/clipboard',
   );
 
   static Future<void> copy(String text) =>

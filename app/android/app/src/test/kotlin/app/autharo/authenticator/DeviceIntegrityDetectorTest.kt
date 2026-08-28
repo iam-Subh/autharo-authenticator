@@ -1,4 +1,4 @@
-package dev.authcore.authenticator
+package app.autharo.authenticator
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue

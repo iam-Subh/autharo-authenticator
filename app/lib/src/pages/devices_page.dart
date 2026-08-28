@@ -4,6 +4,7 @@ import '../../l10n/generated/app_localizations.dart';
 import '../rust/api/sync.dart' as rust;
 import '../services/clipboard_service.dart';
 import '../services/security_elevation.dart';
+import '../services/localized_error.dart';
 import 'security_activity_page.dart';
 
 /// Your devices, and the ways off the account (PRD §9.5).
@@ -90,19 +91,17 @@ class _DevicesPageState extends State<DevicesPage> {
       if (mounted) {
         ScaffoldMessenger.of(context)
           ..clearSnackBars()
-          ..showSnackBar(SnackBar(content: Text(_message(error))));
+          ..showSnackBar(
+            SnackBar(
+              content: Text(
+                localizedError(AppLocalizations.of(context), error),
+              ),
+            ),
+          );
       }
     } finally {
       if (mounted) setState(() => _busy = false);
     }
-  }
-
-  /// The core writes its errors for the user, so they are shown as written.
-  static String _message(Object error) {
-    final text = error.toString();
-    return text.startsWith('Exception: ')
-        ? text.substring('Exception: '.length)
-        : text;
   }
 
   // -------------------------------------------------------------------------
@@ -166,6 +165,43 @@ class _DevicesPageState extends State<DevicesPage> {
       if (mounted) widget.onSignedOut();
       return;
     }
+    await _load();
+  });
+
+  Future<void> _rename(rust.DeviceView device) => _guard(() async {
+    final controller = TextEditingController(text: device.name);
+    final name = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(AppLocalizations.of(context).renameDevice),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          maxLength: 100,
+          decoration: InputDecoration(
+            labelText: AppLocalizations.of(context).deviceName,
+          ),
+          onSubmitted: (value) => Navigator.pop(context, value.trim()),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: Text(AppLocalizations.of(context).cancel),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, controller.text.trim()),
+            child: Text(AppLocalizations.of(context).rename),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    if (name == null || name.isEmpty || !mounted) return;
+    await rust.renameDevice(deviceId: device.id, name: name);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(AppLocalizations.of(context).deviceRenamed)),
+    );
     await _load();
   });
 
@@ -339,7 +375,7 @@ class _DevicesPageState extends State<DevicesPage> {
       return ListView(
         padding: const EdgeInsets.all(24),
         children: [
-          Text(_message(_error!)),
+          Text(localizedError(AppLocalizations.of(context), _error!)),
           const SizedBox(height: 16),
           Align(
             alignment: Alignment.centerLeft,
@@ -397,6 +433,7 @@ class _DevicesPageState extends State<DevicesPage> {
         for (final device in devices)
           _DeviceTile(
             device: device,
+            onRename: _busy ? null : () => _rename(device),
             onRevoke: _busy ? null : () => _revoke(device),
           ),
         const Divider(height: 32),
@@ -537,9 +574,14 @@ class _StepUpPasswordDialogState extends State<_StepUpPasswordDialog> {
 }
 
 class _DeviceTile extends StatelessWidget {
-  const _DeviceTile({required this.device, required this.onRevoke});
+  const _DeviceTile({
+    required this.device,
+    required this.onRename,
+    required this.onRevoke,
+  });
 
   final rust.DeviceView device;
+  final VoidCallback? onRename;
   final VoidCallback? onRevoke;
 
   IconData get _icon => switch (device.platform.toLowerCase()) {
@@ -607,10 +649,33 @@ class _DeviceTile extends StatelessWidget {
       // simply stopped mentioning it proves nothing.
       trailing: device.revoked
           ? null
-          : IconButton(
-              icon: const Icon(Icons.close),
-              tooltip: device.current ? l10n.signOut : l10n.removeThisDevice,
-              onPressed: onRevoke,
+          : PopupMenuButton<String>(
+              onSelected: (value) {
+                if (value == 'rename') onRename?.call();
+                if (value == 'remove') onRevoke?.call();
+              },
+              itemBuilder: (context) => [
+                PopupMenuItem(
+                  value: 'rename',
+                  enabled: onRename != null,
+                  child: ListTile(
+                    leading: const Icon(Icons.edit_outlined),
+                    title: Text(l10n.rename),
+                    contentPadding: EdgeInsets.zero,
+                  ),
+                ),
+                PopupMenuItem(
+                  value: 'remove',
+                  enabled: onRevoke != null,
+                  child: ListTile(
+                    leading: const Icon(Icons.close),
+                    title: Text(
+                      device.current ? l10n.signOut : l10n.removeThisDevice,
+                    ),
+                    contentPadding: EdgeInsets.zero,
+                  ),
+                ),
+              ],
             ),
     );
   }

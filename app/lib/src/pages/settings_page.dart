@@ -4,6 +4,7 @@ import '../../l10n/generated/app_localizations.dart';
 import '../rust/api/vault.dart' as rust;
 import '../services/appearance_preference.dart';
 import '../services/lock_controller.dart';
+import '../services/localized_error.dart';
 import '../services/brand_icon_preference.dart';
 import '../services/code_visibility_preference.dart';
 import '../services/device_integrity_service.dart';
@@ -13,6 +14,7 @@ import '../services/sync_controller.dart';
 import '../services/vault_session.dart';
 import '../vault_controller.dart';
 import 'backup_page.dart';
+import 'change_password_page.dart';
 import 'create_account_page.dart';
 import 'devices_page.dart';
 import 'duplicate_manager_page.dart';
@@ -154,7 +156,9 @@ class _SettingsPageState extends State<SettingsPage> {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
-            AppLocalizations.of(context).screenshotSettingFailed('$error'),
+            AppLocalizations.of(context).screenshotSettingFailed(
+              localizedError(AppLocalizations.of(context), error),
+            ),
           ),
         ),
       );
@@ -172,7 +176,9 @@ class _SettingsPageState extends State<SettingsPage> {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
-            AppLocalizations.of(context).codeVisibilitySettingFailed('$error'),
+            AppLocalizations.of(context).codeVisibilitySettingFailed(
+              localizedError(AppLocalizations.of(context), error),
+            ),
           ),
         ),
       );
@@ -231,7 +237,9 @@ class _SettingsPageState extends State<SettingsPage> {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
-            AppLocalizations.of(context).themeSettingFailed('$error'),
+            AppLocalizations.of(context).themeSettingFailed(
+              localizedError(AppLocalizations.of(context), error),
+            ),
           ),
         ),
       );
@@ -279,7 +287,9 @@ class _SettingsPageState extends State<SettingsPage> {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
-            AppLocalizations.of(context).listSpacingSettingFailed('$error'),
+            AppLocalizations.of(context).listSpacingSettingFailed(
+              localizedError(AppLocalizations.of(context), error),
+            ),
           ),
         ),
       );
@@ -426,7 +436,8 @@ class _SettingsPageState extends State<SettingsPage> {
                   builder: (context, result, _) => Text(
                     result.evaluated
                         ? switch (policy) {
-                            RootPolicy.ignore => l10n.rootPolicyIgnoreDescription,
+                            RootPolicy.ignore =>
+                              l10n.rootPolicyIgnoreDescription,
                             RootPolicy.warn => l10n.rootPolicyWarnDescription,
                             RootPolicy.block => l10n.rootPolicyBlockDescription,
                           }
@@ -512,6 +523,18 @@ class _SettingsPageState extends State<SettingsPage> {
               leading: const Icon(Icons.cloud_done_outlined),
               title: Text(l10n.account),
               subtitle: Text(_accountEmail!),
+            ),
+            ListTile(
+              leading: const Icon(Icons.password_outlined),
+              title: Text(l10n.changeAccountPassword),
+              subtitle: Text(l10n.changeAccountPasswordDescription),
+              onTap: _busy
+                  ? null
+                  : () => Navigator.of(context).push(
+                      MaterialPageRoute<void>(
+                        builder: (_) => const ChangePasswordPage(),
+                      ),
+                    ),
             ),
             ValueListenableBuilder<bool>(
               valueListenable: RecoveryStatusPreference.confirmed,

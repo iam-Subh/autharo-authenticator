@@ -61,6 +61,7 @@ async fn start_server() -> (SocketAddr, sqlx::PgPool) {
         fake_auth_hash: authserver::crypto::hash_auth_key(&[0u8; 32]).unwrap(),
         passkeys: None,
         push: None,
+        identity: None,
     });
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

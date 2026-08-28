@@ -8,7 +8,7 @@ class ScreenCaptureService {
   ScreenCaptureService({MethodChannel? channel})
     : _channel = channel ?? const MethodChannel(_channelName);
 
-  static const _channelName = 'dev.authcore.authenticator/screen_capture';
+  static const _channelName = 'app.autharo.authenticator/screen_capture';
 
   final MethodChannel _channel;
 

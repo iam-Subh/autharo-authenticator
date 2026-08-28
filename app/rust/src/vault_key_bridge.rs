@@ -139,7 +139,7 @@ fn throw_bridge_error(env: &mut JNIEnv<'_>, message: &str) -> jbyteArray {
 
 /// Kotlin gives an unwrapped secret directly to Rust and receives a handle.
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_authcore_authenticator_NativeVaultBridge_storeSecret(
+pub extern "system" fn Java_app_autharo_authenticator_NativeVaultBridge_storeSecret(
     mut env: JNIEnv,
     _class: JClass,
     secret: JByteArray,
@@ -159,7 +159,7 @@ pub extern "system" fn Java_dev_authcore_authenticator_NativeVaultBridge_storeSe
 
 /// Kotlin consumes a setup handle and receives the secret directly from Rust.
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_authcore_authenticator_NativeVaultBridge_takeSecret(
+pub extern "system" fn Java_app_autharo_authenticator_NativeVaultBridge_takeSecret(
     mut env: JNIEnv,
     _class: JClass,
     handle: JByteArray,
@@ -179,7 +179,7 @@ pub extern "system" fn Java_dev_authcore_authenticator_NativeVaultBridge_takeSec
 
 /// Removes one unused handle after a cancelled wrapping operation.
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_authcore_authenticator_NativeVaultBridge_discardSecret(
+pub extern "system" fn Java_app_autharo_authenticator_NativeVaultBridge_discardSecret(
     mut env: JNIEnv,
     _class: JClass,
     handle: JByteArray,
@@ -195,7 +195,7 @@ pub extern "system" fn Java_dev_authcore_authenticator_NativeVaultBridge_discard
 
 /// Clears handles and pending device-slot requests on cancellation or lock.
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_authcore_authenticator_NativeVaultBridge_cancelPendingOperation(
+pub extern "system" fn Java_app_autharo_authenticator_NativeVaultBridge_cancelPendingOperation(
     _env: JNIEnv,
     _class: JClass,
 ) {

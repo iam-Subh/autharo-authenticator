@@ -1,4 +1,4 @@
-package dev.authcore.authenticator
+package app.autharo.authenticator
 
 import android.app.PendingIntent
 import android.appwidget.AppWidgetManager
@@ -92,7 +92,7 @@ class AuthenticatorWidgetProvider : AppWidgetProvider() {
             )
 
             val openApplication = Intent(context, MainActivity::class.java).apply {
-                action = "dev.authcore.authenticator.OPEN_WIDGET"
+                action = "app.autharo.authenticator.OPEN_WIDGET"
                 flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
             }
             val pendingIntent = PendingIntent.getActivity(

@@ -5,7 +5,7 @@ import 'package:authenticator/src/services/clipboard_service.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
-  const channel = MethodChannel('dev.authcore.authenticator/clipboard');
+  const channel = MethodChannel('app.autharo.authenticator/clipboard');
 
   tearDown(() async {
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger

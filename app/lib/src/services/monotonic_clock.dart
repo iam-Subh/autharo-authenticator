@@ -22,7 +22,7 @@ abstract interface class MonotonicClock {
 /// Reads `SystemClock.elapsedRealtime()` over a platform channel.
 class PlatformMonotonicClock implements MonotonicClock {
   static const MethodChannel _channel =
-      MethodChannel('dev.authcore.authenticator/clock');
+      MethodChannel('app.autharo.authenticator/clock');
 
   @override
   Future<int> elapsedRealtime() async {

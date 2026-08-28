@@ -1,0 +1,9 @@
+target/
+tests/
+.env
+.env.*
+*.log
+*.db
+*.sqlite
+Dockerfile*
+README*

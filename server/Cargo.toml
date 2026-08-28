@@ -37,6 +37,7 @@ ipnet = "2"
 async-trait = "0.1"
 gcp_auth = "0.12.7"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+jsonwebtoken = "9.3"
 webauthn-rs = { version = "=0.5.5", default-features = false, features = ["danger-allow-state-serialisation", "workaround-google-passkey-specific-issues"] }
 # webauthn-rs-core uses OpenSSL for WebAuthn signature verification. Build it
 # from source so Windows development and Linux deployment do not depend on a

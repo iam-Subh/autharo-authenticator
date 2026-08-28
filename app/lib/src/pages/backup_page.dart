@@ -8,6 +8,7 @@ import '../rust/api/vault.dart' as rust;
 import '../rust/api/sync.dart' as sync_api;
 import '../services/automatic_backup_service.dart';
 import '../services/bounded_file_reader.dart';
+import '../services/localized_error.dart';
 import '../ui/import_report_dialog.dart';
 import '../vault_controller.dart';
 import 'recovery_key_page.dart';
@@ -86,7 +87,7 @@ class _BackupPageState extends State<BackupPage> {
         _say(AppLocalizations.of(context).automaticBackupPassphraseMissing);
       }
     } catch (error) {
-      if (mounted) _say('$error');
+      if (mounted) _say(localizedError(AppLocalizations.of(context), error));
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -321,12 +322,10 @@ class _BackupPageState extends State<BackupPage> {
         ),
       ),
     );
-    if (sync_api.syncStatus().signedIn) {
-      await sync_api.enrollRecoveryAccess(
-        password: password,
-        recoveryPhrase: view.phrase,
-      );
-    }
+    await sync_api.commitRecoveryPhrase(
+      password: password,
+      recoveryPhrase: view.phrase,
+    );
   });
 
   @override

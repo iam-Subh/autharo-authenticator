@@ -1933,4 +1933,210 @@ class AppLocalizationsHi extends AppLocalizations {
 
   @override
   String get securityAccountRegistered => 'सिंक खाता बनाया गया';
+
+  @override
+  String get changeAccountPassword => 'खाते का पासवर्ड बदलें';
+
+  @override
+  String get changeAccountPasswordDescription =>
+      'सिंक पासवर्ड बदलें और दूसरे डिवाइस से साइन आउट करें।';
+
+  @override
+  String get currentPassword => 'वर्तमान पासवर्ड';
+
+  @override
+  String get newPassword => 'नया पासवर्ड';
+
+  @override
+  String get enterNewPasswordAgain => 'नया पासवर्ड फिर से दर्ज करें';
+
+  @override
+  String get passwordChangeRevokesDevices =>
+      'यह कार्रवाई दूसरे सभी डिवाइस से साइन आउट करती है। अनुमति कोड या रिकवरी वाक्यांश से प्रत्येक विश्वसनीय डिवाइस फिर से जोड़ें।';
+
+  @override
+  String get passwordChanged => 'खाते का पासवर्ड बदल दिया गया।';
+
+  @override
+  String passwordChangeFailed(String error) {
+    return 'पासवर्ड नहीं बदला जा सका: $error';
+  }
+
+  @override
+  String get renameDevice => 'डिवाइस का नाम बदलें';
+
+  @override
+  String get deviceName => 'डिवाइस का नाम';
+
+  @override
+  String get deviceRenamed => 'डिवाइस का नाम बदल दिया गया।';
+
+  @override
+  String get forgotPassword => 'पासवर्ड भूल गए?';
+
+  @override
+  String get resetAccountPassword => 'खाते का पासवर्ड रीसेट करें';
+
+  @override
+  String get resetPasswordDescription =>
+      'नया पासवर्ड बनाने के लिए 24 शब्दों वाला रिकवरी वाक्यांश उपयोग करें। यह कार्रवाई दूसरे सभी डिवाइस से साइन आउट करती है।';
+
+  @override
+  String get passwordResetComplete => 'खाते का पासवर्ड रीसेट कर दिया गया।';
+
+  @override
+  String get verifyEmailOwnership => 'ईमेल स्वामित्व सत्यापित करें';
+
+  @override
+  String get verifyWithEmail => 'ईमेल से सत्यापित करें';
+
+  @override
+  String get continueWithGoogle => 'Google से जारी रखें';
+
+  @override
+  String get identityPassword => 'ईमेल साइन-इन पासवर्ड';
+
+  @override
+  String get identityPasswordHelp =>
+      'वॉल्ट पासवर्ड से अलग पासवर्ड उपयोग करें। Firebase को यह पासवर्ड मिलता है। Firebase को वॉल्ट पासवर्ड नहीं मिलता।';
+
+  @override
+  String get identityPasswordMustDiffer =>
+      'ईमेल साइन-इन और वॉल्ट एन्क्रिप्शन के लिए अलग पासवर्ड उपयोग करें।';
+
+  @override
+  String get identityPasswordTooShort =>
+      'ईमेल साइन-इन पासवर्ड के लिए कम से कम 6 अक्षर दर्ज करें।';
+
+  @override
+  String get emailVerificationSent =>
+      'सत्यापन ईमेल भेजा गया। लिंक खोलें। फिर मैंने ईमेल सत्यापित किया चुनें।';
+
+  @override
+  String get iVerifiedMyEmail => 'मैंने ईमेल सत्यापित किया';
+
+  @override
+  String emailOwnershipVerified(String email) {
+    return '$email का ईमेल स्वामित्व सत्यापित है।';
+  }
+
+  @override
+  String get verifyEmailBeforeSync =>
+      'सिंक चालू करने से पहले खाते का ईमेल सत्यापित करें।';
+
+  @override
+  String get firebaseNotConfigured =>
+      'इस Android बिल्ड में Firebase Authentication कॉन्फ़िगर नहीं है।';
+
+  @override
+  String get verificationStillPending => 'ईमेल पता अभी सत्यापित नहीं है।';
+
+  @override
+  String get identityEmailMismatch =>
+      'सत्यापित ईमेल इस वॉल्ट खाते से मेल नहीं खाता।';
+
+  @override
+  String get errorInvalidCredentials => 'ईमेल पता या पासवर्ड सही नहीं है।';
+
+  @override
+  String get errorAccountConflict =>
+      'इस ईमेल पते के लिए खाता पहले से मौजूद है।';
+
+  @override
+  String get errorServerUnavailable =>
+      'सिंक सर्वर तक नहीं पहुंचा जा सकता। कनेक्शन और सर्वर पता जांचें।';
+
+  @override
+  String get errorInvalidServerResponse => 'सिंक सर्वर ने अमान्य उत्तर भेजा।';
+
+  @override
+  String get errorSignedOut =>
+      'इस डिवाइस से साइन आउट किया गया। सिंक जारी रखने के लिए फिर से साइन इन करें।';
+
+  @override
+  String get errorDeviceApprovalRequired =>
+      'इस डिवाइस को मौजूदा डिवाइस से स्वीकृत करें या रिकवरी वाक्यांश उपयोग करें।';
+
+  @override
+  String get errorInsufficientScope =>
+      'इस सत्र में इस कार्रवाई की अनुमति नहीं है। फिर से साइन इन करें।';
+
+  @override
+  String get errorElevationRequired =>
+      'इस कार्रवाई की अनुमति के लिए खाते का पासवर्ड दर्ज करें।';
+
+  @override
+  String get errorInvalidScope => 'यह अनुमति उपलब्ध नहीं है।';
+
+  @override
+  String get errorCapabilityExpired =>
+      'अस्थायी अनुमति समाप्त हो गई। पासवर्ड फिर से दर्ज करें।';
+
+  @override
+  String get errorNotFound => 'मांगी गई वस्तु नहीं मिली।';
+
+  @override
+  String get errorEmailVerificationRequired =>
+      'खाता पंजीकरण से पहले ईमेल पता सत्यापित करें।';
+
+  @override
+  String get errorInvalidIdentity =>
+      'ईमेल पहचान प्रमाण अमान्य है या समाप्त हो गया है। ईमेल फिर से सत्यापित करें।';
+
+  @override
+  String get errorRateLimited =>
+      'बहुत अधिक अनुरोध किए गए। प्रतीक्षा करें और फिर प्रयास करें।';
+
+  @override
+  String get errorQuotaExceeded => 'इस खाते ने सर्वर सीमा पूरी कर ली है।';
+
+  @override
+  String get errorRequestTooLarge => 'अनुरोध बहुत बड़ा है।';
+
+  @override
+  String get errorFeatureUnavailable => 'यह सुविधा सर्वर पर कॉन्फ़िगर नहीं है।';
+
+  @override
+  String get errorServerInternal => 'सर्वर अनुरोध पूरा नहीं कर सका।';
+
+  @override
+  String get errorIdentityCredentials => 'ईमेल साइन-इन पासवर्ड सही नहीं है।';
+
+  @override
+  String get errorIdentityEmail => 'मान्य ईमेल पता दर्ज करें।';
+
+  @override
+  String get errorIdentityWeakPassword =>
+      'अधिक मजबूत ईमेल साइन-इन पासवर्ड उपयोग करें।';
+
+  @override
+  String get errorIdentityNetwork =>
+      'Firebase Authentication तक नहीं पहुंचा जा सकता। कनेक्शन जांचें।';
+
+  @override
+  String get errorIdentityDisabled => 'यह ईमेल पहचान बंद है।';
+
+  @override
+  String get errorIdentityCanceled => 'Google साइन-इन रद्द किया गया।';
+
+  @override
+  String get linkVerifiedIdentity => 'सत्यापित पहचान जोड़ें';
+
+  @override
+  String get linkVerifiedIdentityRequired =>
+      'इस मौजूदा खाते के ईमेल स्वामित्व को सत्यापित करें।';
+
+  @override
+  String linkVerifiedIdentityDescription(String email) {
+    return '$email का स्वामित्व सत्यापित करें। लिंक की अनुमति के लिए वर्तमान वॉल्ट पासवर्ड दर्ज करें।';
+  }
+
+  @override
+  String get verifiedIdentity => 'सत्यापित पहचान';
+
+  @override
+  String get securityIdentityLinked => 'सत्यापित पहचान जोड़ी गई';
+
+  @override
+  String get errorUnknown => 'कार्रवाई पूरी नहीं हो सकी।';
 }

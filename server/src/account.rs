@@ -71,6 +71,54 @@ pub struct DeviceListResponse {
     pub devices: Vec<DeviceView>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct RenameDeviceRequest {
+    pub name: String,
+}
+
+/// Changes the display name of one active device on this account.
+pub async fn rename_device(
+    State(state): State<SharedState>,
+    Path(device_id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(request): Json<RenameDeviceRequest>,
+) -> ApiResult<StatusCode> {
+    let session = authenticate(&state, &headers, auth::SCOPE_SECURITY_READ).await?;
+    let name = request.name.trim();
+    if name.is_empty() || name.len() > 100 || name.chars().any(char::is_control) {
+        return Err(ApiError::BadRequest {
+            message: "The device name is invalid.".to_string(),
+        });
+    }
+
+    let mut transaction = state.db.begin().await?;
+    let changed = sqlx::query(
+        "UPDATE device SET name = $1
+          WHERE id = $2 AND account_id = $3 AND NOT revoked",
+    )
+    .bind(name)
+    .bind(device_id)
+    .bind(session.account_id)
+    .execute(&mut *transaction)
+    .await?
+    .rows_affected();
+    if changed != 1 {
+        return Err(ApiError::NotFound {
+            message: "That active device is not on this account.".to_string(),
+        });
+    }
+    activity::record_in_transaction(
+        &mut transaction,
+        session.account_id,
+        session.device_id,
+        "device_renamed",
+        serde_json::json!({ "device_id": device_id, "name": name }),
+    )
+    .await?;
+    transaction.commit().await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 const MAX_PUSH_TOKEN_BYTES: usize = 4096;
 
 #[derive(Debug, Deserialize)]
@@ -389,6 +437,283 @@ pub struct StepUpRequest {
     /// matter — and an attacker holding one must not be able to destroy the
     /// account the user is trying to save.
     pub auth_key: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ChangePasswordRequest {
+    /// Proof of the current password. This proof is valid only for this
+    /// account and never becomes the new stored verifier.
+    pub current_auth_key: String,
+    /// Authentication key derived from the new password and new client salt.
+    pub new_auth_key: String,
+    pub kdf_params: serde_json::Value,
+    pub client_salt: String,
+    pub password_slot: auth::WrappedSlot,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ChangePasswordResponse {
+    pub access_token: String,
+    pub refresh_token: String,
+    pub access_expires_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct IdentityStatusResponse {
+    pub linked: bool,
+    pub provider: Option<String>,
+    pub verified_email: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct LinkIdentityRequest {
+    pub auth_key: String,
+    pub identity_token: String,
+}
+
+/// Reports whether this account has a verified external identity.
+pub async fn identity_status(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> ApiResult<Json<IdentityStatusResponse>> {
+    let session = authenticate(&state, &headers, auth::SCOPE_SESSION_SELF).await?;
+    let row = sqlx::query_as::<_, (String, String)>(
+        "SELECT provider, verified_email
+           FROM account_identity
+          WHERE account_id = $1",
+    )
+    .bind(session.account_id)
+    .fetch_optional(&state.db)
+    .await?;
+    Ok(Json(match row {
+        Some((provider, verified_email)) => IdentityStatusResponse {
+            linked: true,
+            provider: Some(provider),
+            verified_email: Some(verified_email),
+        },
+        None => IdentityStatusResponse {
+            linked: false,
+            provider: None,
+            verified_email: None,
+        },
+    }))
+}
+
+/// Links an existing account to one verified Firebase identity.
+///
+/// The capability token proves recent elevation. The authentication key proves
+/// the current account password. The Firebase token proves email ownership.
+pub async fn link_identity(
+    State(state): State<SharedState>,
+    ConnectInfo(socket): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Json(request): Json<LinkIdentityRequest>,
+) -> ApiResult<Json<IdentityStatusResponse>> {
+    let session = authenticate(&state, &headers, auth::SCOPE_SECURITY_READ).await?;
+    auth::verify_step_up(
+        &state,
+        session.account_id,
+        &request.auth_key,
+        ratelimit::client_address(&headers, socket),
+    )
+    .await?;
+    let verifier = state
+        .identity
+        .as_ref()
+        .ok_or_else(|| ApiError::FeatureUnavailable {
+            message: "Verified email identity is not configured.".to_string(),
+        })?;
+    let identity = match verifier.verify(&request.identity_token).await {
+        Ok(identity) => identity,
+        Err(crate::identity::IdentityError::EmailNotVerified) => {
+            return Err(ApiError::EmailVerificationRequired);
+        }
+        Err(_) => return Err(ApiError::InvalidIdentity),
+    };
+    let account_email = sqlx::query_scalar::<_, String>("SELECT email FROM account WHERE id = $1")
+        .bind(session.account_id)
+        .fetch_one(&state.db)
+        .await?;
+    let verified_email = crypto::normalise_email(&identity.email);
+    if verified_email != account_email {
+        return Err(ApiError::InvalidIdentity);
+    }
+
+    let mut transaction = state.db.begin().await?;
+    let subject_owner =
+        sqlx::query_scalar::<_, Uuid>("SELECT account_id FROM account_identity WHERE subject = $1")
+            .bind(&identity.subject)
+            .fetch_optional(&mut *transaction)
+            .await?;
+    if subject_owner.is_some_and(|owner| owner != session.account_id) {
+        return Err(ApiError::Conflict {
+            message: "This verified identity is linked to another account.".to_string(),
+        });
+    }
+    sqlx::query("DELETE FROM account_identity WHERE account_id = $1")
+        .bind(session.account_id)
+        .execute(&mut *transaction)
+        .await?;
+    let inserted_identity = sqlx::query(
+        "INSERT INTO account_identity
+           (account_id, provider, subject, verified_email)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (subject) DO NOTHING",
+    )
+    .bind(session.account_id)
+    .bind(&identity.provider)
+    .bind(&identity.subject)
+    .bind(&verified_email)
+    .execute(&mut *transaction)
+    .await?;
+    if inserted_identity.rows_affected() == 0 {
+        return Err(ApiError::Conflict {
+            message: "This verified identity is linked to another account.".to_string(),
+        });
+    }
+    activity::record_in_transaction(
+        &mut transaction,
+        session.account_id,
+        session.device_id,
+        "identity_linked",
+        serde_json::json!({ "provider": identity.provider }),
+    )
+    .await?;
+    transaction.commit().await?;
+    Ok(Json(IdentityStatusResponse {
+        linked: true,
+        provider: Some(identity.provider),
+        verified_email: Some(verified_email),
+    }))
+}
+
+/// Replaces the password slot and invalidates all older credentials.
+///
+/// The client builds `password_slot` around the existing vault key. The
+/// server stores only ciphertext and password-verification material. Other
+/// devices are revoked because they still hold a password slot and sessions
+/// that belong to the old password. The requesting device receives one new
+/// base session after the transaction commits.
+pub async fn change_password(
+    State(state): State<SharedState>,
+    ConnectInfo(socket): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Json(request): Json<ChangePasswordRequest>,
+) -> ApiResult<Json<ChangePasswordResponse>> {
+    let session = authenticate(&state, &headers, auth::SCOPE_SECURITY_READ).await?;
+    let device_id = session.device_id.ok_or(ApiError::Unauthorized)?;
+    auth::verify_step_up(
+        &state,
+        session.account_id,
+        &request.current_auth_key,
+        ratelimit::client_address(&headers, socket),
+    )
+    .await?;
+
+    let new_auth_key =
+        crypto::b64_decode(&request.new_auth_key).map_err(|_| ApiError::InvalidCredentials)?;
+    if new_auth_key.len() != 32 {
+        return Err(ApiError::BadRequest {
+            message: "The new authentication key must be 256 bits.".to_string(),
+        });
+    }
+    let client_salt =
+        crypto::b64_decode(&request.client_salt).map_err(|_| ApiError::BadRequest {
+            message: "client_salt is not valid base64url.".to_string(),
+        })?;
+    if client_salt.len() != 16 {
+        return Err(ApiError::BadRequest {
+            message: "The new salt must be 128 bits.".to_string(),
+        });
+    }
+    auth::validate_kdf_params(&request.kdf_params)?;
+    let password_slot = auth::decode_slot(&request.password_slot, "password_slot")?;
+    auth::validate_slot(&password_slot, "password_slot")?;
+    let new_auth_hash = auth::hash_auth_key_limited(new_auth_key).await?;
+
+    let mut transaction = state.db.begin().await?;
+    sqlx::query("SELECT id FROM account WHERE id = $1 FOR UPDATE")
+        .bind(session.account_id)
+        .fetch_one(&mut *transaction)
+        .await?;
+
+    let changed = sqlx::query(
+        "UPDATE key_slot
+            SET auth_hash = $1, kdf_params = $2, client_salt = $3,
+                wrapped_key = $4, wrap_nonce = $5, last_used = now()
+          WHERE account_id = $6 AND type = 'password'",
+    )
+    .bind(new_auth_hash)
+    .bind(&request.kdf_params)
+    .bind(&client_salt)
+    .bind(&password_slot.0)
+    .bind(&password_slot.1)
+    .bind(session.account_id)
+    .execute(&mut *transaction)
+    .await?
+    .rows_affected();
+    if changed != 1 {
+        return Err(ApiError::BadRequest {
+            message: "This account has no password slot.".to_string(),
+        });
+    }
+
+    sqlx::query("UPDATE session SET revoked = TRUE WHERE account_id = $1 AND NOT revoked")
+        .bind(session.account_id)
+        .execute(&mut *transaction)
+        .await?;
+    sqlx::query(
+        "UPDATE device
+            SET revoked = TRUE, push_token = NULL
+          WHERE account_id = $1 AND id <> $2 AND NOT revoked",
+    )
+    .bind(session.account_id)
+    .bind(device_id)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "UPDATE device SET revoked = FALSE, last_seen = now()
+          WHERE id = $1 AND account_id = $2",
+    )
+    .bind(device_id)
+    .bind(session.account_id)
+    .execute(&mut *transaction)
+    .await?;
+
+    let tokens = auth::Tokens::new();
+    let new_session_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO session
+           (id, family_id, account_id, device_id, access_hash, refresh_hash,
+            access_expires_at, refresh_expires_at, scopes)
+         VALUES ($1, $1, $2, $3, $4, $5, $6, $7, $8)",
+    )
+    .bind(new_session_id)
+    .bind(session.account_id)
+    .bind(device_id)
+    .bind(auth::token_hash(&tokens.access))
+    .bind(auth::token_hash(&tokens.refresh))
+    .bind(tokens.access_expires_at)
+    .bind(tokens.refresh_expires_at)
+    .bind(auth::DEFAULT_SCOPES.to_vec())
+    .execute(&mut *transaction)
+    .await?;
+
+    activity::record_in_transaction(
+        &mut transaction,
+        session.account_id,
+        Some(device_id),
+        "password_changed",
+        serde_json::json!({ "other_devices_revoked": true }),
+    )
+    .await?;
+    transaction.commit().await?;
+
+    Ok(Json(ChangePasswordResponse {
+        access_token: tokens.access,
+        refresh_token: tokens.refresh,
+        access_expires_at: tokens.access_expires_at,
+    }))
 }
 
 #[derive(Debug, Serialize)]

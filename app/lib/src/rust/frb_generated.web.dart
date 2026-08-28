@@ -77,6 +77,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   PlatformInt64 dco_decode_i_64(dynamic raw);
 
   @protected
+  IdentityStatusView dco_decode_identity_status_view(dynamic raw);
+
+  @protected
   ImportReportView dco_decode_import_report_view(dynamic raw);
 
   @protected
@@ -240,6 +243,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   PlatformInt64 sse_decode_i_64(SseDeserializer deserializer);
+
+  @protected
+  IdentityStatusView sse_decode_identity_status_view(
+    SseDeserializer deserializer,
+  );
 
   @protected
   ImportReportView sse_decode_import_report_view(SseDeserializer deserializer);
@@ -439,6 +447,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_i_64(PlatformInt64 self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_identity_status_view(
+    IdentityStatusView self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_import_report_view(

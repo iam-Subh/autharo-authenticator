@@ -3,6 +3,7 @@ import 'package:mobile_scanner/mobile_scanner.dart';
 
 import '../../l10n/generated/app_localizations.dart';
 import '../rust/api/vault.dart' as rust;
+import '../services/localized_error.dart';
 import '../ui/import_report_dialog.dart';
 import '../vault_controller.dart';
 
@@ -94,7 +95,11 @@ class _ImportMigrationPageState extends State<ImportMigrationPage> {
         };
       });
     } catch (error) {
-      if (mounted) setState(() => _message = '$error');
+      if (mounted) {
+        setState(
+          () => _message = localizedError(AppLocalizations.of(context), error),
+        );
+      }
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -126,7 +131,11 @@ class _ImportMigrationPageState extends State<ImportMigrationPage> {
       );
       if (mounted) Navigator.of(context).pop();
     } catch (error) {
-      if (mounted) setState(() => _message = '$error');
+      if (mounted) {
+        setState(
+          () => _message = localizedError(AppLocalizations.of(context), error),
+        );
+      }
     } finally {
       if (mounted) setState(() => _busy = false);
     }

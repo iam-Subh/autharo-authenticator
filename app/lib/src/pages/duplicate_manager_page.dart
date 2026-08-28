@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../../l10n/generated/app_localizations.dart';
 import '../rust/api/vault.dart' as rust;
+import '../services/localized_error.dart';
 import '../vault_controller.dart';
 
 class DuplicateManagerPage extends StatefulWidget {
@@ -72,9 +73,11 @@ class _DuplicateManagerPageState extends State<DuplicateManagerPage> {
       );
     } catch (error) {
       if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text(error.toString())));
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(localizedError(AppLocalizations.of(context), error)),
+        ),
+      );
     }
   }
 
@@ -89,7 +92,10 @@ class _DuplicateManagerPageState extends State<DuplicateManagerPage> {
         (false, final error?, _) => Center(
           child: Padding(
             padding: const EdgeInsets.all(24),
-            child: Text(error.toString(), textAlign: TextAlign.center),
+            child: Text(
+              localizedError(AppLocalizations.of(context), error),
+              textAlign: TextAlign.center,
+            ),
           ),
         ),
         (false, null, true) => Center(

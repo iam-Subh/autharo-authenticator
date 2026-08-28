@@ -1,4 +1,4 @@
-package dev.authcore.authenticator
+package app.autharo.authenticator
 
 import android.content.Context
 import android.security.keystore.KeyGenParameterSpec
@@ -7,6 +7,7 @@ import android.util.AtomicFile
 import java.io.File
 import java.nio.ByteBuffer
 import java.security.KeyStore
+import java.security.SecureRandom
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
@@ -26,6 +27,9 @@ import javax.crypto.spec.GCMParameterSpec
 class SyncTokenStore(context: Context) {
     private val sessionFile = AtomicFile(
         File(context.applicationContext.noBackupFilesDir, FILE_NAME),
+    )
+    private val pageKeyFile = AtomicFile(
+        File(context.applicationContext.noBackupFilesDir, PAGE_KEY_FILE_NAME),
     )
     private val lock = Any()
 
@@ -53,7 +57,7 @@ class SyncTokenStore(context: Context) {
             val cipher = Cipher.getInstance(TRANSFORMATION)
             cipher.init(
                 Cipher.DECRYPT_MODE,
-                existingKey() ?: throw IllegalStateException(
+                existingKey(KEY_ALIAS) ?: throw IllegalStateException(
                     "The device key for the synchronization session is missing.",
                 ),
                 GCMParameterSpec(TAG_LENGTH_BITS, sealed.iv),
@@ -75,11 +79,11 @@ class SyncTokenStore(context: Context) {
 
             synchronized(lock) {
                 val cipher = Cipher.getInstance(TRANSFORMATION)
-                cipher.init(Cipher.ENCRYPT_MODE, getOrCreateKey())
+                cipher.init(Cipher.ENCRYPT_MODE, getOrCreateKey(KEY_ALIAS))
                 val ciphertext = cipher.doFinal(payload)
                 val stored = encode(cipher.iv, ciphertext)
                 try {
-                    writeAtomically(stored)
+                    writeAtomically(sessionFile, stored)
                 } finally {
                     stored.fill(0)
                     ciphertext.fill(0)
@@ -104,26 +108,77 @@ class SyncTokenStore(context: Context) {
         }
     }
 
-    private fun writeAtomically(value: ByteArray) {
-        val output = sessionFile.startWrite()
+    /** Returns the page-encryption key used by locked synchronization. */
+    fun readOrCreatePageKey(): ByteArray = synchronized(lock) {
+        if (pageKeyFile.baseFile.isFile) {
+            val stored = pageKeyFile.readFully()
+            try {
+                val sealed = decode(stored)
+                val cipher = Cipher.getInstance(TRANSFORMATION)
+                cipher.init(
+                    Cipher.DECRYPT_MODE,
+                    existingKey(PAGE_KEY_ALIAS) ?: throw IllegalStateException(
+                        "The device key for the vault page key is missing.",
+                    ),
+                    GCMParameterSpec(TAG_LENGTH_BITS, sealed.iv),
+                )
+                return@synchronized cipher.doFinal(sealed.ciphertext).also {
+                    require(it.size == PAGE_KEY_BYTES) {
+                        "The vault page key has an invalid length."
+                    }
+                }
+            } finally {
+                stored.fill(0)
+            }
+        }
+
+        val pageKey = ByteArray(PAGE_KEY_BYTES)
+        SecureRandom().nextBytes(pageKey)
+        val cipher = Cipher.getInstance(TRANSFORMATION)
+        cipher.init(Cipher.ENCRYPT_MODE, getOrCreateKey(PAGE_KEY_ALIAS))
+        val ciphertext = cipher.doFinal(pageKey)
+        val stored = encode(cipher.iv, ciphertext)
+        try {
+            writeAtomically(pageKeyFile, stored)
+            pageKey
+        } catch (error: Exception) {
+            pageKey.fill(0)
+            throw error
+        } finally {
+            stored.fill(0)
+            ciphertext.fill(0)
+        }
+    }
+
+    /** Deletes the page key after Rust has removed the local vault. */
+    fun clearPageKey() = synchronized(lock) {
+        pageKeyFile.delete()
+        val store = keyStore()
+        if (store.containsAlias(PAGE_KEY_ALIAS)) {
+            store.deleteEntry(PAGE_KEY_ALIAS)
+        }
+    }
+
+    private fun writeAtomically(file: AtomicFile, value: ByteArray) {
+        val output = file.startWrite()
         try {
             output.write(value)
-            sessionFile.finishWrite(output)
+            file.finishWrite(output)
         } catch (error: Exception) {
-            sessionFile.failWrite(output)
+            file.failWrite(output)
             throw IllegalStateException("The encrypted synchronization session could not be saved.", error)
         }
     }
 
-    private fun getOrCreateKey(): SecretKey {
-        existingKey()?.let { return it }
+    private fun getOrCreateKey(alias: String): SecretKey {
+        existingKey(alias)?.let { return it }
 
         val generator = KeyGenerator.getInstance(
             KeyProperties.KEY_ALGORITHM_AES,
             KEYSTORE_PROVIDER,
         )
         val specification = KeyGenParameterSpec.Builder(
-            KEY_ALIAS,
+            alias,
             KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT,
         )
             .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
@@ -138,8 +193,8 @@ class SyncTokenStore(context: Context) {
         return generator.generateKey()
     }
 
-    private fun existingKey(): SecretKey? =
-        (keyStore().getEntry(KEY_ALIAS, null) as? KeyStore.SecretKeyEntry)?.secretKey
+    private fun existingKey(alias: String): SecretKey? =
+        (keyStore().getEntry(alias, null) as? KeyStore.SecretKeyEntry)?.secretKey
 
     private fun keyStore(): KeyStore =
         KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
@@ -187,7 +242,10 @@ class SyncTokenStore(context: Context) {
     private companion object {
         const val KEYSTORE_PROVIDER = "AndroidKeyStore"
         const val KEY_ALIAS = "authcore.sync.session.v1"
+        const val PAGE_KEY_ALIAS = "authcore.sync.page_key.v1"
         const val FILE_NAME = "sync_session_v1.bin"
+        const val PAGE_KEY_FILE_NAME = "sync_page_key_v1.bin"
+        const val PAGE_KEY_BYTES = 32
         const val TRANSFORMATION = "AES/GCM/NoPadding"
         const val IV_LENGTH_BYTES = 12
         const val TAG_LENGTH_BITS = 128

@@ -26,6 +26,12 @@ pub enum ApiError {
     #[error("an existing device must approve this sign-in")]
     DeviceApprovalRequired,
 
+    #[error("verify the email address before account registration")]
+    EmailVerificationRequired,
+
+    #[error("the identity proof is invalid or expired")]
+    InvalidIdentity,
+
     #[error("this session does not permit that action")]
     InsufficientScope,
     #[error("enter the account password to authorize this action")]
@@ -88,6 +94,10 @@ impl ApiError {
             Self::InvalidCredentials => (StatusCode::UNAUTHORIZED, "invalid_credentials"),
             Self::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized"),
             Self::DeviceApprovalRequired => (StatusCode::FORBIDDEN, "device_approval_required"),
+            Self::EmailVerificationRequired => {
+                (StatusCode::FORBIDDEN, "email_verification_required")
+            }
+            Self::InvalidIdentity => (StatusCode::UNAUTHORIZED, "invalid_identity"),
             Self::InsufficientScope => (StatusCode::FORBIDDEN, "insufficient_scope"),
             Self::ElevationRequired => (StatusCode::FORBIDDEN, "elevation_required"),
             Self::InvalidScope => (StatusCode::BAD_REQUEST, "invalid_scope"),
