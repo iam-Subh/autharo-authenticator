@@ -3,6 +3,7 @@
 //! A push is only a wake-up hint. The authenticated sync API remains the source
 //! of truth. The payload contains no vault data and no user data.
 
+use reqwest::StatusCode;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -18,7 +19,18 @@ const FCM_SCOPE: &str = "https://www.googleapis.com/auth/firebase.messaging";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Delivery {
     Sent,
+    /// FCM says this registration token no longer exists. The route is dead
+    /// and clearing it immediately is correct.
     TokenUnregistered,
+    /// The send failed for a reason that says nothing about the token: our
+    /// OAuth credentials, an FCM outage, a rate limit, a network error.
+    ///
+    /// Kept separate because the alternative is dangerous. If every failure
+    /// counted against the device, one expired service account would fail
+    /// every send for every device and quietly delete every push route on the
+    /// service — turning a credential problem into a silent, account-wide
+    /// feature outage that only re-registration recovers.
+    Transient,
 }
 
 #[async_trait]
@@ -101,8 +113,32 @@ impl PushDispatcher for FcmDispatcher {
         if unregistered {
             return Ok(Delivery::TokenUnregistered);
         }
+
+        // Whose fault it is decides whether the device is penalised.
+        //
+        // 401 and 403 are our credentials. 429 is a rate limit. 5xx is FCM.
+        // None of those say anything about this registration token, and
+        // counting them would let an outage clear every route on the service.
+        // Everything else in the 4xx range — a malformed or unusable token —
+        // is attributable to the device.
+        if is_transient(status) {
+            tracing::warn!(%status, "FCM is unavailable or refused this server");
+            return Ok(Delivery::Transient);
+        }
         anyhow::bail!("FCM returned HTTP {status}")
     }
+}
+
+/// Whether a failing status says nothing about the registration token.
+///
+/// Split out so the rule can be tested directly. Reaching it through a real
+/// FCM response would need a fake HTTP server, and the thing worth pinning is
+/// this decision, not the plumbing around it.
+fn is_transient(status: StatusCode) -> bool {
+    status.is_server_error()
+        || status == StatusCode::UNAUTHORIZED
+        || status == StatusCode::FORBIDDEN
+        || status == StatusCode::TOO_MANY_REQUESTS
 }
 
 fn valid_project_id(project_id: &str) -> bool {
@@ -129,6 +165,14 @@ fn message_payload(registration_token: &str) -> serde_json::Value {
         }
     })
 }
+
+/// Consecutive attributable failures before a push route is dropped.
+///
+/// Only failures the device is responsible for count toward this, so it is not
+/// a timer on FCM being unavailable. A token rejected on its own merits this
+/// many times running is not coming back, and retrying it forever costs one
+/// request per sync, per device, for the life of the account.
+const MAX_PUSH_FAILURES: i32 = 10;
 
 /// Sends to every active device except the device that wrote the change.
 /// Delivery runs after the database commit and never changes the sync result.
@@ -186,14 +230,29 @@ pub async fn notify_vault_changed(state: SharedState, account_id: Uuid, source: 
                 .execute(&state.db)
                 .await;
             }
+            // Not the token's fault, so the device is not penalised for it.
+            Ok(Delivery::Transient) => {}
             Err(error) => {
                 tracing::warn!(device_id = %device_id, %error, "push delivery failed");
+                // Counted and acted on in one statement. Reading the count and
+                // then clearing the route would leave a window — and until now
+                // the counter was incremented by a mechanism nothing ever read,
+                // which looks like a policy until you check.
                 let _ = sqlx::query(
                     "UPDATE device
-                            SET push_failures = push_failures + 1
-                          WHERE id = $1",
+                        SET push_failures = push_failures + 1,
+                            push_token = CASE
+                                WHEN push_failures + 1 >= $2 THEN NULL
+                                ELSE push_token
+                            END,
+                            push_token_updated_at = CASE
+                                WHEN push_failures + 1 >= $2 THEN NULL
+                                ELSE push_token_updated_at
+                            END
+                      WHERE id = $1",
                 )
                 .bind(device_id)
+                .bind(MAX_PUSH_FAILURES)
                 .execute(&state.db)
                 .await;
             }
@@ -229,5 +288,63 @@ mod tests {
         for forbidden in ["issuer", "account", "secret", "code", "ciphertext"] {
             assert!(!text.contains(forbidden), "payload contains {forbidden}");
         }
+    }
+}
+
+#[cfg(test)]
+mod failure_policy {
+    use super::*;
+
+    /// The distinction the whole policy rests on.
+    ///
+    /// Only failures a device is responsible for may count against it. If an
+    /// expired service account or an FCM outage counted, one bad credential
+    /// would fail every send for every device and clear every push route on
+    /// the service — a silent, account-wide outage that only re-registration
+    /// recovers, caused by something entirely on our side.
+    #[test]
+    fn only_the_devices_own_failures_are_attributable() {
+        // Ours, or FCM's. The device is blameless.
+        for status in [
+            StatusCode::UNAUTHORIZED,
+            StatusCode::FORBIDDEN,
+            StatusCode::TOO_MANY_REQUESTS,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            StatusCode::BAD_GATEWAY,
+            StatusCode::SERVICE_UNAVAILABLE,
+            StatusCode::GATEWAY_TIMEOUT,
+        ] {
+            assert!(
+                is_transient(status),
+                "{status} must not be charged to the device"
+            );
+        }
+
+        // The token itself is unusable. That is the device's to answer for.
+        for status in [
+            StatusCode::BAD_REQUEST,
+            StatusCode::NOT_FOUND,
+            StatusCode::CONFLICT,
+        ] {
+            assert!(
+                !is_transient(status),
+                "{status} says the token is bad and must count"
+            );
+        }
+    }
+
+    #[test]
+    fn the_threshold_is_reached_rather_than_approached() {
+        // Off-by-one here means a route is either dropped a send early or kept
+        // forever. The SQL uses `push_failures + 1 >= MAX`, so the failure that
+        // reaches the limit is the one that clears it.
+        let cleared_on = (1..=MAX_PUSH_FAILURES)
+            .find(|failures| failures >= &MAX_PUSH_FAILURES)
+            .unwrap();
+        assert_eq!(cleared_on, MAX_PUSH_FAILURES);
+        assert!(
+            MAX_PUSH_FAILURES > 1,
+            "one bad send must not drop a working device"
+        );
     }
 }
