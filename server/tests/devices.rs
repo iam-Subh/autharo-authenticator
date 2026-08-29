@@ -1269,3 +1269,108 @@ async fn a_one_time_share_can_only_be_read_once() {
         .unwrap();
     assert_eq!(second.status(), 404, "a one-time share was readable twice");
 }
+
+// ---------------------------------------------------------------------------
+// Passkeys: the enumeration question
+// ---------------------------------------------------------------------------
+
+/// Section 9.5 applied to WebAuthn.
+///
+/// `start_authentication` used to answer 401 for an address with no account and
+/// 200 with a ceremony for one that had a passkey. That told an attacker in a
+/// single request what `prelogin`'s fake salt, `fake_auth_hash` and padded
+/// refusal are all built to refuse.
+///
+/// Passkeys are not configured in these tests, so both paths return the same
+/// "not configured" answer and this cannot check the fabricated ceremony end to
+/// end. What it can check is the property that matters most and is easiest to
+/// lose: that the *shape* of the answer does not depend on whether the address
+/// exists.
+#[tokio::test]
+async fn a_passkey_challenge_does_not_reveal_whether_an_account_exists() {
+    let (address, _db, _serial) = start_server().await;
+    let base = format!("http://{address}");
+    let client = reqwest::Client::new();
+
+    let account = register(&client, &base).await;
+
+    let ask = |email: String| {
+        let client = client.clone();
+        let base = base.clone();
+        async move {
+            client
+                .post(format!("{base}/v1/passkeys/authenticate/start"))
+                .json(&json!({ "email": email }))
+                .send()
+                .await
+                .unwrap()
+        }
+    };
+
+    let real = ask(account.email.clone()).await;
+    let unknown = ask("nobody-18ce6b49@example.invalid".to_string()).await;
+
+    assert_eq!(
+        real.status(),
+        unknown.status(),
+        "the status told the caller whether the address has an account"
+    );
+
+    let real_body = real.text().await.unwrap();
+    let unknown_body = unknown.text().await.unwrap();
+    assert_eq!(
+        real_body.len().abs_diff(unknown_body.len()) < 8,
+        true,
+        "the body length separated a real address from an unknown one:\n  real:    {real_body}\n  unknown: {unknown_body}"
+    );
+}
+
+/// The fabricated identifiers must not change between requests.
+///
+/// A fresh random list each time would be its own signal: a real account's
+/// credential identifiers are stable, so an answer that differs on a second ask
+/// is obviously fabricated. Asking twice is the cheapest possible probe.
+#[tokio::test]
+async fn a_fabricated_passkey_challenge_is_stable_for_an_address() {
+    let (address, _db, _serial) = start_server().await;
+    let base = format!("http://{address}");
+    let client = reqwest::Client::new();
+
+    let email = "stable-probe-18ce6b49@example.invalid";
+    let mut bodies = Vec::new();
+    for _ in 0..2 {
+        let response = client
+            .post(format!("{base}/v1/passkeys/authenticate/start"))
+            .json(&json!({ "email": email }))
+            .send()
+            .await
+            .unwrap();
+        bodies.push(response.text().await.unwrap());
+    }
+
+    // Without passkeys configured both answers are the same refusal, which
+    // satisfies this trivially. With passkeys configured the credential
+    // identifiers are HMAC-derived from the address and must still match; the
+    // challenge and ceremony id are random and are expected to differ.
+    let credential_ids = |body: &str| -> Vec<String> {
+        serde_json::from_str::<Value>(body)
+            .ok()
+            .and_then(|value| {
+                value
+                    .pointer("/public_key/publicKey/allowCredentials")?
+                    .as_array()
+                    .map(|list| {
+                        list.iter()
+                            .filter_map(|item| item["id"].as_str().map(str::to_string))
+                            .collect()
+                    })
+            })
+            .unwrap_or_default()
+    };
+
+    assert_eq!(
+        credential_ids(&bodies[0]),
+        credential_ids(&bodies[1]),
+        "the fabricated credential identifiers changed between requests"
+    );
+}

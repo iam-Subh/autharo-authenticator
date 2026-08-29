@@ -4,10 +4,11 @@
 //! A ceremony row is removed before its response is verified, so one challenge
 //! can produce at most one accepted response.
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::Json;
-use axum::extract::State;
+use axum::extract::{ConnectInfo, State};
 use axum::http::HeaderMap;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
@@ -21,6 +22,7 @@ use crate::SharedState;
 use crate::auth;
 use crate::crypto;
 use crate::error::{ApiError, ApiResult};
+use crate::ratelimit;
 
 const CEREMONY_TTL_MINUTES: i64 = 5;
 const PRF_SALT_BYTES: usize = 32;
@@ -238,23 +240,60 @@ pub struct StartAuthenticationRequest {
     pub email: String,
 }
 
+/// Retrievals of a passkey challenge, per address per hour.
+///
+/// Generous for a person — a sign-in is one call, and a retry or two is
+/// normal — and low enough that a list of candidate addresses cannot be walked
+/// quickly. The fabricated ceremony below makes each answer uninformative; the
+/// limit is what stops someone collecting a great many of them.
+const AUTHENTICATION_STARTS_PER_ADDRESS_PER_HOUR: i64 = 60;
+
 pub async fn start_authentication(
     State(state): State<SharedState>,
+    ConnectInfo(socket): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     Json(request): Json<StartAuthenticationRequest>,
 ) -> ApiResult<Json<CeremonyResponse>> {
     let service = configured(&state)?;
     let email = crypto::normalise_email(&request.email);
+
+    let address = ratelimit::client_address(&headers, socket);
+    ratelimit::record_address_endpoint(
+        &state.db,
+        "passkey-authenticate",
+        address,
+        AUTHENTICATION_STARTS_PER_ADDRESS_PER_HOUR,
+    )
+    .await?;
+
     let account = sqlx::query_as::<_, (Uuid,)>("SELECT id FROM account WHERE email = $1")
-        .bind(email)
+        .bind(&email)
         .fetch_optional(&state.db)
         .await?;
-    let Some((account_id,)) = account else {
-        return Err(ApiError::InvalidCredentials);
+
+    // An unknown address, or one with no passkey, gets a fabricated ceremony
+    // rather than an error.
+    //
+    // Returning 401 here answered in one request what `prelogin`'s fake salt,
+    // `fake_auth_hash` and padded refusal are all built to refuse: whether an
+    // account exists. The fabricated ceremony is derived from the address, so
+    // asking twice gives the same credential identifiers — a fresh random list
+    // each time would be its own signal, because a real account's identifiers
+    // do not change between requests.
+    //
+    // It fails at `finish_authentication` exactly as a wrong credential does:
+    // no ceremony row is stored, so the lookup there misses and returns the
+    // same message a replayed or expired ceremony gets.
+    let (account_id, rows) = match account {
+        Some((account_id,)) => {
+            let rows = load_passkey_rows(&state, account_id).await?;
+            if rows.is_empty() {
+                return Ok(Json(fabricated_ceremony(&state, &email)?));
+            }
+            (account_id, rows)
+        }
+        None => return Ok(Json(fabricated_ceremony(&state, &email)?)),
     };
-    let rows = load_passkey_rows(&state, account_id).await?;
-    if rows.is_empty() {
-        return Err(ApiError::InvalidCredentials);
-    }
     let passkeys = rows
         .iter()
         .map(|row| row.passkey.clone())
@@ -617,6 +656,49 @@ fn registration_prf_supported(credential: &Value) -> bool {
         .or_else(|| credential.pointer("/extensions/prf/enabled"))
         .and_then(Value::as_bool)
         .unwrap_or(false)
+}
+
+/// A passkey challenge for an address that has no passkey.
+///
+/// Shaped like the real thing: a random challenge, credential identifiers of
+/// the usual length, the same relying-party identifier, the same timeout and
+/// the same user-verification requirement. The identifiers come from
+/// [`crypto::fake_credential_ids`], so they are stable for an address and a
+/// second request cannot be told from a real one by comparing the two.
+///
+/// No ceremony row is written. Whatever the client sends back fails at
+/// `finish_authentication` with the message a replayed or expired ceremony
+/// gets, which is also what a genuine account with the wrong authenticator
+/// sees.
+fn fabricated_ceremony(state: &SharedState, email: &str) -> ApiResult<CeremonyResponse> {
+    let challenge = random_bytes(32)?;
+    let credentials = crypto::fake_credential_ids(&state.server_key, email);
+    let rp_id = std::env::var("WEBAUTHN_RP_ID").unwrap_or_default();
+
+    let public_key = serde_json::json!({
+        "publicKey": {
+            "challenge": B64.encode(&challenge),
+            "timeout": CEREMONY_TTL_MINUTES * 60 * 1000,
+            "rpId": rp_id,
+            "allowCredentials": credentials
+                .iter()
+                .map(|id| serde_json::json!({
+                    "type": "public-key",
+                    "id": B64.encode(id),
+                }))
+                .collect::<Vec<_>>(),
+            "userVerification": "preferred",
+        }
+    });
+
+    Ok(CeremonyResponse {
+        // Random, and deliberately not derived: a stable ceremony identifier
+        // would let someone tell a fabricated answer from a real one by
+        // asking twice, which is the whole thing this is here to prevent.
+        ceremony_id: Uuid::new_v4(),
+        public_key,
+        expires_at: Utc::now() + chrono::Duration::minutes(CEREMONY_TTL_MINUTES),
+    })
 }
 
 fn reject_prf_secret(credential: &Value) -> ApiResult<()> {

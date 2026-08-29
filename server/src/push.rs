@@ -333,18 +333,33 @@ mod failure_policy {
         }
     }
 
+    /// The SQL clears the route when `push_failures + 1 >= MAX`. This walks
+    /// that expression rather than restating the constant, so an off-by-one in
+    /// the statement shows up here.
+    ///
+    /// A previous version of this test asserted `MAX_PUSH_FAILURES > 1`, which
+    /// is a compile-time constant and therefore proves nothing. Clippy caught
+    /// it, which is the only reason it is not still sitting here looking green.
     #[test]
-    fn the_threshold_is_reached_rather_than_approached() {
-        // Off-by-one here means a route is either dropped a send early or kept
-        // forever. The SQL uses `push_failures + 1 >= MAX`, so the failure that
-        // reaches the limit is the one that clears it.
-        let cleared_on = (1..=MAX_PUSH_FAILURES)
-            .find(|failures| failures >= &MAX_PUSH_FAILURES)
-            .unwrap();
-        assert_eq!(cleared_on, MAX_PUSH_FAILURES);
+    fn the_route_is_cleared_by_the_failure_that_reaches_the_limit() {
+        // Mirrors the CASE expression: given the count already stored, does
+        // this failure clear the token?
+        let clears = |stored: i32| stored + 1 >= MAX_PUSH_FAILURES;
+
+        assert!(!clears(0), "one failure must not drop a working device");
         assert!(
-            MAX_PUSH_FAILURES > 1,
-            "one bad send must not drop a working device"
+            !clears(MAX_PUSH_FAILURES - 2),
+            "the failure before the limit must leave the route alone"
         );
+        assert!(
+            clears(MAX_PUSH_FAILURES - 1),
+            "the failure that reaches the limit must clear the route"
+        );
+        assert!(clears(MAX_PUSH_FAILURES), "past the limit stays cleared");
+
+        // And the count of survivable failures is what the constant says.
+        let survivable = (0..MAX_PUSH_FAILURES).filter(|n| !clears(*n)).count();
+        assert_eq!(survivable, (MAX_PUSH_FAILURES - 1) as usize);
     }
+
 }
