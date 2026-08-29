@@ -11,10 +11,15 @@ class PasskeyRegistrationResponse {
   const PasskeyRegistrationResponse({
     required this.credentialJson,
     required this.prfSupported,
+    required this.prfResult,
   });
 
+  /// WebAuthn response with the PRF secret removed.
   final String credentialJson;
   final bool prfSupported;
+
+  /// Credential-specific 32-byte secret. Keep this on the device.
+  final Uint8List? prfResult;
 }
 
 class PasskeyAuthenticationResponse {
@@ -44,9 +49,11 @@ class PasskeyService {
     final extensions = _extensions(value);
     final prf = extensions?['prf'];
     final supported = prf is Map && prf['enabled'] == true;
+    final prfResult = _takePrfResult(prf);
     return PasskeyRegistrationResponse(
       credentialJson: jsonEncode(value),
       prfSupported: supported,
+      prfResult: prfResult,
     );
   }
 
@@ -60,20 +67,7 @@ class PasskeyService {
     final value = _object(response);
     final extensions = _extensions(value);
     final prf = extensions?['prf'];
-    Uint8List? prfResult;
-    if (prf is Map) {
-      final results = prf['results'];
-      if (results is Map && results['first'] is String) {
-        prfResult = _decodeBase64Url(results['first'] as String);
-        if (prfResult.length != 32) {
-          throw const FormatException(
-            'Credential Manager returned an invalid PRF result.',
-          );
-        }
-      }
-      // The PRF result can unwrap the vault key. Never send it to the server.
-      prf.remove('results');
-    }
+    final prfResult = _takePrfResult(prf);
     return PasskeyAuthenticationResponse(
       credentialJson: jsonEncode(value),
       prfResult: prfResult,
@@ -91,6 +85,23 @@ class PasskeyService {
   static Map<String, dynamic>? _extensions(Map<String, dynamic> value) {
     final extensions = value['clientExtensionResults'] ?? value['extensions'];
     return extensions is Map<String, dynamic> ? extensions : null;
+  }
+
+  static Uint8List? _takePrfResult(Object? prf) {
+    if (prf is! Map) return null;
+    final results = prf['results'];
+    Uint8List? value;
+    if (results is Map && results['first'] is String) {
+      value = _decodeBase64Url(results['first'] as String);
+      if (value.length != 32) {
+        throw const FormatException(
+          'Credential Manager returned an invalid PRF result.',
+        );
+      }
+    }
+    // This secret can unwrap the vault key. Never send it to the server.
+    prf.remove('results');
+    return value;
   }
 
   static Uint8List _decodeBase64Url(String encoded) {

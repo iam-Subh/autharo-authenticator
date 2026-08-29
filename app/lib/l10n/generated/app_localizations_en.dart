@@ -2191,5 +2191,24 @@ class AppLocalizationsEn extends AppLocalizations {
   String get securityIdentityLinked => 'Verified identity linked';
 
   @override
+  String get addPasskey => 'Add passkey';
+
+  @override
+  String get addPasskeyDescription =>
+      'Use Android Credential Manager to create a passkey for this account.';
+
+  @override
+  String get passkeyPrfUnavailable =>
+      'This credential provider did not return the key material required to protect the vault. Keep password and recovery access enabled.';
+
+  @override
+  String get passkeyAdded => 'The passkey was added.';
+
+  @override
+  String passkeyAddFailed(String error) {
+    return 'The passkey could not be added: $error';
+  }
+
+  @override
   String get errorUnknown => 'The operation could not be completed.';
 }

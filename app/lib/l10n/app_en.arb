@@ -675,5 +675,11 @@
   "@linkVerifiedIdentityDescription": {"placeholders": {"email": {"type": "String"}}},
   "verifiedIdentity": "Verified identity",
   "securityIdentityLinked": "Verified identity linked",
+  "addPasskey": "Add passkey",
+  "addPasskeyDescription": "Use Android Credential Manager to create a passkey for this account.",
+  "passkeyPrfUnavailable": "This credential provider did not return the key material required to protect the vault. Keep password and recovery access enabled.",
+  "passkeyAdded": "The passkey was added.",
+  "passkeyAddFailed": "The passkey could not be added: {error}",
+  "@passkeyAddFailed": {"placeholders": {"error": {"type": "String"}}},
   "errorUnknown": "The operation could not be completed."
 }

@@ -11,9 +11,38 @@ sequence in section 18: each stage is finished before the next starts.
 | S2 — First platform | Android. Flutter UI, QR scan, manual entry, list, copy, application lock | **Done**, verified on a physical device |
 | S3 — Crypto | Vault key, key slots, Argon2id, XChaCha20-Poly1305, recovery key | **Done.** Device slot, record encryption, page encryption, password slot, recovery key |
 | S4 — Backend | API, PostgreSQL schema, key slots, quotas, enumeration resistance | **Done for the Android target.** Account, session, device approval, activity, capability, and destructive-operation APIs are implemented |
-| S5 — Sync | Sync engine, outbox, HLC, conflict resolution, prune watermark, FCM change signals | **Done in code for Android.** Live FCM delivery waits for the Firebase project files and server credentials |
+| S5 — Sync | Sync engine, outbox, HLC, conflict resolution, prune watermark, FCM change signals | **Done in code for Android.** The Android Firebase file is configured. Live FCM delivery still needs server credentials on Render |
 | S6 — Other platforms | Remaining platforms, screen capture, tray and menu bar | **Excluded from the current Android security scope** |
-| S7 — Passkeys | Android Credential Manager bridge, WebAuthn verification, PRF slot, fallback | **Infrastructure done.** Production activation waits for the final domain, package ID, signing fingerprint, and Digital Asset Links file |
+| S7 — Passkeys | Android Credential Manager bridge, WebAuthn verification, PRF slot, fallback | **Partial.** Hosting and Digital Asset Links are live. Registration is implemented. Render still needs the Android origin, and the new-device passkey sign-in interface is not complete |
+
+## Official synchronization service
+
+The Android application uses `https://autharo-api.onrender.com` automatically.
+The account and recovery screens do not ask a user to select a server. This
+build does not expose self-hosted server selection.
+
+The active-device count is protected account-security data. The Sync dashboard
+asks for the account password before it requests that count. The resulting
+`security:read` capability stays in Rust memory and expires after five minutes.
+
+A new-device sign-in adopts the synchronized vault key through the Rust-to-JNI
+Android Keystore path. Dart receives only a random one-time handle. The app
+refuses this operation when the local vault contains records. This prevents a
+key replacement from making local records unreadable. A device PIN must be
+removed before this one-time adoption and can be set again after sign-in.
+
+## Public Firebase Hosting site
+
+`firebase.json`, `.firebaserc`, and `hosting/` define the public Autharo site.
+The site includes privacy, terms, support, and account-deletion pages. Firebase
+Hosting must serve `hosting/.well-known/assetlinks.json` as JSON without a
+redirect. The file contains the current direct-release signing-certificate
+fingerprint. Add the Google Play app-signing fingerprint before a Play release.
+
+The `/demo` page provides a public TOTP test account. Scan the account once
+with Autharo. Then use the page to verify generated codes at any time. The
+verifier runs in the browser and sends no setup key or code to the server. The
+test setup key is public and must not protect real data.
 
 ## The lock releases the key, it does not hide the screen
 
@@ -753,12 +782,13 @@ generation and rotation steps.
   from its issuer. The user can enable bundled service symbols or set an emoji.
   The application performs no online icon lookup. See `EntryAvatar`.
 
-- **Passkey production activation needs a production identity.** The server
+- **Passkey sign-in is not complete.** The server
   verifies WebAuthn challenges, origin, relying-party ID, signatures,
   counters, expiry, and replay. The Rust client wraps the vault key with the
   PRF result. Password or recovery remains available when a provider omits the
-  PRF result. The UI stays disabled until the final domain, package ID,
-  signing fingerprint, and Digital Asset Links file exist.
+  PRF result. The registration UI stays disabled until Render allows the
+  release-signed Android origin. The new-device passkey sign-in UI is not yet
+  connected to the authentication endpoints.
 
 - **Windows, macOS, and Linux secure storage are outside this scope.** This
   work does not change their secret handling.

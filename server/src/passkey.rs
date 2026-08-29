@@ -39,6 +39,7 @@ impl PasskeyService {
         let rp_id = std::env::var("WEBAUTHN_RP_ID").ok();
         let origin = std::env::var("WEBAUTHN_RP_ORIGIN").ok();
         let name = std::env::var("WEBAUTHN_RP_NAME").ok();
+        let android_origins = std::env::var("WEBAUTHN_ANDROID_ORIGINS").ok();
         if rp_id.is_none() && origin.is_none() && name.is_none() {
             return Ok(None);
         }
@@ -52,9 +53,23 @@ impl PasskeyService {
         if origin.scheme() != "https" || origin.host_str().is_none() {
             anyhow::bail!("WEBAUTHN_RP_ORIGIN must be one HTTPS origin");
         }
-        let webauthn = WebauthnBuilder::new(&rp_id, &origin)?
-            .rp_name(&name)
-            .build()?;
+        let mut builder = WebauthnBuilder::new(&rp_id, &origin)?.rp_name(&name);
+        if let Some(origins) = android_origins {
+            for value in origins
+                .split(',')
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                if !value.starts_with("android:apk-key-hash:") {
+                    anyhow::bail!(
+                        "WEBAUTHN_ANDROID_ORIGINS must contain comma-separated android:apk-key-hash origins"
+                    );
+                }
+                let android_origin = Url::parse(value)?;
+                builder = builder.append_allowed_origin(&android_origin);
+            }
+        }
+        let webauthn = builder.build()?;
         Ok(Some(Self {
             webauthn: Arc::new(webauthn),
         }))
@@ -648,5 +663,20 @@ mod tests {
         let nonce = B64.encode([0; WRAP_NONCE_BYTES]);
         assert!(decode_optional_slot(true, Some(&wrapped), Some(&nonce)).is_ok());
         assert!(decode_optional_slot(true, Some("short"), Some(&nonce)).is_err());
+    }
+
+    #[test]
+    fn the_android_application_origin_can_be_allowed_exactly() {
+        let web_origin = Url::parse("https://autharo-auth-prod.web.app").unwrap();
+        let android_origin =
+            Url::parse("android:apk-key-hash:cLWpxJnUHnzH5oiVwvyeZGudE1s9Cx4jHIHPdX8vSUg").unwrap();
+        let webauthn = WebauthnBuilder::new("autharo-auth-prod.web.app", &web_origin)
+            .unwrap()
+            .append_allowed_origin(&android_origin)
+            .build()
+            .unwrap();
+
+        assert!(webauthn.get_allowed_origins().contains(&web_origin));
+        assert!(webauthn.get_allowed_origins().contains(&android_origin));
     }
 }

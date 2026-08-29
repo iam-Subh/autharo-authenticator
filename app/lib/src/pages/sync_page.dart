@@ -5,6 +5,8 @@ import 'package:flutter/material.dart';
 import '../../l10n/generated/app_localizations.dart';
 import '../rust/api/sync.dart' as rust;
 import '../services/sync_controller.dart';
+import '../services/vault_session.dart';
+import '../services/security_elevation.dart';
 import '../services/localized_error.dart';
 import 'sync_sign_in_page.dart';
 import 'link_identity_page.dart';
@@ -15,9 +17,10 @@ import 'link_identity_page.dart';
 /// Sync is optional (OFF-04), so nothing here nags a local-only user. The page
 /// explains what turning it on would do and otherwise stays out of the way.
 class SyncPage extends StatefulWidget {
-  const SyncPage({super.key, required this.controller});
+  const SyncPage({super.key, required this.controller, required this.session});
 
   final SyncController controller;
+  final VaultSession session;
 
   @override
   State<SyncPage> createState() => _SyncPageState();
@@ -63,6 +66,21 @@ class _SyncPageState extends State<SyncPage> {
     } catch (_) {
       // Identity enrollment must not block the existing sync dashboard.
     }
+    final authorized = await rust.hasElevatedScope(scope: securityReadScope);
+    if (!authorized) {
+      if (mounted) {
+        setState(() {
+          _deviceCount = null;
+          _deviceCountError = null;
+          _identity = identity;
+        });
+      }
+      return;
+    }
+    await _loadDeviceCount(identity: identity);
+  }
+
+  Future<void> _loadDeviceCount({rust.IdentityStatusView? identity}) async {
     try {
       final devices = await rust.listDevices();
       if (!mounted) return;
@@ -77,6 +95,21 @@ class _SyncPageState extends State<SyncPage> {
         _deviceCountError = error;
         _identity = identity;
       });
+    }
+  }
+
+  Future<void> _authorizeAndLoadDevices() async {
+    try {
+      final authorized = await authorizeScope(
+        context,
+        scope: securityReadScope,
+        action: AppLocalizations.of(context).yourDevices,
+      );
+      if (!authorized || !mounted) return;
+      await _loadDeviceCount(identity: _identity);
+    } catch (error) {
+      if (!mounted) return;
+      setState(() => _deviceCountError = error);
     }
   }
 
@@ -142,6 +175,7 @@ class _SyncPageState extends State<SyncPage> {
               deviceCountError: _deviceCountError,
               busy: widget.controller.busy,
               onRetry: _syncNow,
+              onLoadDevices: _authorizeAndLoadDevices,
             ),
           const Divider(),
 
@@ -157,6 +191,7 @@ class _SyncPageState extends State<SyncPage> {
               onTap: () => _open(
                 SyncSignInPage(
                   controller: widget.controller,
+                  session: widget.session,
                   mode: SignInMode.register,
                 ),
               ),
@@ -168,6 +203,7 @@ class _SyncPageState extends State<SyncPage> {
               onTap: () => _open(
                 SyncSignInPage(
                   controller: widget.controller,
+                  session: widget.session,
                   mode: SignInMode.signIn,
                 ),
               ),
@@ -228,6 +264,7 @@ class _SyncDashboard extends StatelessWidget {
     required this.deviceCountError,
     required this.busy,
     required this.onRetry,
+    required this.onLoadDevices,
   });
 
   final SyncStatus status;
@@ -235,6 +272,7 @@ class _SyncDashboard extends StatelessWidget {
   final Object? deviceCountError;
   final bool busy;
   final VoidCallback onRetry;
+  final VoidCallback onLoadDevices;
 
   String _lastSync(AppLocalizations l10n) {
     final value = status.lastSuccess;
@@ -254,7 +292,7 @@ class _SyncDashboard extends StatelessWidget {
         : l10n.unknownWhileLocked;
     final devices = deviceCountError != null
         ? l10n.couldNotLoad
-        : deviceCount?.toString() ?? l10n.loading;
+        : deviceCount?.toString() ?? l10n.tapToShow;
 
     return Card(
       margin: const EdgeInsets.fromLTRB(16, 8, 16, 16),
@@ -270,7 +308,11 @@ class _SyncDashboard extends StatelessWidget {
             const SizedBox(height: 12),
             _DashboardRow(label: l10n.lastSync, value: _lastSync(l10n)),
             _DashboardRow(label: l10n.pendingChanges, value: pending),
-            _DashboardRow(label: l10n.activeDevices, value: devices),
+            _DashboardRow(
+              label: l10n.activeDevices,
+              value: devices,
+              onTap: busy ? null : onLoadDevices,
+            ),
             _DashboardRow(
               label: l10n.server,
               value: status.serverUrl ?? l10n.notConfigured,
@@ -298,14 +340,15 @@ class _SyncDashboard extends StatelessWidget {
 }
 
 class _DashboardRow extends StatelessWidget {
-  const _DashboardRow({required this.label, required this.value});
+  const _DashboardRow({required this.label, required this.value, this.onTap});
 
   final String label;
   final String value;
+  final VoidCallback? onTap;
 
   @override
   Widget build(BuildContext context) {
-    return Padding(
+    final content = Padding(
       padding: const EdgeInsets.symmetric(vertical: 4),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -318,8 +361,14 @@ class _DashboardRow extends StatelessWidget {
             ),
           ),
           Expanded(child: Text(value)),
+          if (onTap != null) const Icon(Icons.chevron_right, size: 20),
         ],
       ),
+    );
+    if (onTap == null) return content;
+    return Semantics(
+      button: true,
+      child: InkWell(onTap: onTap, child: content),
     );
   }
 }

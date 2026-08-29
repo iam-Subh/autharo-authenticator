@@ -19,6 +19,8 @@ Thumbs.db
 *.db-journal
 *.sqlite
 .env
+.firebase/
+firebase-debug.log
 
 # Flutter / Dart, generated
 app/.dart_tool/

@@ -14,69 +14,49 @@ void main() {
         .setMockMethodCallHandler(channel, null);
   });
 
-  test('authentication keeps the PRF result on the device', () async {
-    final prf = List<int>.generate(32, (index) => index);
+  test('registration keeps the PRF secret on the device', () async {
+    final secret = Uint8List.fromList(List<int>.generate(32, (index) => index));
+    final encoded = base64Url.encode(secret).replaceAll('=', '');
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-        .setMockMethodCallHandler(
-          channel,
-          (_) async => jsonEncode({
+        .setMockMethodCallHandler(channel, (call) async {
+          expect(call.method, 'create');
+          return jsonEncode({
             'id': 'credential',
             'clientExtensionResults': {
               'prf': {
-                'results': {'first': base64UrlEncode(prf)},
+                'enabled': true,
+                'results': {'first': encoded},
               },
             },
-          }),
-        );
+          });
+        });
 
-    final response = await PasskeyService().get('{}');
-    final sanitized =
-        jsonDecode(response.credentialJson) as Map<String, Object?>;
+    final response = await PasskeyService().create('{}');
 
-    expect(response.prfResult, prf);
-    expect(response.credentialJson, isNot(contains(base64UrlEncode(prf))));
-    final extensions =
-        sanitized['clientExtensionResults'] as Map<String, Object?>;
-    expect(
-      (extensions['prf'] as Map<String, Object?>).containsKey('results'),
-      isFalse,
-    );
+    expect(response.prfSupported, isTrue);
+    expect(response.prfResult, secret);
+    expect(response.credentialJson, isNot(contains('results')));
+    expect(response.credentialJson, isNot(contains(encoded)));
   });
 
-  test(
-    'registration reports PRF support without returning key material',
-    () async {
-      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-          .setMockMethodCallHandler(
-            channel,
-            (_) async => jsonEncode({
-              'id': 'credential',
-              'clientExtensionResults': {
-                'prf': {'enabled': true},
-              },
-            }),
-          );
-
-      final response = await PasskeyService().create('{}');
-
-      expect(response.prfSupported, isTrue);
-      expect(response.credentialJson, contains('credential'));
-    },
-  );
-
-  test('authentication rejects a PRF result with the wrong length', () async {
+  test('an invalid PRF result is rejected', () async {
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-        .setMockMethodCallHandler(
-          channel,
-          (_) async => jsonEncode({
+        .setMockMethodCallHandler(channel, (_) async {
+          return jsonEncode({
             'clientExtensionResults': {
               'prf': {
-                'results': {'first': base64UrlEncode(List<int>.filled(31, 1))},
+                'enabled': true,
+                'results': {
+                  'first': base64Url.encode([1, 2, 3]),
+                },
               },
             },
-          }),
-        );
+          });
+        });
 
-    expect(PasskeyService().get('{}'), throwsFormatException);
+    await expectLater(
+      PasskeyService().create('{}'),
+      throwsA(isA<FormatException>()),
+    );
   });
 }

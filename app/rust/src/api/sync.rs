@@ -65,6 +65,20 @@ struct CachedCapability {
 /// `meta.db`, the Android token file, or Dart state.
 static CAPABILITY: Mutex<Option<CachedCapability>> = Mutex::new(None);
 static SYNC_RUN: Mutex<()> = Mutex::new(());
+/// Refresh tokens rotate after one use. Every caller must therefore share one
+/// refresh gate. Without this gate, foreground sync and FCM registration can
+/// submit the same token together. The server correctly treats the second use
+/// as a replay and revokes the complete session family.
+static SESSION_REFRESH: Mutex<()> = Mutex::new(());
+
+struct PendingSignIn {
+    account: account::Account,
+    session: session::Session,
+}
+
+/// A new-device sign-in is committed only after Android Keystore wraps the
+/// synchronized vault key.
+static PENDING_SIGN_IN: Mutex<Option<PendingSignIn>> = Mutex::new(None);
 
 /// Everything OFF-05 needs: three states and the time of the last success.
 ///
@@ -226,13 +240,13 @@ pub fn register_account(
 /// for a known one, so nothing here may treat a successful response as evidence
 /// the account exists. It does not — it derives a key and tries to sign in, and
 /// a wrong address and a wrong password fail identically.
-pub fn sign_in(
+pub fn begin_sign_in(
     email: String,
     password: String,
     device_name: Option<String>,
     device_approval_token: Option<String>,
     recovery_phrase: Option<String>,
-) -> Result<()> {
+) -> Result<Vec<u8>> {
     let base = crate::api::vault::with_meta_pub(|meta| {
         text(meta, META_SERVER_URL)?.ok_or_else(|| anyhow!("Choose a sync server first."))
     })?;
@@ -284,14 +298,33 @@ pub fn sign_in(
 
     let account = session::slots_for_account(&email, &prelogin, &session)
         .map_err(|error| anyhow!("{error}"))?;
+    let key = account::unlock_with_password_from_account(&account, &password)
+        .map_err(|error| anyhow!("{error}"))?;
+    let handle = crate::api::vault::begin_empty_vault_key_adoption(key)?;
+    *PENDING_SIGN_IN
+        .lock()
+        .map_err(|_| anyhow!("The pending sign-in lock is unavailable."))? =
+        Some(PendingSignIn { account, session });
+    Ok(handle)
+}
 
-    crate::api::vault::with_meta_pub(|meta| {
-        account::save(meta, &account).map_err(|error| anyhow!("{error}"))?;
-        Ok(())
-    })?;
+/// Commits the Android Keystore slot, local account slots, and token pair.
+pub fn finish_sign_in(vault_path: String, wrapped: Vec<u8>, nonce: Vec<u8>) -> Result<()> {
+    let pending = PENDING_SIGN_IN
+        .lock()
+        .map_err(|_| anyhow!("The pending sign-in lock is unavailable."))?
+        .take()
+        .ok_or_else(|| anyhow!("No account sign-in is in progress."))?;
+    crate::api::vault::finish_account_key_adoption(&vault_path, wrapped, nonce, &pending.account)?;
+    store_session(&pending.session)
+}
 
-    store_session(&session)?;
-    Ok(())
+/// Drops a new-device sign-in that did not complete its Keystore operation.
+pub fn cancel_sign_in() {
+    if let Ok(mut pending) = PENDING_SIGN_IN.lock() {
+        pending.take();
+    }
+    crate::api::vault::cancel_pending_keystore_operations();
 }
 
 /// Resets a forgotten password by proving possession of the recovery phrase.
@@ -416,6 +449,49 @@ pub struct IdentityStatusView {
     pub linked: bool,
     pub provider: Option<String>,
     pub verified_email: Option<String>,
+}
+
+pub struct PasskeyRegistrationStartView {
+    pub ceremony_id: String,
+    pub request_json: String,
+    pub expires_at: String,
+}
+
+/// Starts an Android passkey registration after password authorization.
+pub fn start_passkey_registration(password: String) -> Result<PasskeyRegistrationStartView> {
+    let auth_key = derive_stored_auth_key(&password)?;
+    elevate_with_auth(&auth_key, &[SCOPE_SECURITY_READ])?;
+    with_scope(SCOPE_SECURITY_READ, |client, token| {
+        let ceremony = client.start_passkey_registration(token)?;
+        Ok(PasskeyRegistrationStartView {
+            ceremony_id: ceremony.id,
+            request_json: ceremony.request_json,
+            expires_at: ceremony.expires_at,
+        })
+    })
+}
+
+/// Sends a passkey public credential and an encrypted vault-key slot.
+/// The PRF secret and raw vault key never enter this request.
+pub fn finish_passkey_registration(
+    ceremony_id: String,
+    credential_json: String,
+    prf_supported: bool,
+    wrapped_key: Option<Vec<u8>>,
+    wrap_nonce: Option<Vec<u8>>,
+) -> Result<String> {
+    let registered = with_scope(SCOPE_SECURITY_READ, |client, token| {
+        Ok(client.finish_passkey_registration(
+            token,
+            ceremony_id.trim(),
+            &credential_json,
+            prf_supported,
+            wrapped_key.as_deref(),
+            wrap_nonce.as_deref(),
+        )?)
+    })?;
+    clear_capabilities();
+    Ok(registered.credential_id)
 }
 
 pub fn identity_status() -> Result<IdentityStatusView> {
@@ -877,6 +953,17 @@ fn tracing_http_warning(url: &str) {
 /// minutes after signing in and then stops for good — silently, because a
 /// background cycle has nobody watching it.
 pub(crate) fn try_refresh() -> Result<bool> {
+    with_session_refresh_lock(try_refresh_inner)
+}
+
+fn with_session_refresh_lock<T>(operation: impl FnOnce() -> Result<T>) -> Result<T> {
+    let _guard = SESSION_REFRESH
+        .lock()
+        .map_err(|_| anyhow!("The session refresh lock was poisoned by an earlier failure."))?;
+    operation()
+}
+
+fn try_refresh_inner() -> Result<bool> {
     let (base, refresh_token) = crate::api::vault::with_meta_pub(|meta| {
         let base = server_url(meta)?.ok_or_else(|| anyhow!("Choose a sync server first."))?;
         let token = load_session(meta)?.map(|session| session.refresh);
@@ -1523,7 +1610,11 @@ fn now_ms() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::check_scheme;
+    use super::{check_scheme, with_session_refresh_lock};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::thread;
+    use std::time::Duration;
 
     #[test]
     fn https_is_accepted_by_every_build() {
@@ -1561,5 +1652,33 @@ mod tests {
             assert!(check_scheme(url, true).is_err(), "{url:?} was allowed");
             assert!(check_scheme(url, false).is_err(), "{url:?} was allowed");
         }
+    }
+
+    #[test]
+    fn refresh_operations_cannot_overlap() {
+        let active = Arc::new(AtomicUsize::new(0));
+        let maximum = Arc::new(AtomicUsize::new(0));
+        let mut workers = Vec::new();
+
+        for _ in 0..8 {
+            let active = Arc::clone(&active);
+            let maximum = Arc::clone(&maximum);
+            workers.push(thread::spawn(move || {
+                with_session_refresh_lock(|| {
+                    let now = active.fetch_add(1, Ordering::SeqCst) + 1;
+                    maximum.fetch_max(now, Ordering::SeqCst);
+                    thread::sleep(Duration::from_millis(5));
+                    active.fetch_sub(1, Ordering::SeqCst);
+                    Ok(())
+                })
+                .unwrap();
+            }));
+        }
+
+        for worker in workers {
+            worker.join().unwrap();
+        }
+
+        assert_eq!(maximum.load(Ordering::SeqCst), 1);
     }
 }

@@ -130,6 +130,56 @@ pub(crate) fn current_vault_key() -> Result<VaultKey> {
         .ok_or_else(|| anyhow!("Unlock the vault before changing account security."))
 }
 
+/// Prepares an empty local vault to adopt a synchronized account key.
+///
+/// Android receives a random JNI handle. It never receives the key bytes in
+/// Dart. A non-empty vault is refused because changing its record key would
+/// make existing entries unreadable.
+pub(crate) fn begin_empty_vault_key_adoption(key: VaultKey) -> Result<Vec<u8>> {
+    let has_records = with_vault(|vault| Ok(!vault.store().list(true)?.is_empty()))?;
+    if has_records {
+        anyhow::bail!(
+            "This device already has entries. Export or synchronize them before joining another vault."
+        );
+    }
+    let has_pin = with_meta(|meta| {
+        Ok(matches!(
+            device_slot::state(meta).map_err(|error| anyhow!("{error}"))?,
+            SlotState::PresentNeedsPin
+        ))
+    })?;
+    if has_pin {
+        anyhow::bail!(
+            "Remove the device PIN before joining an existing account. Set the PIN again after sign-in."
+        );
+    }
+    let request = device_slot::rewrap_without_pin(key).map_err(|error| anyhow!("{error}"))?;
+    let handle = secret_for_platform(request.key_to_wrap().to_vec())?;
+    *PENDING_SETUP.lock().map_err(|_| lock_poisoned())? = Some(request);
+    Ok(handle)
+}
+
+pub(crate) fn finish_account_key_adoption(
+    vault_path: &str,
+    wrapped: Vec<u8>,
+    nonce: Vec<u8>,
+    new_account: &account::Account,
+) -> Result<()> {
+    let request = PENDING_SETUP
+        .lock()
+        .map_err(|_| lock_poisoned())?
+        .take()
+        .ok_or_else(|| anyhow!("No account sign-in is in progress."))?;
+    let mut meta = take_meta()?;
+    let key = request
+        .complete(&mut meta, wrapped, nonce)
+        .map_err(|error| anyhow!("{error}"))?;
+    account::save(&meta, new_account).map_err(|error| anyhow!("{error}"))?;
+    meta.remove(BIOMETRIC_WRAPPED_KEY)?;
+    meta.remove(BIOMETRIC_NONCE)?;
+    open_vault_with_key(vault_path, meta, key)
+}
+
 fn with_meta<T>(f: impl FnOnce(&MetaStore) -> Result<T>) -> Result<T> {
     if let Some(vault) = VAULT.lock().map_err(|_| lock_poisoned())?.as_ref() {
         return f(vault.store().meta());

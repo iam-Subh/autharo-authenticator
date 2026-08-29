@@ -629,5 +629,11 @@
   "@linkVerifiedIdentityDescription": {"placeholders": {"email": {"type": "String"}}},
   "verifiedIdentity": "सत्यापित पहचान",
   "securityIdentityLinked": "सत्यापित पहचान जोड़ी गई",
+  "addPasskey": "पासकी जोड़ें",
+  "addPasskeyDescription": "इस खाते के लिए पासकी बनाने के लिए Android Credential Manager उपयोग करें।",
+  "passkeyPrfUnavailable": "क्रेडेंशियल प्रदाता ने वॉल्ट की सुरक्षा के लिए आवश्यक कुंजी सामग्री नहीं दी। पासवर्ड और रिकवरी पहुंच चालू रखें।",
+  "passkeyAdded": "पासकी जोड़ दी गई।",
+  "passkeyAddFailed": "पासकी नहीं जोड़ी जा सकी: {error}",
+  "@passkeyAddFailed": {"placeholders": {"error": {"type": "String"}}},
   "errorUnknown": "कार्रवाई पूरी नहीं हो सकी।"
 }

@@ -23,6 +23,11 @@
         <meta-data
             android:name="firebase_analytics_collection_enabled"
             android:value="false" />
+        <!-- Credential Manager uses this declaration with the hosted Digital
+             Asset Links file to verify Autharo's passkey relying party. -->
+        <meta-data
+            android:name="asset_statements"
+            android:resource="@string/asset_statements" />
         <activity
             android:name=".MainActivity"
             android:exported="true"

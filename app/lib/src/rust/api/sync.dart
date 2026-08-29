@@ -6,8 +6,8 @@
 import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `access_token`, `capability_token`, `check_scheme`, `clear_capabilities`, `clear_session`, `derive_stored_auth_key`, `elevate_with_auth`, `is_unauthorized`, `jitter`, `legacy_session`, `legacy_token`, `load_session`, `now_ms`, `record_clock_measurement`, `record_outcome`, `remove_legacy_session`, `rotate_migrated_session_if_needed`, `run_locked_cycle`, `run_locked_store`, `run_one_cycle`, `save_session`, `server_url`, `session_is_stored`, `store_session`, `sync_now_inner`, `text`, `tracing_http_warning`, `try_refresh`, `with_account`, `with_scope`
-// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `CachedCapability`
+// These functions are ignored because they are not marked as `pub`: `access_token`, `capability_token`, `check_scheme`, `clear_capabilities`, `clear_session`, `derive_stored_auth_key`, `elevate_with_auth`, `is_unauthorized`, `jitter`, `legacy_session`, `legacy_token`, `load_session`, `now_ms`, `record_clock_measurement`, `record_outcome`, `remove_legacy_session`, `rotate_migrated_session_if_needed`, `run_locked_cycle`, `run_locked_store`, `run_one_cycle`, `save_session`, `server_url`, `session_is_stored`, `store_session`, `sync_now_inner`, `text`, `tracing_http_warning`, `try_refresh_inner`, `try_refresh`, `with_account`, `with_scope`, `with_session_refresh_lock`
+// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `CachedCapability`, `PendingSignIn`
 
 /// Reads the sync status without touching the network.
 SyncStatusView syncStatus() => RustLib.instance.api.crateApiSyncSyncStatus();
@@ -49,19 +49,33 @@ Future<void> registerAccount({
 /// for a known one, so nothing here may treat a successful response as evidence
 /// the account exists. It does not — it derives a key and tries to sign in, and
 /// a wrong address and a wrong password fail identically.
-Future<void> signIn({
+Future<Uint8List> beginSignIn({
   required String email,
   required String password,
   String? deviceName,
   String? deviceApprovalToken,
   String? recoveryPhrase,
-}) => RustLib.instance.api.crateApiSyncSignIn(
+}) => RustLib.instance.api.crateApiSyncBeginSignIn(
   email: email,
   password: password,
   deviceName: deviceName,
   deviceApprovalToken: deviceApprovalToken,
   recoveryPhrase: recoveryPhrase,
 );
+
+/// Commits the Android Keystore slot, local account slots, and token pair.
+Future<void> finishSignIn({
+  required String vaultPath,
+  required List<int> wrapped,
+  required List<int> nonce,
+}) => RustLib.instance.api.crateApiSyncFinishSignIn(
+  vaultPath: vaultPath,
+  wrapped: wrapped,
+  nonce: nonce,
+);
+
+/// Drops a new-device sign-in that did not complete its Keystore operation.
+Future<void> cancelSignIn() => RustLib.instance.api.crateApiSyncCancelSignIn();
 
 /// Resets a forgotten password by proving possession of the recovery phrase.
 ///
@@ -98,6 +112,29 @@ Future<void> setPushToken({required String token}) =>
 /// Removes this device's push route while the base session is still valid.
 Future<void> clearPushToken() =>
     RustLib.instance.api.crateApiSyncClearPushToken();
+
+/// Starts an Android passkey registration after password authorization.
+Future<PasskeyRegistrationStartView> startPasskeyRegistration({
+  required String password,
+}) => RustLib.instance.api.crateApiSyncStartPasskeyRegistration(
+  password: password,
+);
+
+/// Sends a passkey public credential and an encrypted vault-key slot.
+/// The PRF secret and raw vault key never enter this request.
+Future<String> finishPasskeyRegistration({
+  required String ceremonyId,
+  required String credentialJson,
+  required bool prfSupported,
+  Uint8List? wrappedKey,
+  Uint8List? wrapNonce,
+}) => RustLib.instance.api.crateApiSyncFinishPasskeyRegistration(
+  ceremonyId: ceremonyId,
+  credentialJson: credentialJson,
+  prfSupported: prfSupported,
+  wrappedKey: wrappedKey,
+  wrapNonce: wrapNonce,
+);
 
 Future<IdentityStatusView> identityStatus() =>
     RustLib.instance.api.crateApiSyncIdentityStatus();
@@ -324,6 +361,31 @@ class IdentityStatusView {
           linked == other.linked &&
           provider == other.provider &&
           verifiedEmail == other.verifiedEmail;
+}
+
+class PasskeyRegistrationStartView {
+  final String ceremonyId;
+  final String requestJson;
+  final String expiresAt;
+
+  const PasskeyRegistrationStartView({
+    required this.ceremonyId,
+    required this.requestJson,
+    required this.expiresAt,
+  });
+
+  @override
+  int get hashCode =>
+      ceremonyId.hashCode ^ requestJson.hashCode ^ expiresAt.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is PasskeyRegistrationStartView &&
+          runtimeType == other.runtimeType &&
+          ceremonyId == other.ceremonyId &&
+          requestJson == other.requestJson &&
+          expiresAt == other.expiresAt;
 }
 
 class SecurityEventView {

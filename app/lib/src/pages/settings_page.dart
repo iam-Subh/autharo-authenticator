@@ -1,10 +1,13 @@
 import 'package:flutter/material.dart';
 
 import '../../l10n/generated/app_localizations.dart';
+import '../config/deployment.dart';
 import '../rust/api/vault.dart' as rust;
+import '../rust/api/sync.dart' as sync_rust;
 import '../services/appearance_preference.dart';
 import '../services/lock_controller.dart';
 import '../services/localized_error.dart';
+import '../services/passkey_service.dart';
 import '../services/brand_icon_preference.dart';
 import '../services/code_visibility_preference.dart';
 import '../services/device_integrity_service.dart';
@@ -184,6 +187,83 @@ class _SettingsPageState extends State<SettingsPage> {
       );
     } finally {
       if (mounted) setState(() => _displayPreferenceBusy = false);
+    }
+  }
+
+  Future<String?> _requestPasskeyPassword() async {
+    final controller = TextEditingController();
+    try {
+      return await showDialog<String>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          title: Text(AppLocalizations.of(context).addPasskey),
+          content: TextField(
+            controller: controller,
+            autofocus: true,
+            obscureText: true,
+            decoration: InputDecoration(
+              labelText: AppLocalizations.of(context).accountPassword,
+            ),
+            onSubmitted: (value) {
+              if (value.isNotEmpty) Navigator.pop(dialogContext, value);
+            },
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: Text(AppLocalizations.of(context).cancel),
+            ),
+            FilledButton(
+              onPressed: () {
+                if (controller.text.isNotEmpty) {
+                  Navigator.pop(dialogContext, controller.text);
+                }
+              },
+              child: Text(AppLocalizations.of(context).continueLabel),
+            ),
+          ],
+        ),
+      );
+    } finally {
+      controller.dispose();
+    }
+  }
+
+  Future<void> _addPasskey() async {
+    final password = await _requestPasskeyPassword();
+    if (password == null || password.isEmpty || !mounted) return;
+    final l10n = AppLocalizations.of(context);
+    setState(() => _busy = true);
+    try {
+      final start = await sync_rust.startPasskeyRegistration(
+        password: password,
+      );
+      final credential = await PasskeyService().create(start.requestJson);
+      final prfResult = credential.prfResult;
+      if (!credential.prfSupported || prfResult == null) {
+        throw StateError(l10n.passkeyPrfUnavailable);
+      }
+      final slot = await rust.createPasskeyWrappedKey(prfResult: prfResult);
+      await sync_rust.finishPasskeyRegistration(
+        ceremonyId: start.ceremonyId,
+        credentialJson: credential.credentialJson,
+        prfSupported: true,
+        wrappedKey: slot.wrappedKey,
+        wrapNonce: slot.nonce,
+      );
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(l10n.passkeyAdded)));
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(l10n.passkeyAddFailed(localizedError(l10n, error))),
+        ),
+      );
+    } finally {
+      if (mounted) setState(() => _busy = false);
     }
   }
 
@@ -536,6 +616,13 @@ class _SettingsPageState extends State<SettingsPage> {
                       ),
                     ),
             ),
+            if (autharoPasskeysEnabled)
+              ListTile(
+                leading: const Icon(Icons.key_outlined),
+                title: Text(l10n.addPasskey),
+                subtitle: Text(l10n.addPasskeyDescription),
+                onTap: _busy ? null : _addPasskey,
+              ),
             ValueListenableBuilder<bool>(
               valueListenable: RecoveryStatusPreference.confirmed,
               builder: (context, confirmed, _) => ListTile(
@@ -601,7 +688,10 @@ class _SettingsPageState extends State<SettingsPage> {
                 : () async {
                     await Navigator.of(context).push(
                       MaterialPageRoute<void>(
-                        builder: (_) => SyncPage(controller: _sync),
+                        builder: (_) => SyncPage(
+                          controller: _sync,
+                          session: widget.session,
+                        ),
                       ),
                     );
                     if (mounted) setState(() {});

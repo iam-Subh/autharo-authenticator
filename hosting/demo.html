@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="Add a test account to Autharo Authenticator and verify its one-time codes.">
+    <meta name="theme-color" content="#0f1117">
+    <meta property="og:title" content="Authenticator test | Autharo Authenticator">
+    <meta property="og:description" content="Scan one test account and use it whenever you test Autharo Authenticator.">
+    <meta property="og:type" content="website">
+    <meta property="og:url" content="https://autharo-auth-prod.web.app/demo">
+    <title>Authenticator test | Autharo Authenticator</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="/styles.css">
+    <script src="/demo.js" defer></script>
+  </head>
+  <body>
+    <header class="site-header">
+      <a class="brand" href="/"><span class="brand-mark" aria-hidden="true">A</span>Autharo Authenticator</a>
+      <nav aria-label="Main navigation">
+        <a href="/demo" aria-current="page">Test codes</a>
+        <a href="/privacy">Privacy</a>
+        <a href="/terms">Terms</a>
+        <a href="/support">Support</a>
+      </nav>
+    </header>
+    <main class="demo-page">
+      <section class="demo-intro">
+        <p class="eyebrow">Authenticator test</p>
+        <h1>Add once. Test at any time.</h1>
+        <p class="lead">Scan this test account with Autharo. Keep the account in the app. You can return to this page and verify a code at any time.</p>
+      </section>
+
+      <div class="demo-layout">
+        <section class="demo-panel" aria-labelledby="add-test-account">
+          <div class="step-label">Step 1</div>
+          <h2 id="add-test-account">Add the test account</h2>
+          <div class="qr-frame">
+            <img src="/autharo-demo-qr.svg" width="320" height="320" alt="QR code for the Autharo Demo test account">
+          </div>
+          <dl class="account-details">
+            <div><dt>Service</dt><dd>Autharo Demo</dd></div>
+            <div><dt>Account</dt><dd>demo@autharo.app</dd></div>
+            <div><dt>Type</dt><dd>6 digits, every 30 seconds</dd></div>
+          </dl>
+          <details>
+            <summary>Cannot scan the QR code?</summary>
+            <p>Enter this setup key in Autharo:</p>
+            <div class="setup-key-row">
+              <code id="setup-key">JBSW Y3DP EHPK 3PXP GEZD GNBV GY3T QOJQ</code>
+              <button class="small-button" id="copy-key" type="button">Copy</button>
+            </div>
+          </details>
+        </section>
+
+        <section class="demo-panel" aria-labelledby="verify-test-code">
+          <div class="step-label">Step 2</div>
+          <h2 id="verify-test-code">Verify a code</h2>
+          <p>Open the <strong>Autharo Demo</strong> entry in Autharo. Enter its current code below.</p>
+          <form id="verify-form" novalidate>
+            <label for="otp-code">Six-digit code</label>
+            <input id="otp-code" name="otp-code" type="text" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" placeholder="000000" aria-describedby="code-help verification-result">
+            <p class="field-help" id="code-help">The page accepts the current code and the adjacent 30-second code.</p>
+            <button class="button button-primary verify-button" type="submit">Verify code</button>
+          </form>
+          <div class="verification-result" id="verification-result" role="status" aria-live="polite"></div>
+          <div class="period-status" aria-label="Current code period">
+            <div class="period-status-row"><span>Next code period</span><strong id="seconds-left">-- seconds</strong></div>
+            <progress id="period-progress" max="30" value="0">0 of 30 seconds</progress>
+          </div>
+          <aside class="demo-warning">
+            <strong>Test account only.</strong>
+            <span>This setup key is public. Do not use it to protect a real account.</span>
+          </aside>
+        </section>
+      </div>
+    </main>
+    <footer class="site-footer">
+      <p>© 2026 Autharo.</p>
+      <p>The verifier runs only in your browser.</p>
+    </footer>
+  </body>
+</html>

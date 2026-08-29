@@ -15,6 +15,14 @@ services:
         generateValue: true
       - key: FIREBASE_AUTH_PROJECT_ID
         value: autharo-auth-prod
+      - key: WEBAUTHN_RP_ID
+        value: autharo-auth-prod.web.app
+      - key: WEBAUTHN_RP_ORIGIN
+        value: https://autharo-auth-prod.web.app
+      - key: WEBAUTHN_RP_NAME
+        value: Autharo Authenticator
+      - key: WEBAUTHN_ANDROID_ORIGINS
+        value: android:apk-key-hash:cLWpxJnUHnzH5oiVwvyeZGudE1s9Cx4jHIHPdX8vSUg
       - key: DATABASE_MAX_CONNECTIONS
         value: "5"
       - key: RUST_LOG

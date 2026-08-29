@@ -1,0 +1,15 @@
+[
+  {
+    "relation": [
+      "delegate_permission/common.handle_all_urls",
+      "delegate_permission/common.get_login_creds"
+    ],
+    "target": {
+      "namespace": "android_app",
+      "package_name": "app.autharo.authenticator",
+      "sha256_cert_fingerprints": [
+        "70:B5:A9:C4:99:D4:1E:7C:C7:E6:88:95:C2:FC:9E:64:6B:9D:13:5B:3D:0B:1E:23:1C:81:CF:75:7F:2F:49:48"
+      ]
+    }
+  }
+]

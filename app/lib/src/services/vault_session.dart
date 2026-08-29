@@ -5,6 +5,7 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:path_provider/path_provider.dart';
 
 import '../rust/api/vault.dart' as rust;
+import '../rust/api/sync.dart' as sync_rust;
 import 'appearance_preference.dart';
 import 'automatic_backup_service.dart';
 import 'brand_icon_preference.dart';
@@ -170,6 +171,26 @@ class VaultSession implements LockTarget, LockPolicyStore {
   /// Opens the local vault through its 24-word recovery slot.
   Future<void> unlockWithRecoveryPhrase(String phrase) =>
       rust.unlockWithRecovery(vaultPath: _requirePath(), phrase: phrase);
+
+  /// Commits a new-device synchronization sign-in through Android Keystore.
+  /// Dart carries a random JNI handle. It does not carry the vault key.
+  Future<void> finishSyncSignIn(Uint8List handle) async {
+    try {
+      final wrapped = await _keystore.wrapHandle(
+        handle,
+        requireUserAuthentication: false,
+      );
+      await sync_rust.finishSignIn(
+        vaultPath: _requirePath(),
+        wrapped: wrapped.ciphertext,
+        nonce: wrapped.nonce,
+      );
+      await _retireObsoleteKeystoreKeys();
+    } catch (_) {
+      await sync_rust.cancelSignIn();
+      rethrow;
+    }
+  }
 
   Future<void> _wrapHandleAndFinish(Uint8List handle, bool requireAuth) async {
     final wrapped = await _keystore.wrapHandle(

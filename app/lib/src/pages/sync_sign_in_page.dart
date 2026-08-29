@@ -1,11 +1,13 @@
 import 'package:flutter/material.dart';
 
 import '../../l10n/generated/app_localizations.dart';
+import '../config/deployment.dart';
 import '../rust/api/sync.dart' as rust;
 import '../services/device_identity_service.dart';
 import '../services/identity_auth_service.dart';
 import '../services/localized_error.dart';
 import '../services/sync_controller.dart';
+import '../services/vault_session.dart';
 import '../ui/form_page.dart';
 import 'recover_password_page.dart';
 
@@ -29,10 +31,12 @@ class SyncSignInPage extends StatefulWidget {
   const SyncSignInPage({
     super.key,
     required this.controller,
+    required this.session,
     required this.mode,
   });
 
   final SyncController controller;
+  final VaultSession session;
   final SignInMode mode;
 
   @override
@@ -40,7 +44,6 @@ class SyncSignInPage extends StatefulWidget {
 }
 
 class _SyncSignInPageState extends State<SyncSignInPage> {
-  final _server = TextEditingController();
   final _email = TextEditingController();
   final _password = TextEditingController();
   final _approval = TextEditingController();
@@ -57,7 +60,6 @@ class _SyncSignInPageState extends State<SyncSignInPage> {
   @override
   void initState() {
     super.initState();
-    _server.text = widget.controller.status.serverUrl ?? '';
     if (_isRegister) {
       _email.text = widget.controller.status.email ?? '';
     }
@@ -65,7 +67,6 @@ class _SyncSignInPageState extends State<SyncSignInPage> {
 
   @override
   void dispose() {
-    _server.dispose();
     _email.dispose();
     _password.dispose();
     _approval.dispose();
@@ -79,13 +80,6 @@ class _SyncSignInPageState extends State<SyncSignInPage> {
   /// Returns the first problem, so the message names one thing to fix rather
   /// than listing everything at once.
   String? _firstProblem() {
-    final server = _server.text.trim();
-    if (server.isEmpty) {
-      return AppLocalizations.of(context).enterSyncServer;
-    }
-    if (!server.startsWith('http://') && !server.startsWith('https://')) {
-      return AppLocalizations.of(context).syncServerRequiresHttps;
-    }
     if (!_isRegister && !_email.text.contains('@')) {
       return AppLocalizations.of(context).enterAccountEmail;
     }
@@ -117,7 +111,7 @@ class _SyncSignInPageState extends State<SyncSignInPage> {
     });
 
     try {
-      await rust.setServerUrl(url: _server.text.trim());
+      await rust.setServerUrl(url: autharoSyncServerUrl);
       final device = await DeviceIdentityService.current();
       if (_isRegister) {
         final proof = await IdentityAuthService.instance.freshProof();
@@ -133,7 +127,7 @@ class _SyncSignInPageState extends State<SyncSignInPage> {
         );
         await IdentityAuthService.instance.clear();
       } else {
-        await rust.signIn(
+        final handle = await rust.beginSignIn(
           email: _email.text.trim(),
           password: _password.text,
           deviceName: device.name,
@@ -144,6 +138,7 @@ class _SyncSignInPageState extends State<SyncSignInPage> {
               ? null
               : _recovery.text.trim(),
         );
+        await widget.session.finishSyncSignIn(handle);
       }
 
       // Straight into a first cycle. Turning sync on and seeing nothing happen
@@ -253,15 +248,12 @@ class _SyncSignInPageState extends State<SyncSignInPage> {
   }
 
   Future<void> _recoverPassword() async {
-    final server = _server.text.trim();
-    if (server.isEmpty) {
-      setState(() => _problem = AppLocalizations.of(context).enterSyncServer);
-      return;
-    }
+    await rust.setServerUrl(url: autharoSyncServerUrl);
+    if (!mounted) return;
     final recovered = await Navigator.of(context).push<bool>(
       MaterialPageRoute(
         builder: (_) => RecoverPasswordPage(
-          serverUrl: server,
+          serverUrl: autharoSyncServerUrl,
           initialEmail: _email.text.trim(),
         ),
       ),
@@ -289,17 +281,6 @@ class _SyncSignInPageState extends State<SyncSignInPage> {
                 : l10n.signInDownloadDescription,
           ),
         ),
-        TextField(
-          controller: _server,
-          decoration: InputDecoration(
-            labelText: l10n.syncServer,
-            hintText: AppLocalizations.of(context).syncServerExample,
-          ),
-          keyboardType: TextInputType.url,
-          autocorrect: false,
-          enabled: !_busy,
-        ),
-        const SizedBox(height: 12),
         TextField(
           controller: _email,
           decoration: InputDecoration(

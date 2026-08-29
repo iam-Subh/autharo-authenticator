@@ -2138,5 +2138,24 @@ class AppLocalizationsHi extends AppLocalizations {
   String get securityIdentityLinked => 'सत्यापित पहचान जोड़ी गई';
 
   @override
+  String get addPasskey => 'पासकी जोड़ें';
+
+  @override
+  String get addPasskeyDescription =>
+      'इस खाते के लिए पासकी बनाने के लिए Android Credential Manager उपयोग करें।';
+
+  @override
+  String get passkeyPrfUnavailable =>
+      'क्रेडेंशियल प्रदाता ने वॉल्ट की सुरक्षा के लिए आवश्यक कुंजी सामग्री नहीं दी। पासवर्ड और रिकवरी पहुंच चालू रखें।';
+
+  @override
+  String get passkeyAdded => 'पासकी जोड़ दी गई।';
+
+  @override
+  String passkeyAddFailed(String error) {
+    return 'पासकी नहीं जोड़ी जा सकी: $error';
+  }
+
+  @override
   String get errorUnknown => 'कार्रवाई पूरी नहीं हो सकी।';
 }

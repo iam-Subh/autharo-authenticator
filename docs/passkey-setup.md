@@ -1,7 +1,9 @@
 # Passkey deployment requirements
 
-The passkey infrastructure is implemented. Production activation is blocked
-until the final Android and web identities exist.
+The passkey infrastructure is implemented. The Android package, release
+certificate, and web relying-party identity now exist. The Digital Asset
+Links file is live. Render must allow the Android application origin before
+the client interface is enabled.
 
 The server provides these endpoints:
 
@@ -22,5 +24,19 @@ enter Dart. The Android service extracts the PRF result and removes it from the
 credential JSON before the application sends the assertion to the server. The
 server rejects an assertion that still contains a PRF result.
 
+The Settings interface contains the passkey registration flow. The deployment
+flag keeps this interface hidden until Render allows the release-signed
+Android origin. Passkey authentication on a new device is not yet exposed by
+the Flutter interface.
+
 See [Production security configuration](production-security.md) for the
 server variables, Digital Asset Links steps, and fallback requirements.
+
+The Android manifest includes the production Firebase Hosting association:
+
+```text
+https://autharo-auth-prod.web.app/.well-known/assetlinks.json
+```
+
+Firebase Hosting returns this file with HTTP status 200 and the
+`application/json` content type.

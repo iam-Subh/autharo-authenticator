@@ -3848,6 +3848,36 @@ abstract class AppLocalizations {
   /// **'Verified identity linked'**
   String get securityIdentityLinked;
 
+  /// No description provided for @addPasskey.
+  ///
+  /// In en, this message translates to:
+  /// **'Add passkey'**
+  String get addPasskey;
+
+  /// No description provided for @addPasskeyDescription.
+  ///
+  /// In en, this message translates to:
+  /// **'Use Android Credential Manager to create a passkey for this account.'**
+  String get addPasskeyDescription;
+
+  /// No description provided for @passkeyPrfUnavailable.
+  ///
+  /// In en, this message translates to:
+  /// **'This credential provider did not return the key material required to protect the vault. Keep password and recovery access enabled.'**
+  String get passkeyPrfUnavailable;
+
+  /// No description provided for @passkeyAdded.
+  ///
+  /// In en, this message translates to:
+  /// **'The passkey was added.'**
+  String get passkeyAdded;
+
+  /// No description provided for @passkeyAddFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'The passkey could not be added: {error}'**
+  String passkeyAddFailed(String error);
+
   /// No description provided for @errorUnknown.
   ///
   /// In en, this message translates to:

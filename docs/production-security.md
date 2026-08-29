@@ -56,6 +56,16 @@ Set all server values together:
 WEBAUTHN_RP_ID=auth.example.com
 WEBAUTHN_RP_ORIGIN=https://auth.example.com
 WEBAUTHN_RP_NAME=AuthCore
+WEBAUTHN_ANDROID_ORIGINS=android:apk-key-hash:BASE64URL_RELEASE_SHA256
+```
+
+The current Autharo Firebase Hosting identity uses:
+
+```text
+WEBAUTHN_RP_ID=autharo-auth-prod.web.app
+WEBAUTHN_RP_ORIGIN=https://autharo-auth-prod.web.app
+WEBAUTHN_RP_NAME=Autharo Authenticator
+WEBAUTHN_ANDROID_ORIGINS=android:apk-key-hash:cLWpxJnUHnzH5oiVwvyeZGudE1s9Cx4jHIHPdX8vSUg
 ```
 
 The server refuses a partial configuration. The origin must use HTTPS.
@@ -65,13 +75,18 @@ Complete these deployment steps before you enable the passkey UI:
 1. Select the final Android package ID.
 2. Create the final release signing key.
 3. Get the SHA-256 fingerprint of the release signing certificate.
-4. Replace all placeholders in `deploy/assetlinks.json.example`.
+4. Confirm that `deploy/assetlinks.json.example` contains the certificate
+   fingerprint used to sign the installed application. Add the Google Play
+   app-signing fingerprint before a Play release.
 5. Publish the result at
    `https://AUTH_DOMAIN/.well-known/assetlinks.json`.
 6. Return HTTP status 200 without a redirect.
 7. Return the `application/json` content type.
 8. Add the matching Android `asset_statements` resource.
-9. Set the three WebAuthn server values.
+9. Set the four WebAuthn server values. The Android origin is the unpadded
+   base64url form of the release certificate SHA-256 fingerprint, prefixed
+   with `android:apk-key-hash:`. Add the Google Play signing origin as a
+   comma-separated second value before a Play release.
 10. Test registration, authentication, PRF output, password fallback, and
     recovery fallback on a release-signed physical device.
 

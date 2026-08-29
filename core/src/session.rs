@@ -195,6 +195,19 @@ pub struct Capability {
     pub expires_at: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PasskeyCeremony {
+    pub id: String,
+    pub request_json: String,
+    pub expires_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PasskeyRegistration {
+    pub credential_id: String,
+    pub prf_supported: bool,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct SecurityEventSummary {
     pub id: i64,
@@ -650,6 +663,54 @@ impl<C: HttpClient> SessionClient<C> {
         })
     }
 
+    pub fn start_passkey_registration(
+        &self,
+        access_token: &SecretString,
+    ) -> Result<PasskeyCeremony> {
+        let value = self.read(self.send_auth(
+            Method::Post,
+            "/v1/passkeys/register/start",
+            access_token,
+            None,
+        )?)?;
+        passkey_ceremony(&value)
+    }
+
+    pub fn finish_passkey_registration(
+        &self,
+        access_token: &SecretString,
+        ceremony_id: &str,
+        credential_json: &str,
+        prf_supported: bool,
+        wrapped_key: Option<&[u8]>,
+        wrap_nonce: Option<&[u8]>,
+    ) -> Result<PasskeyRegistration> {
+        let credential =
+            serde_json::from_str::<serde_json::Value>(credential_json).map_err(malformed)?;
+        let body = serde_json::json!({
+            "ceremony_id": ceremony_id,
+            "credential": credential,
+            "prf_supported": prf_supported,
+            "wrapped_key": wrapped_key.map(b64_encode),
+            "wrap_nonce": wrap_nonce.map(b64_encode),
+        });
+        let value = self.read(self.send_auth(
+            Method::Post,
+            "/v1/passkeys/register/finish",
+            access_token,
+            Some(body),
+        )?)?;
+        Ok(PasskeyRegistration {
+            credential_id: required_text(&value, "credential_id", "credential identifier")?,
+            prf_supported: value
+                .get("prf_supported")
+                .and_then(serde_json::Value::as_bool)
+                .ok_or_else(|| SessionError::Malformed {
+                    detail: "the passkey PRF status is missing".to_string(),
+                })?,
+        })
+    }
+
     pub fn create_device_approval(
         &self,
         access_token: &SecretString,
@@ -889,6 +950,29 @@ impl<C: HttpClient> SessionClient<C> {
             detail: format!("the server returned status {status}"),
         }
     }
+}
+
+fn passkey_ceremony(value: &serde_json::Value) -> Result<PasskeyCeremony> {
+    let request = value
+        .get("public_key")
+        .ok_or_else(|| SessionError::Malformed {
+            detail: "the passkey request is missing".to_string(),
+        })?;
+    Ok(PasskeyCeremony {
+        id: required_text(value, "ceremony_id", "passkey request identifier")?,
+        request_json: serde_json::to_string(request).map_err(malformed)?,
+        expires_at: required_text(value, "expires_at", "passkey request expiry")?,
+    })
+}
+
+fn required_text(value: &serde_json::Value, key: &str, description: &str) -> Result<String> {
+    value
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| SessionError::Malformed {
+            detail: format!("the {description} is missing"),
+        })
 }
 
 fn params_json(params: KdfParams) -> serde_json::Value {
@@ -1224,6 +1308,57 @@ mod tests {
         let session = SessionClient::new(&client, "https://example.invalid");
         let error = session.refresh(&SecretString::new("spent")).unwrap_err();
         assert!(matches!(error, SessionError::InvalidCredentials));
+    }
+
+    #[test]
+    fn passkey_registration_uses_the_capability_token() {
+        let client = FakeClient::answering(
+            200,
+            r#"{"ceremony_id":"request-1","public_key":{"challenge":"abc"},"expires_at":"2026-08-29T12:00:00Z"}"#,
+        );
+        let session = SessionClient::new(&client, "https://example.invalid");
+
+        let ceremony = session
+            .start_passkey_registration(&SecretString::new("capability"))
+            .unwrap();
+
+        assert_eq!(ceremony.id, "request-1");
+        assert_eq!(ceremony.request_json, r#"{"challenge":"abc"}"#);
+        let seen = client.seen.borrow();
+        let request = seen.last().unwrap();
+        assert_eq!(
+            request.url,
+            "https://example.invalid/v1/passkeys/register/start"
+        );
+        assert_eq!(request.bearer.as_deref(), Some("capability"));
+    }
+
+    #[test]
+    fn passkey_registration_sends_only_the_encrypted_slot() {
+        let client = FakeClient::answering(
+            200,
+            r#"{"credential_id":"credential-1","prf_supported":true}"#,
+        );
+        let session = SessionClient::new(&client, "https://example.invalid");
+        let credential = r#"{"id":"credential-1","response":{"clientDataJSON":"abc"}}"#;
+
+        let result = session
+            .finish_passkey_registration(
+                &SecretString::new("capability"),
+                "request-1",
+                credential,
+                true,
+                Some(&[7; 48]),
+                Some(&[8; 24]),
+            )
+            .unwrap();
+
+        assert_eq!(result.credential_id, "credential-1");
+        let body = client.last();
+        assert_eq!(body["wrapped_key"], b64_encode(&[7; 48]));
+        assert_eq!(body["wrap_nonce"], b64_encode(&[8; 24]));
+        assert!(body.get("prf_result").is_none());
+        assert!(body.get("vault_key").is_none());
     }
 
     #[test]
