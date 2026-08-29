@@ -681,5 +681,7 @@
   "passkeyAdded": "The passkey was added.",
   "passkeyAddFailed": "The passkey could not be added: {error}",
   "@passkeyAddFailed": {"placeholders": {"error": {"type": "String"}}},
+  "signInWithPasskey": "Sign in with passkey",
+  "orUseAccountPassword": "or use your account password",
   "errorUnknown": "The operation could not be completed."
 }

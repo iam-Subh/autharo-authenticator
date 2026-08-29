@@ -457,6 +457,12 @@ pub struct PasskeyRegistrationStartView {
     pub expires_at: String,
 }
 
+pub struct PasskeyAuthenticationStartView {
+    pub ceremony_id: String,
+    pub request_json: String,
+    pub expires_at: String,
+}
+
 /// Starts an Android passkey registration after password authorization.
 pub fn start_passkey_registration(password: String) -> Result<PasskeyRegistrationStartView> {
     let auth_key = derive_stored_auth_key(&password)?;
@@ -492,6 +498,99 @@ pub fn finish_passkey_registration(
     })?;
     clear_capabilities();
     Ok(registered.credential_id)
+}
+
+/// Starts a passkey sign-in without creating or exposing a local session.
+pub fn start_passkey_authentication(email: String) -> Result<PasskeyAuthenticationStartView> {
+    let base = crate::api::vault::with_meta_pub(|meta| {
+        text(meta, META_SERVER_URL)?.ok_or_else(|| anyhow!("Choose a sync server first."))
+    })?;
+    let client = SessionClient::new(ReqwestClient::new(), &base);
+    let ceremony = client
+        .start_passkey_authentication(email.trim())
+        .map_err(|error| anyhow!("{error}"))?;
+    Ok(PasskeyAuthenticationStartView {
+        ceremony_id: ceremony.id,
+        request_json: ceremony.request_json,
+        expires_at: ceremony.expires_at,
+    })
+}
+
+/// Verifies a passkey assertion and prepares Android Keystore adoption.
+///
+/// Dart can carry the Credential Manager PRF result because Android returns it
+/// there. The raw vault key remains in Rust and crosses JNI only as a random
+/// one-time handle.
+pub fn begin_passkey_sign_in(
+    ceremony_id: String,
+    credential_json: String,
+    prf_result: Option<Vec<u8>>,
+    device_name: Option<String>,
+    device_approval_token: Option<String>,
+    recovery_phrase: Option<String>,
+) -> Result<Vec<u8>> {
+    if let Some(result) = prf_result.as_deref() {
+        if result.len() != 32 {
+            anyhow::bail!("The passkey PRF result must contain 32 bytes.");
+        }
+    }
+    let base = crate::api::vault::with_meta_pub(|meta| {
+        text(meta, META_SERVER_URL)?.ok_or_else(|| anyhow!("Choose a sync server first."))
+    })?;
+    let recovery_phrase = recovery_phrase
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let recovery_auth_key = recovery_phrase
+        .map(account::derive_recovery_auth_key)
+        .transpose()
+        .map_err(|error| anyhow!("{error}"))?;
+    let client = SessionClient::new(ReqwestClient::new(), &base);
+    let authenticated = client
+        .finish_passkey_authentication(
+            ceremony_id.trim(),
+            &credential_json,
+            prf_result.is_some(),
+            device_name.as_deref(),
+            device_approval_token
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty()),
+            recovery_auth_key.as_ref(),
+        )
+        .map_err(|error| anyhow!("{error}"))?;
+
+    let key = match authenticated.slot_kind.as_str() {
+        "passkey" => {
+            let prf_result = prf_result.as_deref().ok_or_else(|| {
+                anyhow!("The credential provider returned no passkey PRF result.")
+            })?;
+            let slot = account::PasskeySlot {
+                wrapped_key: authenticated.wrapped_key.clone(),
+                nonce: authenticated.nonce.clone(),
+            };
+            account::unlock_with_passkey_prf(&slot, prf_result)
+                .map_err(|error| anyhow!("{error}"))?
+        }
+        "recovery" => {
+            let phrase = recovery_phrase.ok_or_else(|| {
+                anyhow!(
+                    "Enter the recovery phrase because this passkey provider has no PRF support."
+                )
+            })?;
+            account::unlock_with_recovery_from_account(&authenticated.account, phrase)
+                .map_err(|error| anyhow!("{error}"))?
+        }
+        _ => anyhow::bail!("The sync server returned an unknown passkey slot type."),
+    };
+    let handle = crate::api::vault::begin_empty_vault_key_adoption(key)?;
+    *PENDING_SIGN_IN
+        .lock()
+        .map_err(|_| anyhow!("The pending sign-in lock is unavailable."))? = Some(PendingSignIn {
+        account: authenticated.account,
+        session: authenticated.session,
+    });
+    Ok(handle)
 }
 
 pub fn identity_status() -> Result<IdentityStatusView> {

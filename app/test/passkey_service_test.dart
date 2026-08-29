@@ -59,4 +59,30 @@ void main() {
       throwsA(isA<FormatException>()),
     );
   });
+
+  test('authentication keeps the PRF secret out of the server JSON', () async {
+    final secret = Uint8List.fromList(
+      List<int>.generate(32, (index) => 31 - index),
+    );
+    final encoded = base64Url.encode(secret).replaceAll('=', '');
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, (call) async {
+          expect(call.method, 'get');
+          expect(call.arguments, {'requestJson': '{"challenge":"abc"}'});
+          return jsonEncode({
+            'id': 'credential',
+            'clientExtensionResults': {
+              'prf': {
+                'results': {'first': encoded},
+              },
+            },
+          });
+        });
+
+    final response = await PasskeyService().get('{"challenge":"abc"}');
+
+    expect(response.prfResult, secret);
+    expect(response.credentialJson, isNot(contains('results')));
+    expect(response.credentialJson, isNot(contains(encoded)));
+  });
 }

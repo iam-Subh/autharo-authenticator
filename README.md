@@ -13,7 +13,7 @@ sequence in section 18: each stage is finished before the next starts.
 | S4 — Backend | API, PostgreSQL schema, key slots, quotas, enumeration resistance | **Done for the Android target.** Account, session, device approval, activity, capability, and destructive-operation APIs are implemented |
 | S5 — Sync | Sync engine, outbox, HLC, conflict resolution, prune watermark, FCM change signals | **Done in code for Android.** The Android Firebase file is configured. Live FCM delivery still needs server credentials on Render |
 | S6 — Other platforms | Remaining platforms, screen capture, tray and menu bar | **Excluded from the current Android security scope** |
-| S7 — Passkeys | Android Credential Manager bridge, WebAuthn verification, PRF slot, fallback | **Partial.** Hosting, Digital Asset Links, Android origin validation, and registration are active. The new-device passkey sign-in interface is not complete |
+| S7 — Passkeys | Android Credential Manager bridge, WebAuthn verification, PRF slot, fallback | **Done in code for Android.** Hosting, Digital Asset Links, Android origin validation, registration, new-device sign-in, device approval, and recovery fallback are connected. A release-signed physical-device test remains |
 
 ## Official synchronization service
 
@@ -782,12 +782,12 @@ generation and rotation steps.
   from its issuer. The user can enable bundled service symbols or set an emoji.
   The application performs no online icon lookup. See `EntryAvatar`.
 
-- **Passkey sign-in is not complete.** The server
+- **Passkey real-device validation remains.** The server
   verifies WebAuthn challenges, origin, relying-party ID, signatures,
   counters, expiry, and replay. The Rust client wraps the vault key with the
   PRF result. Password or recovery remains available when a provider omits the
-  PRF result. Passkey registration is enabled. The new-device passkey sign-in
-  UI is not yet connected to the authentication endpoints.
+  PRF result. Passkey registration and new-device sign-in are enabled in code.
+  Test both paths with a release-signed APK on a physical Android device.
 
 - **Windows, macOS, and Linux secure storage are outside this scope.** This
   work does not change their secret handling.

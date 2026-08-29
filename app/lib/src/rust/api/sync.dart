@@ -136,6 +136,32 @@ Future<String> finishPasskeyRegistration({
   wrapNonce: wrapNonce,
 );
 
+/// Starts a passkey sign-in without creating or exposing a local session.
+Future<PasskeyAuthenticationStartView> startPasskeyAuthentication({
+  required String email,
+}) => RustLib.instance.api.crateApiSyncStartPasskeyAuthentication(email: email);
+
+/// Verifies a passkey assertion and prepares Android Keystore adoption.
+///
+/// Dart can carry the Credential Manager PRF result because Android returns it
+/// there. The raw vault key remains in Rust and crosses JNI only as a random
+/// one-time handle.
+Future<Uint8List> beginPasskeySignIn({
+  required String ceremonyId,
+  required String credentialJson,
+  Uint8List? prfResult,
+  String? deviceName,
+  String? deviceApprovalToken,
+  String? recoveryPhrase,
+}) => RustLib.instance.api.crateApiSyncBeginPasskeySignIn(
+  ceremonyId: ceremonyId,
+  credentialJson: credentialJson,
+  prfResult: prfResult,
+  deviceName: deviceName,
+  deviceApprovalToken: deviceApprovalToken,
+  recoveryPhrase: recoveryPhrase,
+);
+
 Future<IdentityStatusView> identityStatus() =>
     RustLib.instance.api.crateApiSyncIdentityStatus();
 
@@ -361,6 +387,31 @@ class IdentityStatusView {
           linked == other.linked &&
           provider == other.provider &&
           verifiedEmail == other.verifiedEmail;
+}
+
+class PasskeyAuthenticationStartView {
+  final String ceremonyId;
+  final String requestJson;
+  final String expiresAt;
+
+  const PasskeyAuthenticationStartView({
+    required this.ceremonyId,
+    required this.requestJson,
+    required this.expiresAt,
+  });
+
+  @override
+  int get hashCode =>
+      ceremonyId.hashCode ^ requestJson.hashCode ^ expiresAt.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is PasskeyAuthenticationStartView &&
+          runtimeType == other.runtimeType &&
+          ceremonyId == other.ceremonyId &&
+          requestJson == other.requestJson &&
+          expiresAt == other.expiresAt;
 }
 
 class PasskeyRegistrationStartView {

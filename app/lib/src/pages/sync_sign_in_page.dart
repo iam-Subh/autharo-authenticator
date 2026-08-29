@@ -6,6 +6,7 @@ import '../rust/api/sync.dart' as rust;
 import '../services/device_identity_service.dart';
 import '../services/identity_auth_service.dart';
 import '../services/localized_error.dart';
+import '../services/passkey_service.dart';
 import '../services/sync_controller.dart';
 import '../services/vault_session.dart';
 import '../ui/form_page.dart';
@@ -155,6 +156,47 @@ class _SyncSignInPageState extends State<SyncSignInPage> {
         setState(
           () => _problem = localizedError(AppLocalizations.of(context), error),
         );
+      }
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _signInWithPasskey() async {
+    final l10n = AppLocalizations.of(context);
+    if (!_email.text.contains('@')) {
+      setState(() => _problem = l10n.enterAccountEmail);
+      return;
+    }
+    setState(() {
+      _busy = true;
+      _problem = null;
+    });
+    try {
+      await rust.setServerUrl(url: autharoSyncServerUrl);
+      final device = await DeviceIdentityService.current();
+      final start = await rust.startPasskeyAuthentication(
+        email: _email.text.trim(),
+      );
+      final credential = await PasskeyService().get(start.requestJson);
+      final handle = await rust.beginPasskeySignIn(
+        ceremonyId: start.ceremonyId,
+        credentialJson: credential.credentialJson,
+        prfResult: credential.prfResult,
+        deviceName: device.name,
+        deviceApprovalToken: _approval.text.trim().isEmpty
+            ? null
+            : _approval.text.trim(),
+        recoveryPhrase: _recovery.text.trim().isEmpty
+            ? null
+            : _recovery.text.trim(),
+      );
+      await widget.session.finishSyncSignIn(handle);
+      await widget.controller.syncNow();
+      if (mounted) Navigator.of(context).pop();
+    } catch (error) {
+      if (mounted) {
+        setState(() => _problem = localizedError(l10n, error));
       }
     } finally {
       if (mounted) setState(() => _busy = false);
@@ -336,6 +378,25 @@ class _SyncSignInPageState extends State<SyncSignInPage> {
               label: Text(l10n.continueWithGoogle),
             ),
           ],
+        ],
+        if (!_isRegister && autharoPasskeysEnabled) ...[
+          const SizedBox(height: 16),
+          FilledButton.tonalIcon(
+            onPressed: _busy ? null : _signInWithPasskey,
+            icon: const Icon(Icons.fingerprint),
+            label: Text(l10n.signInWithPasskey),
+          ),
+          const SizedBox(height: 12),
+          Row(
+            children: [
+              const Expanded(child: Divider()),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 12),
+                child: Text(l10n.orUseAccountPassword),
+              ),
+              const Expanded(child: Divider()),
+            ],
+          ),
         ],
         const SizedBox(height: 12),
         TextField(

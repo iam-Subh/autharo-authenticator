@@ -2157,5 +2157,11 @@ class AppLocalizationsHi extends AppLocalizations {
   }
 
   @override
+  String get signInWithPasskey => 'पासकी से साइन इन करें';
+
+  @override
+  String get orUseAccountPassword => 'या अपने अकाउंट पासवर्ड का उपयोग करें';
+
+  @override
   String get errorUnknown => 'कार्रवाई पूरी नहीं हो सकी।';
 }

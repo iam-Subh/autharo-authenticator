@@ -23,8 +23,15 @@ enter Dart. The Android service extracts the PRF result and removes it from the
 credential JSON before the application sends the assertion to the server. The
 server rejects an assertion that still contains a PRF result.
 
-The Settings interface exposes the passkey registration flow. Passkey
-authentication on a new device is not yet exposed by the Flutter interface.
+The Settings interface exposes passkey registration. The synchronization
+sign-in screen exposes passkey authentication. A successful assertion returns
+only encrypted account slots. Rust unwraps the selected slot and sends a
+one-time handle to Android Keystore. Dart does not receive the raw vault key.
+
+New-device approval remains active for passkey sign-in. If the credential
+provider omits the PRF result, use password sign-in or enter the recovery
+phrase. The recovery phrase does not leave the device. The client sends only
+its derived recovery authorization key.
 
 See [Production security configuration](production-security.md) for the
 server variables, Digital Asset Links steps, and fallback requirements.

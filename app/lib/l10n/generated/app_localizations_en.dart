@@ -2210,5 +2210,11 @@ class AppLocalizationsEn extends AppLocalizations {
   }
 
   @override
+  String get signInWithPasskey => 'Sign in with passkey';
+
+  @override
+  String get orUseAccountPassword => 'or use your account password';
+
+  @override
   String get errorUnknown => 'The operation could not be completed.';
 }

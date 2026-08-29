@@ -208,6 +208,18 @@ pub struct PasskeyRegistration {
     pub prf_supported: bool,
 }
 
+/// A verified passkey sign-in and the encrypted account material needed by a
+/// new device. The server never returns a plaintext vault key.
+#[derive(Debug)]
+pub struct PasskeyAuthenticationResult {
+    pub session: Session,
+    pub account: Account,
+    pub slot_kind: String,
+    pub wrapped_key: Vec<u8>,
+    pub nonce: Vec<u8>,
+    pub prf_salt: Option<Vec<u8>>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct SecurityEventSummary {
     pub id: i64,
@@ -708,6 +720,102 @@ impl<C: HttpClient> SessionClient<C> {
                 .ok_or_else(|| SessionError::Malformed {
                     detail: "the passkey PRF status is missing".to_string(),
                 })?,
+        })
+    }
+
+    /// Starts a discoverable passkey assertion for one account.
+    pub fn start_passkey_authentication(&self, email: &str) -> Result<PasskeyCeremony> {
+        let response = self.send(
+            Method::Post,
+            "/v1/passkeys/authenticate/start",
+            Some(serde_json::json!({ "email": email })),
+        )?;
+        if response.status == 401 {
+            return Err(SessionError::InvalidCredentials);
+        }
+        passkey_ceremony(&self.read(response)?)
+    }
+
+    /// Finishes a passkey assertion. The PRF result stays on the device. Only
+    /// its presence is disclosed so the server can select the encrypted slot.
+    pub fn finish_passkey_authentication(
+        &self,
+        ceremony_id: &str,
+        credential_json: &str,
+        prf_result_present: bool,
+        device_name: Option<&str>,
+        device_approval_token: Option<&str>,
+        recovery_auth_key: Option<&Zeroizing<[u8; 32]>>,
+    ) -> Result<PasskeyAuthenticationResult> {
+        let credential =
+            serde_json::from_str::<serde_json::Value>(credential_json).map_err(malformed)?;
+        let response = self.send(
+            Method::Post,
+            "/v1/passkeys/authenticate/finish",
+            Some(serde_json::json!({
+                "ceremony_id": ceremony_id,
+                "credential": credential,
+                "prf_result_present": prf_result_present,
+                "device_name": device_name,
+                "device_platform": std::env::consts::OS,
+                "device_approval_token": device_approval_token,
+                "recovery_auth_key": recovery_auth_key
+                    .map(|value| b64_encode(value.as_slice())),
+            })),
+        )?;
+        if response.status == 401 {
+            return Err(SessionError::InvalidCredentials);
+        }
+        let value = self.read(response)?;
+        let password = value
+            .get("password_slot")
+            .ok_or_else(|| SessionError::Malformed {
+                detail: "the password slot is missing".to_string(),
+            })?;
+        let salt: [u8; 16] =
+            decode(password, "client_salt")?
+                .try_into()
+                .map_err(|_| SessionError::Malformed {
+                    detail: "the client salt is the wrong length".to_string(),
+                })?;
+        let recovery = value
+            .get("recovery_slot")
+            .ok_or_else(|| SessionError::Malformed {
+                detail: "the recovery slot is missing".to_string(),
+            })?;
+        let account = Account {
+            email: required_text(&value, "email", "account email")?,
+            password_slot: Some(PasswordSlot {
+                salt,
+                params: params_from(&password["kdf_params"])?,
+                wrapped_key: decode(password, "wrapped_key")?,
+                nonce: decode(password, "nonce")?,
+            }),
+            recovery_slot: RecoverySlot {
+                wrapped_key: decode(recovery, "wrapped_key")?,
+                nonce: decode(recovery, "nonce")?,
+            },
+        };
+        Ok(PasskeyAuthenticationResult {
+            session: Session {
+                access_token: token(&value, "access_token")?,
+                refresh_token: token(&value, "refresh_token")?,
+                password_slot: slot_from(password)?,
+                recovery_slot: slot_from(recovery)?,
+            },
+            account,
+            slot_kind: required_text(&value, "slot_kind", "passkey slot type")?,
+            wrapped_key: decode(&value, "wrapped_key")?,
+            nonce: decode(&value, "nonce")?,
+            prf_salt: value
+                .get("prf_salt")
+                .and_then(serde_json::Value::as_str)
+                .map(|encoded| {
+                    b64_decode(encoded).map_err(|_| SessionError::Malformed {
+                        detail: "prf_salt is not valid base64url".to_string(),
+                    })
+                })
+                .transpose()?,
         })
     }
 
@@ -1359,6 +1467,77 @@ mod tests {
         assert_eq!(body["wrap_nonce"], b64_encode(&[8; 24]));
         assert!(body.get("prf_result").is_none());
         assert!(body.get("vault_key").is_none());
+    }
+
+    #[test]
+    fn passkey_authentication_starts_without_a_session_token() {
+        let client = FakeClient::answering(
+            200,
+            r#"{"ceremony_id":"request-2","public_key":{"challenge":"xyz"},"expires_at":"2026-08-29T12:00:00Z"}"#,
+        );
+        let session = SessionClient::new(&client, "https://example.invalid");
+
+        let ceremony = session
+            .start_passkey_authentication("rupsa@example.invalid")
+            .unwrap();
+
+        assert_eq!(ceremony.id, "request-2");
+        let seen = client.seen.borrow();
+        let request = seen.last().unwrap();
+        assert_eq!(
+            request.url,
+            "https://example.invalid/v1/passkeys/authenticate/start"
+        );
+        assert!(request.bearer.is_none());
+        drop(seen);
+        assert_eq!(client.last()["email"], "rupsa@example.invalid");
+    }
+
+    #[test]
+    fn passkey_authentication_keeps_the_prf_secret_local() {
+        let body = serde_json::json!({
+            "email": "rupsa@example.invalid",
+            "access_token": "access",
+            "refresh_token": "refresh",
+            "access_expires_at": "2026-08-29T12:00:00Z",
+            "password_slot": {
+                "client_salt": b64_encode(&[7; 16]),
+                "kdf_params": {"m": 65536, "t": 3, "p": 4},
+                "wrapped_key": b64_encode(&[1; 48]),
+                "nonce": b64_encode(&[2; 24])
+            },
+            "recovery_slot": {
+                "wrapped_key": b64_encode(&[3; 48]),
+                "nonce": b64_encode(&[4; 24])
+            },
+            "slot_kind": "passkey",
+            "wrapped_key": b64_encode(&[5; 48]),
+            "nonce": b64_encode(&[6; 24]),
+            "prf_salt": b64_encode(&[8; 32])
+        })
+        .to_string();
+        let client = FakeClient::answering(200, &body);
+        let session = SessionClient::new(&client, "https://example.invalid");
+
+        let result = session
+            .finish_passkey_authentication(
+                "request-2",
+                r#"{"id":"credential-1","response":{"clientDataJSON":"abc"}}"#,
+                true,
+                Some("phone"),
+                Some("approval"),
+                None,
+            )
+            .unwrap();
+
+        assert_eq!(result.account.email, "rupsa@example.invalid");
+        assert_eq!(result.slot_kind, "passkey");
+        assert_eq!(result.wrapped_key, vec![5; 48]);
+        assert_eq!(result.session.access_token.expose(), "access");
+        let sent = client.last();
+        assert_eq!(sent["prf_result_present"], true);
+        assert!(sent.get("prf_result").is_none());
+        assert!(sent.get("vault_key").is_none());
     }
 
     #[test]

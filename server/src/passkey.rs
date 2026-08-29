@@ -301,10 +301,21 @@ pub struct FinishAuthenticationRequest {
 }
 
 #[derive(Debug, Serialize)]
+pub struct PasswordSlotResponse {
+    pub client_salt: String,
+    pub kdf_params: Value,
+    pub wrapped_key: String,
+    pub nonce: String,
+}
+
+#[derive(Debug, Serialize)]
 pub struct FinishAuthenticationResponse {
+    pub email: String,
     pub access_token: String,
     pub refresh_token: String,
     pub access_expires_at: DateTime<Utc>,
+    pub password_slot: PasswordSlotResponse,
+    pub recovery_slot: auth::WrappedSlot,
     pub slot_kind: String,
     pub wrapped_key: String,
     pub nonce: String,
@@ -400,6 +411,22 @@ pub async fn finish_authentication(
         });
     };
 
+    let account_slots =
+        sqlx::query_as::<_, (String, Vec<u8>, Value, Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>)>(
+            "SELECT a.email,
+                password.client_salt, password.kdf_params,
+                password.wrapped_key, password.wrap_nonce,
+                recovery.wrapped_key, recovery.wrap_nonce
+           FROM account a
+           JOIN key_slot password
+             ON password.account_id = a.id AND password.type = 'password'
+           JOIN key_slot recovery
+             ON recovery.account_id = a.id AND recovery.type = 'recovery'
+          WHERE a.id = $1",
+        )
+        .bind(account_id)
+        .fetch_one(&state.db)
+        .await?;
     let login = auth::LoginRequest {
         email: String::new(),
         auth_key: String::new(),
@@ -412,9 +439,20 @@ pub async fn finish_authentication(
         auth::register_device_and_issue_session(&state, account_id, &login, recovery_approved)
             .await?;
     Ok(Json(FinishAuthenticationResponse {
+        email: account_slots.0,
         access_token: tokens.access,
         refresh_token: tokens.refresh,
         access_expires_at: tokens.access_expires_at,
+        password_slot: PasswordSlotResponse {
+            client_salt: B64.encode(account_slots.1),
+            kdf_params: account_slots.2,
+            wrapped_key: B64.encode(account_slots.3),
+            nonce: B64.encode(account_slots.4),
+        },
+        recovery_slot: auth::WrappedSlot {
+            wrapped_key: B64.encode(account_slots.5),
+            nonce: B64.encode(account_slots.6),
+        },
         slot_kind,
         wrapped_key: B64.encode(wrapped_key),
         nonce: B64.encode(nonce),

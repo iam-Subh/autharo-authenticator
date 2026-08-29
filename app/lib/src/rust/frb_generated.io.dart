@@ -144,6 +144,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   Uint8List? dco_decode_opt_list_prim_u_8_strict(dynamic raw);
 
   @protected
+  PasskeyAuthenticationStartView dco_decode_passkey_authentication_start_view(
+    dynamic raw,
+  );
+
+  @protected
   PasskeyRegistrationStartView dco_decode_passkey_registration_start_view(
     dynamic raw,
   );
@@ -330,6 +335,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   Uint8List? sse_decode_opt_list_prim_u_8_strict(SseDeserializer deserializer);
+
+  @protected
+  PasskeyAuthenticationStartView sse_decode_passkey_authentication_start_view(
+    SseDeserializer deserializer,
+  );
 
   @protected
   PasskeyRegistrationStartView sse_decode_passkey_registration_start_view(
@@ -579,6 +589,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_opt_list_prim_u_8_strict(
     Uint8List? self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_passkey_authentication_start_view(
+    PasskeyAuthenticationStartView self,
     SseSerializer serializer,
   );
 

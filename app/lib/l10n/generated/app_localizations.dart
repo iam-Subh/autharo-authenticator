@@ -3878,6 +3878,18 @@ abstract class AppLocalizations {
   /// **'The passkey could not be added: {error}'**
   String passkeyAddFailed(String error);
 
+  /// No description provided for @signInWithPasskey.
+  ///
+  /// In en, this message translates to:
+  /// **'Sign in with passkey'**
+  String get signInWithPasskey;
+
+  /// No description provided for @orUseAccountPassword.
+  ///
+  /// In en, this message translates to:
+  /// **'or use your account password'**
+  String get orUseAccountPassword;
+
   /// No description provided for @errorUnknown.
   ///
   /// In en, this message translates to:
