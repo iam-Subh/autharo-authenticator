@@ -13,7 +13,7 @@ sequence in section 18: each stage is finished before the next starts.
 | S4 — Backend | API, PostgreSQL schema, key slots, quotas, enumeration resistance | **Done for the Android target.** Account, session, device approval, activity, capability, and destructive-operation APIs are implemented |
 | S5 — Sync | Sync engine, outbox, HLC, conflict resolution, prune watermark, FCM change signals | **Done in code for Android.** The Android Firebase file is configured. Live FCM delivery still needs server credentials on Render |
 | S6 — Other platforms | Remaining platforms, screen capture, tray and menu bar | **Excluded from the current Android security scope** |
-| S7 — Passkeys | Android Credential Manager bridge, WebAuthn verification, PRF slot, fallback | **Partial.** Hosting and Digital Asset Links are live. Registration is implemented. Render still needs the Android origin, and the new-device passkey sign-in interface is not complete |
+| S7 — Passkeys | Android Credential Manager bridge, WebAuthn verification, PRF slot, fallback | **Partial.** Hosting, Digital Asset Links, Android origin validation, and registration are active. The new-device passkey sign-in interface is not complete |
 
 ## Official synchronization service
 
@@ -786,9 +786,8 @@ generation and rotation steps.
   verifies WebAuthn challenges, origin, relying-party ID, signatures,
   counters, expiry, and replay. The Rust client wraps the vault key with the
   PRF result. Password or recovery remains available when a provider omits the
-  PRF result. The registration UI stays disabled until Render allows the
-  release-signed Android origin. The new-device passkey sign-in UI is not yet
-  connected to the authentication endpoints.
+  PRF result. Passkey registration is enabled. The new-device passkey sign-in
+  UI is not yet connected to the authentication endpoints.
 
 - **Windows, macOS, and Linux secure storage are outside this scope.** This
   work does not change their secret handling.

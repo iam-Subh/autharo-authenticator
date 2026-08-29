@@ -11,7 +11,7 @@ void main() {
     expect(uri.hasPort, isFalse);
   });
 
-  test('passkeys stay hidden until the web association is deployed', () {
-    expect(autharoPasskeysEnabled, isFalse);
+  test('passkey registration is enabled for the production association', () {
+    expect(autharoPasskeysEnabled, isTrue);
   });
 }

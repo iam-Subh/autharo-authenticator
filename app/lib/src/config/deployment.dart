@@ -4,5 +4,5 @@
 /// recovery, and synchronization screens from selecting different servers.
 const autharoSyncServerUrl = 'https://autharo-api.onrender.com';
 
-/// Enable only after Digital Asset Links is live and Render has WebAuthn set.
-const autharoPasskeysEnabled = false;
+/// The production Digital Asset Links and WebAuthn origins are active.
+const autharoPasskeysEnabled = true;
