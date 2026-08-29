@@ -31,6 +31,10 @@ app/rust_builder/cargokit/build_tool/.dart_tool/
 app/*.iml
 sqlite3mc-sys/target/
 server/target/
+# Any alternate cargo target directory, not just the default name. One was
+# created by hand to work around a locked binary and 970 build artefacts went
+# straight into a commit.
+**/target-*/
 
 # Import fixtures fetched by scripts/fetch_import_fixtures.sh. Not committed:
 # they come from a GPL project and are downloadable on demand.
