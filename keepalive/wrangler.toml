@@ -10,4 +10,4 @@ crons = ["*/10 * * * *"]
 [vars]
 # The Render origin rather than api.authfactor.app: the ping must reach the
 # service even while the custom domain is being set up or its DNS is broken.
-HEALTH_URL = "https://autharo-api.onrender.com/v1/health"
+HEALTH_URL = "https://authfactor-api.onrender.com/v1/health"
