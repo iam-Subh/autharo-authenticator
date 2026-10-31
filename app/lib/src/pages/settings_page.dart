@@ -616,7 +616,7 @@ class _SettingsPageState extends State<SettingsPage> {
                       ),
                     ),
             ),
-            if (autharoPasskeysEnabled)
+            if (passkeysEnabled)
               ListTile(
                 leading: const Icon(Icons.key_outlined),
                 title: Text(l10n.addPasskey),

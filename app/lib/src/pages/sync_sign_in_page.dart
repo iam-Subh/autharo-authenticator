@@ -112,7 +112,7 @@ class _SyncSignInPageState extends State<SyncSignInPage> {
     });
 
     try {
-      await rust.setServerUrl(url: autharoSyncServerUrl);
+      await rust.setServerUrl(url: syncServerUrl);
       final device = await DeviceIdentityService.current();
       if (_isRegister) {
         final proof = await IdentityAuthService.instance.freshProof();
@@ -173,7 +173,7 @@ class _SyncSignInPageState extends State<SyncSignInPage> {
       _problem = null;
     });
     try {
-      await rust.setServerUrl(url: autharoSyncServerUrl);
+      await rust.setServerUrl(url: syncServerUrl);
       final device = await DeviceIdentityService.current();
       final start = await rust.startPasskeyAuthentication(
         email: _email.text.trim(),
@@ -290,12 +290,12 @@ class _SyncSignInPageState extends State<SyncSignInPage> {
   }
 
   Future<void> _recoverPassword() async {
-    await rust.setServerUrl(url: autharoSyncServerUrl);
+    await rust.setServerUrl(url: syncServerUrl);
     if (!mounted) return;
     final recovered = await Navigator.of(context).push<bool>(
       MaterialPageRoute(
         builder: (_) => RecoverPasswordPage(
-          serverUrl: autharoSyncServerUrl,
+          serverUrl: syncServerUrl,
           initialEmail: _email.text.trim(),
         ),
       ),
@@ -379,7 +379,7 @@ class _SyncSignInPageState extends State<SyncSignInPage> {
             ),
           ],
         ],
-        if (!_isRegister && autharoPasskeysEnabled) ...[
+        if (!_isRegister && passkeysEnabled) ...[
           const SizedBox(height: 16),
           FilledButton.tonalIcon(
             onPressed: _busy ? null : _signInWithPasskey,

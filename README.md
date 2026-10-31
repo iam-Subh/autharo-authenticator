@@ -17,7 +17,8 @@ sequence in section 18: each stage is finished before the next starts.
 
 ## Official synchronization service
 
-The Android application uses `https://autharo-api.onrender.com` automatically.
+The Android application uses `https://api.authfactor.app` automatically. The
+API runs on Render behind that hostname, and `keepalive/` keeps it awake.
 The account and recovery screens do not ask a user to select a server. This
 build does not expose self-hosted server selection.
 
