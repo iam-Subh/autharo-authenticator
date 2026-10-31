@@ -787,10 +787,10 @@ mod tests {
 
     #[test]
     fn the_android_application_origin_can_be_allowed_exactly() {
-        let web_origin = Url::parse("https://autharo-auth-prod.web.app").unwrap();
+        let web_origin = Url::parse("https://authfactor.app").unwrap();
         let android_origin =
             Url::parse("android:apk-key-hash:cLWpxJnUHnzH5oiVwvyeZGudE1s9Cx4jHIHPdX8vSUg").unwrap();
-        let webauthn = WebauthnBuilder::new("autharo-auth-prod.web.app", &web_origin)
+        let webauthn = WebauthnBuilder::new("authfactor.app", &web_origin)
             .unwrap()
             .append_allowed_origin(&android_origin)
             .build()

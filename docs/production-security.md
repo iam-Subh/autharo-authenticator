@@ -70,12 +70,12 @@ WEBAUTHN_RP_NAME=AuthCore
 WEBAUTHN_ANDROID_ORIGINS=android:apk-key-hash:BASE64URL_RELEASE_SHA256
 ```
 
-The current Autharo Firebase Hosting identity uses:
+The current AuthFactor identity, served by Firebase Hosting on authfactor.app, uses:
 
 ```text
-WEBAUTHN_RP_ID=autharo-auth-prod.web.app
-WEBAUTHN_RP_ORIGIN=https://autharo-auth-prod.web.app
-WEBAUTHN_RP_NAME=Autharo Authenticator
+WEBAUTHN_RP_ID=authfactor.app
+WEBAUTHN_RP_ORIGIN=https://authfactor.app
+WEBAUTHN_RP_NAME=AuthFactor
 WEBAUTHN_ANDROID_ORIGINS=android:apk-key-hash:cLWpxJnUHnzH5oiVwvyeZGudE1s9Cx4jHIHPdX8vSUg
 ```
 

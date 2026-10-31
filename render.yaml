@@ -16,9 +16,9 @@ services:
       - key: FIREBASE_AUTH_PROJECT_ID
         value: autharo-auth-prod
       - key: WEBAUTHN_RP_ID
-        value: autharo-auth-prod.web.app
+        value: authfactor.app
       - key: WEBAUTHN_RP_ORIGIN
-        value: https://autharo-auth-prod.web.app
+        value: https://authfactor.app
       - key: WEBAUTHN_RP_NAME
         value: AuthFactor
       - key: WEBAUTHN_ANDROID_ORIGINS

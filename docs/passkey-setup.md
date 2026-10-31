@@ -39,7 +39,7 @@ server variables, Digital Asset Links steps, and fallback requirements.
 The Android manifest includes the production Firebase Hosting association:
 
 ```text
-https://autharo-auth-prod.web.app/.well-known/assetlinks.json
+https://authfactor.app/.well-known/assetlinks.json
 ```
 
 Firebase Hosting returns this file with HTTP status 200 and the
