@@ -1,0 +1,13 @@
+name = "authfactor-keepalive"
+main = "src/index.js"
+compatibility_date = "2026-10-01"
+
+# Render's free plan stops the service after 15 minutes without a request.
+# Every 10 minutes leaves a margin for a late or failed run.
+[triggers]
+crons = ["*/10 * * * *"]
+
+[vars]
+# The Render origin rather than api.authfactor.app: the ping must reach the
+# service even while the custom domain is being set up or its DNS is broken.
+HEALTH_URL = "https://autharo-api.onrender.com/v1/health"

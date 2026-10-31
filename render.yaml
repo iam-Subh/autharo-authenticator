@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: autharo-api
+    name: authfactor-api
     runtime: docker
     plan: free
     region: frankfurt
