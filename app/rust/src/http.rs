@@ -32,12 +32,11 @@ use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::client::WebPkiServerVerifier;
-use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+use rustls::pki_types::{CertificateDer, ServerName, TrustAnchor, UnixTime};
 use rustls::{DigitallySignedStruct, RootCertStore, SignatureScheme};
 use sha2::{Digest, Sha256};
 use std::io::Read;
 use std::sync::Arc;
-use x509_parser::parse_x509_certificate;
 
 const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 
@@ -137,14 +136,27 @@ impl HttpClient for ReqwestClient {
     }
 }
 
+/// Accepts the production host only through a chain that ends at a pinned root.
+///
+/// The pins name root certificate authorities, not the server's own key. The
+/// API sits behind Render, which issues and renews the server certificate
+/// itself, from Let's Encrypt or Google Trust Services, with a key the project
+/// never holds. A leaf pin would break at the first renewal and could not be
+/// given a backup. A root key lasts for decades, so pinning the roots those two
+/// authorities issue from still refuses a certificate from any other authority
+/// while surviving every renewal.
+///
+/// The restriction is a smaller trust store, not a check after the fact: the
+/// chain is built and verified against the pinned roots alone, so a chain that
+/// reaches some other root fails the ordinary path validation.
 #[derive(Debug)]
-struct SpkiPinVerifier {
+struct PinnedRootVerifier {
     normal: Arc<WebPkiServerVerifier>,
+    pinned: Arc<WebPkiServerVerifier>,
     hostname: String,
-    pins: [[u8; 32]; 2],
 }
 
-impl ServerCertVerifier for SpkiPinVerifier {
+impl ServerCertVerifier for PinnedRootVerifier {
     fn verify_server_cert(
         &self,
         end_entity: &CertificateDer<'_>,
@@ -153,28 +165,22 @@ impl ServerCertVerifier for SpkiPinVerifier {
         ocsp_response: &[u8],
         now: UnixTime,
     ) -> Result<ServerCertVerified, rustls::Error> {
-        let verified = self.normal.verify_server_cert(
-            end_entity,
-            intermediates,
-            server_name,
-            ocsp_response,
-            now,
-        )?;
-        let requested = match server_name {
-            ServerName::DnsName(name) => name.as_ref(),
-            _ => return Ok(verified),
+        let production = match server_name {
+            ServerName::DnsName(name) => name.as_ref().eq_ignore_ascii_case(&self.hostname),
+            _ => false,
         };
-        if !requested.eq_ignore_ascii_case(&self.hostname) {
-            return Ok(verified);
-        }
-        let digest = spki_digest(end_entity)?;
-        if self.pins.contains(&digest) {
-            Ok(verified)
-        } else {
-            Err(rustls::Error::General(
-                "the server certificate public key does not match a trusted application pin".into(),
-            ))
-        }
+        let verifier = if production { &self.pinned } else { &self.normal };
+        verifier
+            .verify_server_cert(end_entity, intermediates, server_name, ocsp_response, now)
+            .map_err(|error| {
+                if production {
+                    rustls::Error::General(format!(
+                        "the server certificate does not chain to a pinned root: {error}"
+                    ))
+                } else {
+                    error
+                }
+            })
     }
 
     fn verify_tls12_signature(
@@ -202,13 +208,42 @@ impl ServerCertVerifier for SpkiPinVerifier {
     }
 }
 
-fn spki_digest(certificate: &CertificateDer<'_>) -> Result<[u8; 32], rustls::Error> {
-    let (_, certificate) = parse_x509_certificate(certificate.as_ref())
-        .map_err(|_| rustls::Error::General("the server certificate is not valid X.509".into()))?;
-    Ok(Sha256::digest(certificate.tbs_certificate.subject_pki.raw).into())
+/// The pin of a trust anchor: SHA-256 over its whole DER
+/// `SubjectPublicKeyInfo`, which is what the OpenSSL command in
+/// docs/production-security.md prints for the root certificate.
+///
+/// A `TrustAnchor` stores the *contents* of the `SubjectPublicKeyInfo`
+/// SEQUENCE without its tag and length, so they are put back before hashing.
+/// Hashing the bare contents would produce a value no published pin matches.
+fn anchor_digest(anchor: &TrustAnchor<'_>) -> [u8; 32] {
+    let contents = anchor.subject_public_key_info.as_ref();
+    let mut sequence = vec![0x30];
+    match contents.len() {
+        length @ 0..=0x7f => sequence.push(length as u8),
+        length @ 0x80..=0xff => sequence.extend([0x81, length as u8]),
+        length => sequence.extend([0x82, (length >> 8) as u8, length as u8]),
+    }
+    sequence.extend_from_slice(contents);
+    Sha256::digest(&sequence).into()
 }
 
-fn production_verifier() -> Result<Option<SpkiPinVerifier>, String> {
+/// The anchors among `anchors` that the pins name, failing if any pin names none.
+///
+/// A pin that matches nothing would be silently dropped otherwise, and the
+/// application would ship trusting fewer authorities than its build declared.
+fn pinned_roots(anchors: &[TrustAnchor<'static>], pins: &[[u8; 32]]) -> Result<RootCertStore, String> {
+    let mut roots = RootCertStore::empty();
+    for pin in pins {
+        let anchor = anchors
+            .iter()
+            .find(|anchor| anchor_digest(anchor) == *pin)
+            .ok_or_else(|| format!("the pin {} names no bundled root", B64.encode(pin)))?;
+        roots.roots.push(anchor.clone());
+    }
+    Ok(roots)
+}
+
+fn production_verifier() -> Result<Option<PinnedRootVerifier>, String> {
     let hostname = env!("AUTHCORE_PINNED_HOST").trim();
     if hostname.is_empty() {
         return Ok(None);
@@ -217,18 +252,18 @@ fn production_verifier() -> Result<Option<SpkiPinVerifier>, String> {
         .split(',')
         .map(|value| decode_pin(value.trim()))
         .collect::<Result<Vec<_>, _>>()?;
-    let pins: [[u8; 32]; 2] = pins
-        .try_into()
-        .map_err(|_| "exactly two SPKI pins are required".to_string())?;
-    let mut roots = RootCertStore::empty();
-    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    let normal = WebPkiServerVerifier::builder(Arc::new(roots))
-        .build()
-        .map_err(|error| format!("the normal TLS verifier could not be created: {error}"))?;
-    Ok(Some(SpkiPinVerifier {
-        normal,
+    let anchors = webpki_roots::TLS_SERVER_ROOTS;
+    let mut all = RootCertStore::empty();
+    all.extend(anchors.iter().cloned());
+    let build = |roots: RootCertStore| {
+        WebPkiServerVerifier::builder(Arc::new(roots))
+            .build()
+            .map_err(|error| format!("a TLS verifier could not be created: {error}"))
+    };
+    Ok(Some(PinnedRootVerifier {
+        normal: build(all)?,
+        pinned: build(pinned_roots(anchors, &pins)?)?,
         hostname: hostname.to_ascii_lowercase(),
-        pins,
     }))
 }
 
@@ -261,13 +296,22 @@ fn enforce_production_host(url: &str) -> Result<(), String> {
 mod pin_tests {
     use std::sync::Arc;
 
+    use base64::Engine;
     use rcgen::{BasicConstraints, CertificateParams, IsCa, Issuer, KeyPair};
     use rustls::client::danger::ServerCertVerifier;
     use rustls::client::WebPkiServerVerifier;
-    use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+    use rustls::pki_types::{CertificateDer, ServerName, TrustAnchor, UnixTime};
     use rustls::RootCertStore;
+    use sha2::{Digest, Sha256};
+    use x509_parser::parse_x509_certificate;
 
-    use super::{decode_pin, enforce_production_host, spki_digest, SpkiPinVerifier};
+    use super::{anchor_digest, decode_pin, enforce_production_host, pinned_roots, PinnedRootVerifier, B64};
+
+    /// The pin as the documented OpenSSL command computes it from a certificate.
+    fn spki_digest(certificate: &CertificateDer<'_>) -> [u8; 32] {
+        let (_, certificate) = parse_x509_certificate(certificate.as_ref()).unwrap();
+        Sha256::digest(certificate.tbs_certificate.subject_pki.raw).into()
+    }
 
     #[test]
     fn a_pin_must_be_one_sha256_digest() {
@@ -284,69 +328,132 @@ mod pin_tests {
         }
     }
 
+    /// The anchor form drops the SEQUENCE header, so this is the test that
+    /// catches a pin computed from the wrong bytes.
     #[test]
-    fn current_and_backup_pins_are_accepted() {
-        let certificates = Certificates::new();
-        let verifier = certificates.verifier([
-            spki_digest(&certificates.current).unwrap(),
-            spki_digest(&certificates.backup).unwrap(),
-        ]);
+    fn an_anchor_digest_equals_the_certificate_pin() {
+        let authority = Authority::new();
+        assert_eq!(anchor_digest(&authority.anchor()), spki_digest(&authority.root));
+    }
 
-        assert!(certificates
-            .verify(&verifier, &certificates.current, "sync.example.com")
-            .is_ok());
-        assert!(certificates
-            .verify(&verifier, &certificates.backup, "sync.example.com")
-            .is_ok());
+    /// ISRG Root X1's RSA-4096 key needs the two-byte DER length form, which a
+    /// generated test key does not. The value is the pin Let's Encrypt
+    /// publishes, as the documented OpenSSL command prints it.
+    #[test]
+    fn a_long_rsa_root_digest_matches_its_published_pin() {
+        let isrg_root_x1 = decode_pin("C5+lpZ7tcVwmwQIMcRtPbsQtWLABXhQzejna0wHFr8M=").unwrap();
+        assert!(webpki_roots::TLS_SERVER_ROOTS
+            .iter()
+            .any(|anchor| anchor_digest(anchor) == isrg_root_x1));
     }
 
     #[test]
-    fn an_unknown_pin_is_rejected() {
-        let certificates = Certificates::new();
-        let verifier = certificates.verifier([[41; 32], [42; 32]]);
+    fn a_chain_to_a_pinned_root_is_accepted() {
+        let current = Authority::new();
+        let backup = Authority::new();
+        let verifier = verifier(&[&current, &backup], &[&current, &backup]);
 
-        assert!(certificates
-            .verify(&verifier, &certificates.current, "sync.example.com")
-            .is_err());
+        assert!(verify(&verifier, &current.leaf, "sync.example.com").is_ok());
+        assert!(verify(&verifier, &backup.leaf, "sync.example.com").is_ok());
+    }
+
+    /// The case pinning exists for: a certificate any trusted authority would
+    /// vouch for, issued by one the application did not pin.
+    #[test]
+    fn a_chain_to_a_trusted_but_unpinned_root_is_rejected() {
+        let pinned = Authority::new();
+        let other = Authority::new();
+        let verifier = verifier(&[&pinned, &other], &[&pinned]);
+
+        assert!(verify(&verifier, &other.leaf, "sync.example.com").is_err());
+        assert!(verify(&verifier, &other.leaf, "elsewhere.example.com").is_ok());
     }
 
     #[test]
-    fn normal_tls_checks_run_before_the_pin_check() {
-        let certificates = Certificates::new();
-        let pin = spki_digest(&certificates.current).unwrap();
-        let verifier = certificates.verifier([pin, [42; 32]]);
+    fn normal_tls_checks_still_apply_to_the_pinned_host() {
+        let authority = Authority::new();
+        let verifier = verifier(&[&authority], &[&authority]);
 
-        assert!(certificates
-            .verify(&verifier, &certificates.current, "wrong.example.com")
-            .is_err());
-        assert!(certificates
-            .verify(&verifier, &certificates.expired, "sync.example.com")
-            .is_err());
-
-        let untrusted = Certificates::new();
-        assert!(certificates
-            .verify(&verifier, &untrusted.current, "sync.example.com")
-            .is_err());
+        assert!(verify(&verifier, &authority.leaf, "wrong.example.com").is_err());
+        assert!(verify(&verifier, &authority.expired, "sync.example.com").is_err());
     }
 
-    struct Certificates {
+    #[test]
+    fn a_pin_that_names_no_root_is_refused() {
+        let authority = Authority::new();
+        let anchors = [authority.anchor()];
+
+        assert!(pinned_roots(&anchors, &[spki_digest(&authority.root)]).is_ok());
+        assert!(pinned_roots(&anchors, &[[42; 32]]).is_err());
+    }
+
+    /// The production pins name real roots, so they must still be in the
+    /// bundled store after a `webpki-roots` upgrade.
+    #[test]
+    fn the_production_pins_name_bundled_roots() {
+        let pins = env!("AUTHCORE_SPKI_PINS");
+        if pins.trim().is_empty() {
+            return;
+        }
+        let pins = pins
+            .split(',')
+            .map(|value| decode_pin(value.trim()).unwrap())
+            .collect::<Vec<_>>();
+        if let Err(error) = pinned_roots(webpki_roots::TLS_SERVER_ROOTS, &pins) {
+            panic!("{error}; bundled pins: {}", bundled_pins());
+        }
+    }
+
+    /// Reaches the real server through the pinned verifier, so it needs the
+    /// network and the production environment from scripts/build_release.ps1:
+    /// `cargo test --lib -- --ignored live`.
+    #[test]
+    #[ignore]
+    fn live_production_server_passes_the_pinned_verifier() {
+        use authcore::transport::{HttpClient, HttpRequest, Method};
+        let host = env!("AUTHCORE_PINNED_HOST");
+        assert!(!host.is_empty(), "set the production environment first");
+        let response = super::ReqwestClient::new()
+            .send(HttpRequest {
+                method: Method::Get,
+                url: format!("https://{host}/v1/health"),
+                bearer: None,
+                json: None,
+            })
+            .unwrap();
+        assert_eq!(response.status, 200);
+    }
+
+    fn bundled_pins() -> String {
+        webpki_roots::TLS_SERVER_ROOTS
+            .iter()
+            .map(|anchor| B64.encode(anchor_digest(anchor)))
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+
+    struct Authority {
         root: CertificateDer<'static>,
-        current: CertificateDer<'static>,
-        backup: CertificateDer<'static>,
+        leaf: CertificateDer<'static>,
         expired: CertificateDer<'static>,
     }
 
-    impl Certificates {
+    impl Authority {
         fn new() -> Self {
+            let ca_key = KeyPair::generate().unwrap();
             let mut ca_params = CertificateParams::new(Vec::<String>::new()).unwrap();
             ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-            let ca_key = KeyPair::generate().unwrap();
             let ca = ca_params.self_signed(&ca_key).unwrap();
             let issuer = Issuer::new(ca_params, ca_key);
 
+            // Both names on every leaf, so one certificate shows the pinned
+            // host refused and an unpinned host accepted.
             let issue = |expired: bool| {
-                let mut params =
-                    CertificateParams::new(vec!["sync.example.com".to_string()]).unwrap();
+                let mut params = CertificateParams::new(vec![
+                    "sync.example.com".to_string(),
+                    "elsewhere.example.com".to_string(),
+                ])
+                .unwrap();
                 if expired {
                     params.not_before = rcgen::date_time_ymd(2020, 1, 1);
                     params.not_after = rcgen::date_time_ymd(2020, 1, 2);
@@ -357,41 +464,49 @@ mod pin_tests {
 
             Self {
                 root: CertificateDer::from(ca.der().to_vec()),
-                current: issue(false),
-                backup: issue(false),
+                leaf: issue(false),
                 expired: issue(true),
             }
         }
 
-        fn verifier(&self, pins: [[u8; 32]; 2]) -> SpkiPinVerifier {
-            let mut roots = RootCertStore::empty();
-            roots.add(self.root.clone()).unwrap();
-            let normal = WebPkiServerVerifier::builder(Arc::new(roots))
-                .build()
-                .unwrap();
-            SpkiPinVerifier {
-                normal,
-                hostname: "sync.example.com".to_string(),
-                pins,
-            }
+        fn anchor(&self) -> TrustAnchor<'static> {
+            let mut store = RootCertStore::empty();
+            store.add(self.root.clone()).unwrap();
+            store.roots.remove(0)
         }
+    }
 
-        fn verify(
-            &self,
-            verifier: &SpkiPinVerifier,
-            certificate: &CertificateDer<'static>,
-            hostname: &'static str,
-        ) -> Result<(), rustls::Error> {
-            verifier
-                .verify_server_cert(
-                    certificate,
-                    &[],
-                    &ServerName::try_from(hostname).unwrap(),
-                    &[],
-                    UnixTime::now(),
-                )
-                .map(|_| ())
+    /// Trusts every authority in `trusted`, and pins `pinned` for sync.example.com.
+    fn verifier(trusted: &[&Authority], pinned: &[&Authority]) -> PinnedRootVerifier {
+        let anchors = trusted.iter().map(|authority| authority.anchor()).collect::<Vec<_>>();
+        let pins = pinned
+            .iter()
+            .map(|authority| spki_digest(&authority.root))
+            .collect::<Vec<_>>();
+        let mut all = RootCertStore::empty();
+        all.roots.extend(anchors.iter().cloned());
+        let build = |roots| WebPkiServerVerifier::builder(Arc::new(roots)).build().unwrap();
+        PinnedRootVerifier {
+            normal: build(all),
+            pinned: build(pinned_roots(&anchors, &pins).unwrap()),
+            hostname: "sync.example.com".to_string(),
         }
+    }
+
+    fn verify(
+        verifier: &PinnedRootVerifier,
+        certificate: &CertificateDer<'static>,
+        hostname: &'static str,
+    ) -> Result<(), rustls::Error> {
+        verifier
+            .verify_server_cert(
+                certificate,
+                &[],
+                &ServerName::try_from(hostname).unwrap(),
+                &[],
+                UnixTime::now(),
+            )
+            .map(|_| ())
     }
 }
 

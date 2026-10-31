@@ -84,7 +84,7 @@ fn configure_production_security() {
     let configured = host_set && pins_set;
     if release_android && !configured {
         panic!(
-            "Android release builds require AUTHCORE_PINNED_HOST and exactly two comma-separated AUTHCORE_SPKI_PINS values"
+            "Android release builds require AUTHCORE_PINNED_HOST and AUTHCORE_SPKI_PINS; run scripts/build_release.ps1"
         );
     }
     if cargo_release_android && flutter_mode == "profile" && !configured {
@@ -96,9 +96,12 @@ fn configure_production_security() {
         if host.contains("://") || host.contains('/') || host.contains(':') {
             panic!("AUTHCORE_PINNED_HOST must be one DNS hostname without a scheme, path, or port");
         }
+        // The pins name root authorities (see src/http.rs). One root alone
+        // would leave no way to move the server to another without first
+        // shipping an update, so at least two distinct roots are required.
         let values = pins.split(',').map(str::trim).collect::<Vec<_>>();
-        if values.len() != 2 || values.iter().any(|value| value.is_empty()) {
-            panic!("AUTHCORE_SPKI_PINS must contain exactly two comma-separated SHA-256 pins");
+        if values.len() < 2 || values.iter().any(|value| value.is_empty()) {
+            panic!("AUTHCORE_SPKI_PINS must contain at least two comma-separated SHA-256 pins");
         }
         let decoded = values
             .iter()
@@ -107,8 +110,11 @@ fn configure_production_security() {
         if decoded.iter().any(|value| value.len() != 32) {
             panic!("each AUTHCORE_SPKI_PINS value must be one base64-encoded SHA-256 digest");
         }
-        if decoded[0] == decoded[1] {
-            panic!("AUTHCORE_SPKI_PINS must contain different current and backup pins");
+        let mut distinct = decoded.clone();
+        distinct.sort();
+        distinct.dedup();
+        if distinct.len() != decoded.len() {
+            panic!("AUTHCORE_SPKI_PINS must not repeat a pin");
         }
     }
 
