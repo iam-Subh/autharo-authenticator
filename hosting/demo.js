@@ -95,7 +95,7 @@ document.querySelector("#verify-form").addEventListener("submit", async (event) 
   try {
     const valid = await verifyCode(code);
     if (valid) {
-      setResult("Code verified. Autharo generated the correct code.", "success");
+      setResult("Code verified. AuthFactor generated the correct code.", "success");
       input.select();
     } else {
       setResult("This code is not valid. Wait for the next code and try again.", "error");

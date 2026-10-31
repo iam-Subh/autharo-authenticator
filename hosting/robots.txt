@@ -2,4 +2,4 @@ User-agent: *
 Allow: /.well-known/
 Allow: /
 
-Sitemap: https://autharo-auth-prod.web.app/sitemap.xml
+Sitemap: https://authfactor.app/sitemap.xml
